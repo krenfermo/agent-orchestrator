@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	_ "modernc.org/sqlite" // the probe below opens the database directly
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/backup"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
@@ -225,6 +226,12 @@ func holdDataDirOffline(cfg config.Config, doing string) (release func(), err er
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock data dir: %w", err)
+	}
+	// A restore interrupted mid-swap may leave a mix of two states: a write now
+	// would be lost when recover rolls back, or would break the rollback itself.
+	if err := backup.CheckStartup(cfg.DataDir); err != nil {
+		_ = lock.Release()
+		return nil, usageError{err}
 	}
 	// A fresh data dir (the import bootstrap) has no database for anyone to hold.
 	if _, statErr := os.Stat(filepath.Join(cfg.DataDir, "ao.db")); statErr == nil {

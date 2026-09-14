@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/daemonlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 )
 
@@ -108,10 +107,7 @@ func Create(ctx context.Context, opts CreateOptions) (res *CreateResult, err err
 		appendOp(root, rec)
 	}()
 
-	if err := os.MkdirAll(filepath.Join(root, locksDir), 0o700); err != nil {
-		return nil, failedf(CodeIO, err, "create lock dir")
-	}
-	lock, err := daemonlock.Acquire(lockPath(root, id))
+	lock, err := lockBackup(root, id)
 	if err != nil {
 		return nil, failedf(CodeIO, err, "lock backup %s", id)
 	}
@@ -125,7 +121,6 @@ func Create(ctx context.Context, opts CreateOptions) (res *CreateResult, err err
 		if !promoted {
 			_ = os.RemoveAll(staging)
 		}
-		_ = os.Remove(lockPath(root, id))
 		_ = lock.Release()
 	}()
 	fail := func(code Code, cause error, format string, args ...any) error {

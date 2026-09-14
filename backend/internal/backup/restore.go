@@ -134,7 +134,9 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		appendOp(root, rec)
 	}()
 
-	// ---- Preflight: nothing below writes to the data dir. ----
+	// ---- Preflight: nothing below replaces anything in the data dir. (The SQLite
+	// probe may checkpoint committed WAL frames into ao.db -- the same logical
+	// state -- and leave an empty -shm; daemon.lock is created if absent.) ----
 	if opts.CheckDaemon == nil {
 		return rep, refusedf(CodeInvalidArgument, "restore requires a daemon check; refusing to assume AO is stopped")
 	}
@@ -172,22 +174,19 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	if err != nil {
 		return rep, err
 	}
-	// A backup in the root is locked for the whole restore so retention cannot
-	// delete it between verification and copy.
-	if filepath.Dir(source) == root && ValidBackupID(filepath.Base(source)) {
-		if err := os.MkdirAll(filepath.Join(root, locksDir), 0o700); err != nil {
-			return rep, failedf(CodeIO, err, "create lock dir")
-		}
-		srcLock, err := daemonlock.Acquire(lockPath(root, filepath.Base(source)))
-		if errors.Is(err, daemonlock.ErrHeld) {
+	// The backup is locked, in its own root, for the whole restore so retention
+	// there cannot delete it between verification and copy.
+	if ValidBackupID(filepath.Base(source)) {
+		srcRoot := filepath.Dir(source)
+		srcLock, err := lockBackup(srcRoot, filepath.Base(source))
+		switch {
+		case errors.Is(err, daemonlock.ErrHeld):
 			return rep, refusedf(CodeBackupInUse, "backup %s is in use by another operation", filepath.Base(source))
-		} else if err != nil {
-			return rep, failedf(CodeIO, err, "lock backup")
+		case err != nil:
+			rep.warn(CodeIO, "could not lock the backup in %s (%v); retention there is not blocked during this restore", srcRoot, err)
+		default:
+			defer func() { _ = srcLock.Release() }()
 		}
-		defer func() {
-			_ = os.Remove(lockPath(root, filepath.Base(source)))
-			_ = srcLock.Release()
-		}()
 	}
 
 	progress("verifying backup")
@@ -260,6 +259,16 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	}
 	rep.IdentityAction = action
 
+	// Without a database there can be no pre-restore backup. Refuse when the
+	// restore would still replace something that exists only in this data dir.
+	if _, ok, _ := present(dbPath); !ok {
+		if unbacked := unbackedEntries(dataDir, promoteIdentity, destID, m.Source.InstallationID); len(unbacked) > 0 {
+			return rep, refusedf(CodeNoRollbackPossible,
+				"the data dir has no database, so no pre-restore backup can be taken, yet the restore would replace %s; move it aside or restore into an empty data dir",
+				strings.Join(unbacked, " and "))
+		}
+	}
+
 	destKey, err := secretKeyFingerprint(dataDir)
 	if err != nil {
 		return rep, refusedf(CodeUnsafePath, "destination secret key: %v", err)
@@ -297,7 +306,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		return rep, refusedf(CodeInsufficientSpace, "%s has %d bytes free; the pre-restore backup needs about %d", root, free, currentBytes+freeSpaceMargin)
 	}
 	if ctx.Err() != nil {
-		return rep, &Error{Code: CodeCanceled, Class: ClassFailed, Msg: "restore canceled; nothing was changed", Err: ctx.Err()}
+		return rep, &Error{Code: CodeCanceled, Class: ClassFailed, Msg: "restore canceled; nothing in the data dir was replaced", Err: ctx.Err()}
 	}
 
 	// ---- Execution. ----
@@ -308,7 +317,23 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	rep.RestoreID = restoreID
 	workDir := filepath.Join(dataDir, restoreWorkPrefix+restoreID)
 	j := &journal{RestoreID: restoreID, SourceBackupID: m.BackupID, SourcePath: source, WorkDir: filepath.Base(workDir), Phase: PhasePreparing}
-	if err := writeJournal(dataDir, j); err != nil {
+	record := func() error {
+		if h := opts.hooks; h != nil && h.failJournal != nil {
+			if err := h.failJournal(j.Phase); err != nil {
+				return err
+			}
+		}
+		return writeJournal(dataDir, j)
+	}
+	dropJournal := func() error {
+		if h := opts.hooks; h != nil && h.failJournalRemove != nil {
+			if err := h.failJournalRemove(); err != nil {
+				return err
+			}
+		}
+		return removeJournal(dataDir)
+	}
+	if err := record(); err != nil {
 		return rep, failedf(CodeIO, err, "write restore journal")
 	}
 
@@ -322,7 +347,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		}
 		if ctx.Err() != nil {
 			if e, ok := AsError(cause); !ok || e.Class != ClassRefused {
-				return &Error{Code: CodeCanceled, Class: ClassFailed, Msg: "restore canceled before the swap; the data dir was not changed", Err: cause}
+				return &Error{Code: CodeCanceled, Class: ClassFailed, Msg: "restore canceled before the swap; nothing in the data dir was replaced", Err: cause}
 			}
 		}
 		return cause
@@ -338,7 +363,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 			Note: "before restoring " + m.BackupID, Tool: opts.Tool, Progress: opts.Progress, hooks: opts.hooks})
 		if cerr != nil {
 			return rep, abandon(&Error{Code: CodeRollbackBackupFailed, Class: ClassFailed,
-				Msg: "could not create the pre-restore backup; the data dir was not changed", Err: cerr})
+				Msg: "could not create the pre-restore backup; nothing in the data dir was replaced", Err: cerr})
 		}
 		vr, verr := Verify(ctx, cres.Path, VerifyOptions{Quick: true, hooks: opts.hooks})
 		if verr != nil || vr.Status != StatusValid {
@@ -347,7 +372,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 				reason = firstReason(vr.Reasons)
 			}
 			return rep, abandon(&Error{Code: CodeRollbackBackupFailed, Class: ClassFailed,
-				Msg: "the pre-restore backup did not verify (" + reason + "); the data dir was not changed", Err: verr})
+				Msg: "the pre-restore backup did not verify (" + reason + "); nothing in the data dir was replaced", Err: verr})
 		}
 		rep.RollbackBackupID, rep.RollbackBackupPath = cres.BackupID, cres.Path
 		j.RollbackBackupID, j.RollbackBackupPath = cres.BackupID, cres.Path
@@ -355,7 +380,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		rep.warn(CodeAssetMissing, "the data dir had no database, so there was nothing to back up before restoring")
 	}
 	j.Phase = PhaseRollbackReady
-	if err := writeJournal(dataDir, j); err != nil {
+	if err := record(); err != nil {
 		return rep, abandon(failedf(CodeIO, err, "write restore journal"))
 	}
 	if err := opts.hooks.phase(PhaseRollbackReady); err != nil {
@@ -365,10 +390,10 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	progress("staging")
 	promote, err := stageRestore(ctx, source, workDir, m, promoteIdentity, opts.hooks)
 	if err != nil {
-		return rep, abandon(failedf(CodeStagingFailed, err, "stage the backup; the data dir was not changed"))
+		return rep, abandon(failedf(CodeStagingFailed, err, "stage the backup; nothing in the data dir was replaced"))
 	}
 	j.Phase, j.Promote = PhaseStaged, promote
-	if err := writeJournal(dataDir, j); err != nil {
+	if err := record(); err != nil {
 		return rep, abandon(failedf(CodeIO, err, "write restore journal"))
 	}
 	if err := opts.hooks.phase(PhaseStaged); err != nil {
@@ -397,7 +422,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		j.PreDatabase = stampOf(fi)
 	}
 	j.Phase = PhaseSwapping
-	if err := writeJournal(dataDir, j); err != nil {
+	if err := record(); err != nil {
 		return rep, abandon(failedf(CodeIO, err, "write restore journal"))
 	}
 
@@ -440,7 +465,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		return rep, rollback(CodeSwapFailed, err)
 	}
 	j.Phase = PhaseSwapped
-	if err := writeJournal(dataDir, j); err != nil {
+	if err := record(); err != nil {
 		return rep, rollback(CodeSwapFailed, err)
 	}
 	if err := opts.hooks.phase(PhaseSwapped); err != nil {
@@ -452,8 +477,17 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	}
 
 	j.Phase = PhaseComplete
-	if err := writeJournal(dataDir, j); err != nil {
-		rep.warn(CodeIO, "the restore is complete but the journal could not record it (%v); run `ao backup recover` before starting AO", err)
+	if err := record(); err != nil {
+		// The journal still says "swapped", which recover would roll back.
+		// Removing it makes the verified restore the recorded state; if even
+		// that fails, roll back now so this report matches what recover would do.
+		if rerr := dropJournal(); rerr != nil {
+			return rep, rollback(CodeIO, fmt.Errorf("record the completed restore: %w; remove the journal: %w", err, rerr))
+		}
+		rep.warn(CodeIO, "the completed restore could not be recorded in the journal (%v), so the journal was removed instead", err)
+		if rerr := os.RemoveAll(workDir); rerr != nil {
+			rep.warn(CodeIO, "could not remove %s (%v); it is safe to delete by hand", workDir, rerr)
+		}
 		return rep, nil
 	}
 	if err := os.RemoveAll(workDir); err != nil {
@@ -482,6 +516,28 @@ func refuseUnresolvedJournal(dataDir string) error {
 		return refusedf(CodeRestoreInterrupted, "restore %s (phase %s) has not been resolved; run `ao backup recover` first", j.RestoreID, j.Phase)
 	}
 	return nil
+}
+
+// unbackedEntries names what a restore would replace in a data dir that has no
+// database (and so no pre-restore backup): a non-empty skill catalog, or an
+// installation identity the backup's would overwrite.
+func unbackedEntries(dataDir string, promoteIdentity bool, destID, backupID string) []string {
+	var out []string
+	catalogHasFiles := false
+	_ = filepath.WalkDir(filepath.Join(dataDir, filepath.FromSlash(SkillCatalogPath)), func(_ string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			catalogHasFiles = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if catalogHasFiles {
+		out = append(out, SkillCatalogPath)
+	}
+	if promoteIdentity && destID != "" && destID != backupID {
+		out = append(out, IdentityAsset)
+	}
+	return out
 }
 
 func readIdentity(dataDir string) (string, error) {
@@ -637,6 +693,12 @@ func rollbackEntries(dataDir, workDir string, promote, preExisting []string, h *
 	prev := filepath.Join(workDir, "previous")
 	staged := filepath.Join(workDir, "staged")
 	failed := filepath.Join(workDir, "failed")
+	for _, d := range []string{workDir, prev, staged, failed,
+		filepath.Join(prev, "skills"), filepath.Join(staged, "skills"), filepath.Join(failed, "skills")} {
+		if fi, err := os.Lstat(d); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink; refusing to move files through it", d)
+		}
+	}
 	if err := os.MkdirAll(filepath.Join(failed, "skills"), 0o700); err != nil {
 		return err
 	}

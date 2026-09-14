@@ -53,13 +53,14 @@ type PruneDecision struct {
 
 // PruneReport lists every decision.
 type PruneReport struct {
-	Root      string          `json:"root"`
-	DryRun    bool            `json:"dryRun"`
-	KeepLast  int             `json:"keepLast"`
-	MaxAge    string          `json:"maxAge,omitempty"`
-	Decisions []PruneDecision `json:"decisions"`
-	Deleted   int             `json:"deleted"`
-	Errors    int             `json:"errors"`
+	Root       string          `json:"root"`
+	DryRun     bool            `json:"dryRun"`
+	KeepLast   int             `json:"keepLast"`
+	MaxAge     string          `json:"maxAge,omitempty"`
+	Decisions  []PruneDecision `json:"decisions"`
+	Deleted    int             `json:"deleted"`
+	LocksSwept int             `json:"locksSwept"`
+	Errors     int             `json:"errors"`
 }
 
 // Prune applies conservative retention to the backup root.
@@ -195,8 +196,44 @@ func Prune(ctx context.Context, opts PruneOptions) (*PruneReport, error) {
 			}
 		}
 	}
+	rep.LocksSwept = sweepOrphanLocks(resolved)
 	appendOp(resolved, OpRecord{At: now(), Op: "prune", Result: fmt.Sprintf("deleted=%d errors=%d", rep.Deleted, rep.Errors)})
 	return rep, nil
+}
+
+// sweepOrphanLocks removes lock files whose backup no longer exists in any form
+// (finalized, staging or being deleted) and that nobody holds. Removing those is
+// safe: no future operation can create a backup with the same random id.
+func sweepOrphanLocks(root string) int {
+	entries, err := os.ReadDir(filepath.Join(root, locksDir))
+	if err != nil {
+		return 0
+	}
+	swept := 0
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".lock")
+		if !ok || !ValidBackupID(id) || !e.Type().IsRegular() {
+			continue
+		}
+		exists := false
+		for _, name := range []string{id, stagingPrefix + id, deletingPrefix + id} {
+			if _, err := os.Lstat(filepath.Join(root, name)); err == nil {
+				exists = true
+			}
+		}
+		if exists {
+			continue
+		}
+		lock, err := daemonlock.Acquire(lockPath(root, id))
+		if err != nil {
+			continue
+		}
+		if os.Remove(lockPath(root, id)) == nil {
+			swept++
+		}
+		_ = lock.Release()
+	}
+	return swept
 }
 
 func pruneOne(root string, dec *PruneDecision) error {

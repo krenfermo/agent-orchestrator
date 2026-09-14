@@ -43,6 +43,7 @@ const (
 	CodeUnsafePath              Code = "unsafe_path"
 	CodeInvalidBackupRoot       Code = "invalid_backup_root"
 	CodeInvalidArgument         Code = "invalid_argument"
+	CodeNoRollbackPossible      Code = "no_rollback_possible"
 
 	// Verification findings.
 

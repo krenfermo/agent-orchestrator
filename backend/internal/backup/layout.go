@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonlock"
 )
 
 const (
@@ -119,6 +121,17 @@ func resolveRoot(dataDir, root string) (string, error) {
 }
 
 func lockPath(root, id string) string { return filepath.Join(root, locksDir, id+".lock") }
+
+// lockBackup takes a backup's lock in its own root, creating the lock file if
+// needed. A holder never removes its lock file: unlinking it while another
+// process has it open would let two processes both "hold" the same backup.
+// Only prune removes lock files, and only for backups that no longer exist.
+func lockBackup(root, id string) (*daemonlock.Lock, error) {
+	if err := os.MkdirAll(filepath.Join(root, locksDir), 0o700); err != nil {
+		return nil, err
+	}
+	return daemonlock.Acquire(lockPath(root, id))
+}
 
 // OpRecord is one line of <root>/operations.jsonl: metadata only, never paths
 // beyond ids, never secrets.

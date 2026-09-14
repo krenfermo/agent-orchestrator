@@ -26,6 +26,8 @@ type testHooks struct {
 	beforeStagingCopy func() error
 	createRollback    func(context.Context, CreateOptions) (*CreateResult, error)
 	finalVerify       func() error
+	failJournal       func(Phase) error
+	failJournalRemove func() error
 	binaryHead        int64
 }
 

@@ -153,7 +153,7 @@ func readListManifest(e *ListEntry, head int64) {
 }
 
 // lockHeld reports whether a live process holds a backup's lock. A missing lock
-// file is not held: creators remove theirs only when they finish.
+// file is not held: a creator takes its lock before it creates its staging dir.
 func lockHeld(root, id string) bool {
 	p := lockPath(root, id)
 	if _, err := os.Lstat(p); err != nil {
