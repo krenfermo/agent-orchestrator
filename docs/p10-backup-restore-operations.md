@@ -138,14 +138,22 @@ base abierta `immutable=1`: `integrity_check` (o `quick_check` con `--quick`),
 
 1. no hay journal de restore previo (`restore_interrupted`);
 2. verify completo del origen: `VALID` y no `newer_than_binary`;
-3. origen fuera del data dir destino (`source_inside_destination`);
+3. origen fuera del data dir destino (`source_inside_destination`), y ni el data
+   dir ni la raíz del pre-restore dentro del backup origen
+   (`destination_inside_source`, comprobado antes de crear nada);
 4. descubrimiento P9 sobre ambos run-files: `ready`/`not_ready`/`unhealthy` →
    `daemon_active`; `running_unverified` → `daemon_unverified`; dos daemons →
    `daemon_ambiguous`. `stale`/`foreign`/`stopped` permiten seguir. **Nunca se
    envía una señal ni se borra un run-file**;
 5. `flock` de `<data>/daemon.lock` (el mismo lock P9 del daemon), retenido
    durante todo el restore: ningún daemon puede arrancar a mitad (`data_dir_locked`);
-6. sonda SQLite exclusiva sobre `ao.db` (`db_in_use`);
+6. sonda SQLite exclusiva sobre `ao.db` (`db_in_use`) **y** la lista de
+   descriptores abiertos del sistema operativo (`lsof` en macOS/BSD, `/proc` en
+   Linux) sobre `ao.db` y sus laterales: cualquier otro proceso que los tenga
+   abiertos → `db_in_use` nombrando el PID; no poder listarlos también rechaza
+   (§G). Una base que SQLite no puede abrir (`SQLITE_CORRUPT`/`SQLITE_NOTADB`) →
+   `destination_damaged`, salvo `--preserve-broken-state` (§E2); su exclusión la
+   prueba entonces sólo la lista del SO;
 7. `ao.db`/`installation_id`/`skills/catalog` del destino no son symlinks;
 8. política de identidad y de clave (§19);
 9. sin base en el destino no hay backup pre-restore posible: rechazo
@@ -158,20 +166,25 @@ base abierta `immutable=1`: `integrity_check` (o `quick_check` con `--quick`),
 
 1. journal `<data>/.ao-restore-journal.json` (fase `preparing`, fsync);
 2. **backup de rollback** `pre-restore` del estado actual, verificado. Si falla →
-   `rollback_backup_failed`, destino intacto;
+   `rollback_backup_failed`, destino intacto; si falla porque la base actual está
+   dañada (integridad, FK, ilegible) → `destination_damaged`, y con
+   `--preserve-broken-state` se toma en su lugar una **copia forense** byte a byte
+   (§E2);
 3. staging en el **mismo filesystem** del destino
    (`<data>/.ao-restore-<id>/staged`): copia en streaming con SHA-256 comparado
    con el manifest, `fsync`, permisos 0600; `quick_check` + goose del staged;
-4. segunda sonda exclusiva;
+4. segunda sonda exclusiva y segunda comprobación de descriptores abiertos;
 5. fase `swapping`: mover a `previous/` las entradas actuales (`ao.db`,
    `ao.db-wal`, `ao.db-shm`, `ao.db-journal`, `installation_id`,
    `skills/catalog`); comprobar que no queda ningún lateral SQLite; promover las
    entradas staged con `rename`; `fsync` del directorio;
 6. fase `swapped`: **verificación final** — sin laterales, SHA-256 y tamaño de
    `ao.db` iguales al manifest, `quick_check`, goose igual, identidad y archivos
-   de skills correctos;
-7. éxito → fase `complete`, se elimina `previous/` y el staging, se elimina el
-   journal. **El backup de rollback se conserva.**
+   de skills correctos, y **ningún proceso conserva un descriptor del `ao.db`
+   reemplazado** (ahora en `previous/`); si alguno lo tiene → rollback;
+7. éxito → fase `complete` (durable), se elimina el journal y **después**
+   `previous/` y el staging. **El backup de rollback se conserva.** RESTORED
+   (exit 0) sólo se informa cuando el journal dice `complete` en disco.
 
 No se ejecutan migraciones durante el restore. La base queda exactamente como
 se respaldó; el siguiente arranque del daemon decide migrar (§21-22).
@@ -193,10 +206,42 @@ se respaldó; el siguiente arranque del daemon decide migrar (§21-22).
   SQLite que no existía antes del swap va a `failed/`. Todo lo que sigue en
   `previous/` vuelve a su nombre. Nunca se mueve un archivo a través de un
   symlink del work dir.
-- Si no se puede registrar `complete` en el journal, se elimina el journal (el
-  restore verificado pasa a ser el estado registrado); si tampoco se puede, se
-  hace rollback, para que el resultado informado coincida con lo que concluiría
-  `recover`.
+- Antes de mover nada, el rollback comprueba que ningún proceso tiene abierta la
+  base **restaurada**: moverla dejaría los `-wal`/`-shm` de ese proceso, por
+  nombre, pegados a la base anterior. Si alguno la tiene →
+  `RESTORE_FAILED_ROLLBACK_FAILED` con el journal pidiendo `recover`, que vuelve a
+  comprobarlo.
+- **El journal manda** (revisión independiente): si no se puede registrar
+  `complete`, el restore **hace rollback** (exit 6) — nunca sale 0 con un journal
+  que aún pueda leerse como inacabado. En abandon, rollback y recover el journal
+  se elimina **antes** que el work dir; si no se puede eliminar se reescribe a la
+  fase asentada; si tampoco, el work dir se conserva y el informe marca
+  `recoverRequired` (la CLI dice "ejecuta `ao backup recover` antes de arrancar").
+- Un journal `complete` contradicho por un rollback (existe `failed/`, que el
+  rollback crea antes de mover nada) se trata como no asentado: arranque
+  rechazado y `recover` hace rollback en vez de borrar `previous/`.
+
+## E2. Restaurar sobre una base dañada (`--preserve-broken-state`)
+
+Se restaura, a menudo, **porque** la base actual está rota — y una base rota no
+puede producir un backup pre-restore `VALID`.
+
+- Por defecto: `destination_damaged` (exit 3), nada cambia, el mensaje nombra la
+  salida. Cuenta como dañada: `SQLITE_CORRUPT`/`SQLITE_NOTADB` al abrirla,
+  `integrity_check` fallido, violaciones FK. **No** cuenta: espacio, E/S,
+  cancelación — ahí el flag no cambia nada (no es un `--force`).
+- Con `--preserve-broken-state`: antes de tocar el destino se copia byte a byte
+  `ao.db` y sus laterales tal cual, `installation_id` y `skills/catalog` a
+  `<root>/aof-<id>/`, con `forensic.json` (tamaños y SHA-256, sin rutas
+  absolutas). Cada archivo se copia con fsync y después copia **y** origen se
+  vuelven a hashear y comparar; sólo entonces se promueve la copia y sigue el
+  restore normal (staging, swap, verificación, rollback atómico por renames).
+- La copia forense es evidencia, **no** un backup: `verify` la declara INVALID,
+  `list` no la muestra, `prune` nunca la borra (un `.staging-aof-*` huérfano
+  tampoco se poda: bórralo a mano). El informe la marca
+  `rollbackKind=forensic_copy`.
+- Un crash a mitad del swap sobre una base dañada: `recover` devuelve el
+  original dañado byte a byte (no necesita abrirlo).
 
 ## F. Manifest `ao.backup/v1`
 
@@ -232,22 +277,39 @@ por fuerza bruta).
 
 ## G. Guard de daemon activo y exclusión de base
 
-Tres capas, todas reutilizadas de P9 / del backfill; ningún sistema de locks nuevo
-para el data dir:
+Cuatro capas; ningún sistema de locks nuevo para el data dir:
 
 | Capa | Qué prueba | Fallo |
 | --- | --- | --- |
 | Descubrimiento P9 (probe `/healthz` con PID + instance + data dir) | que ningún daemon de esta instalación está vivo o vivo-sin-verificar | `daemon_active`, `daemon_unverified`, `daemon_ambiguous` |
 | `flock` en `<data>/daemon.lock` retenido todo el restore | que ningún daemon P9 lo tiene, y que ninguno puede arrancar durante el restore | `data_dir_locked` |
-| Sonda SQLite exclusiva, antes del rollback y antes del swap | que **ninguna** conexión (daemon, sqlite3, otro `ao`) tiene la base abierta | `db_in_use` |
+| Sonda SQLite exclusiva, antes del pre-restore y antes del swap | que ninguna conexión con **lock** tiene la base abierta | `db_in_use` |
+| Descriptores abiertos del SO (`lsof`/`/proc`): antes del pre-restore, antes del swap, **después de los renames** sobre `previous/`, antes de cualquier rollback | que **ningún proceso** tiene un descriptor de la base o sus laterales, tenga lock o no | `db_in_use` (antes) / rollback (después) |
+
+**Por qué la cuarta capa (revisión independiente, BLOCKER).** Una conexión
+SQLite no tiene ningún lock hasta su primera lectura: un `sqlite3 ao.db` abierto
+y ocioso pasaba las dos sondas. Ese proceso conserva un descriptor del inode
+viejo pero calcula `-wal`/`-shm` por **nombre**; tras el swap su primera
+escritura creaba un WAL que se adjuntaba a la base **restaurada** y la corrompía
+(`database disk image is malformed`) con el restore ya informado como RESTORED.
+Reproducido con un `sqlite3` real, abierto antes del restore y abierto dentro de
+la ventana. Nadie puede obtener un descriptor del inode viejo una vez renombrado
+a `previous/`, así que la comprobación posterior a los renames cierra la ventana:
+quien abra la ruta después abre la base restaurada, que es una conexión normal.
+Si algo tiene el inode viejo, rollback — que le devuelve el archivo que abrió.
+En Windows SQLite abre sin `FILE_SHARE_DELETE`: el rename de una base abierta
+falla y el swap hace rollback solo.
 
 `ao import` y `ao usage backfill-cache-ttl` pasan a usar el mismo guard offline
 (ambos run-files + `daemon.lock` + sonda cuando hay base + la puerta de arranque:
 se niegan ante un restore interrumpido en fase crítica) — cierra la deuda P9 de import.
 
-Riesgo residual, documentado: un proceso **no AO** que abra `ao.db` entre la
-segunda sonda y el `rename` (ventana de milisegundos). AO no puede excluir a un
-`sqlite3` manual que no respeta `daemon.lock`.
+Residual acotado: un proceso que abra la base **restaurada** entre el swap y un
+rollback posterior lo bloquea (rollback fallido explícito, `recover` tras
+cerrarlo); un proceso que escriba en la base vieja durante la ventana y la
+cierre antes de la comprobación escribe en el inode descartado (pérdida de esa
+escritura ajena, nunca corrupción de la restaurada: sus laterales huérfanos
+hacen fallar la verificación final).
 
 ## H. Semántica de fallos
 
@@ -278,13 +340,20 @@ restore, el swap y el rollback. No en temporales sin valor durable.
 
 | Fase del journal | `ao backup recover` | Arranque del daemon |
 | --- | --- | --- |
-| `preparing`, `rollback_ready`, `staged` | elimina staging y journal (no hubo swap) | **permitido** (staging viejo inofensivo) |
-| `rolled_back` | limpia el work dir y el journal | permitido |
+| `preparing`, `rollback_ready`, `staged` | elimina journal y staging (no hubo swap) | **permitido** (staging viejo inofensivo) |
+| `rolled_back` | elimina journal y work dir | permitido |
 | `swapping`, `swapped`, `rolling_back`, `rollback_failed` | rollback idempotente | **rechazado**: estado ambiguo |
-| `complete` | limpia `previous/` y journal | permitido |
+| `complete` sin `failed/` | elimina journal y `previous/` | permitido |
+| `complete` **con** `failed/` (un rollback lo contradijo) | rollback idempotente | **rechazado** |
+| journal ilegible, con claves duplicadas, symlink o no regular | se niega a adivinar: inspección manual | **rechazado** |
 
 El daemon comprueba el journal **después** de tomar `daemon.lock`, así que nunca
-lo lee mientras un restore vivo lo escribe.
+lo lee mientras un restore vivo lo escribe. `recover` **no abre la base**: abrirla
+para sondear borraba el `-shm` vacío que el rollback había devuelto y hacía
+fallar para siempre la comprobación (revisión independiente); usa la lista de
+descriptores del SO, que no muta nada. Probado con crash real tras **cada**
+rename del swap, antes de `complete` y tras un rollback terminado, con `recover`
+×3 (el 2.º y 3.º no mueven nada).
 
 ## 19. Política de identidad y de clave
 
@@ -304,12 +373,25 @@ fila de la sesión registra, y la base restaurada no contiene esos lanzamientos.
 Los runtimes vivos del futuro quedan sin fila → nunca adoptados (test
 `TestRestoredStateNeverOwnsARuntimeLaunchedAfterTheBackup`).
 
-**secret.key.** Si el backup registró una huella y la clave del destino no
-coincide (o falta), restore se niega con `secret_key_mismatch`: esas tres
-columnas cifradas serían ilegibles. `--allow-secret-key-mismatch` lo acepta
-explícitamente (los datos no se borran; hay que volver a introducir SMTP, token
-de work items y secretos de skills). **Respalda `secret.key` aparte, con su propia
-protección**; P10 no la incluye.
+**secret.key.** Filas durables selladas con ella (AES-256-GCM, `secretbox`):
+`app_settings.smtp_password_encrypted`, el `api_token_encrypted` de work items y
+`skill_secrets.sealed_value` (secretos de skills **y** credenciales de registros
+privados). `provider_profiles.secret_ciphertext` existe pero ningún proveedor lo
+escribe. Un backup P10 **no es autocontenido** respecto a esas filas (opción C):
+la clave queda fuera a propósito, y la semántica es fail-closed (opción B):
+
+- el manifest lleva sólo la huella `SHA-256("ao.backup/v1 secret-key\0"‖clave)`
+  truncada a 128 bits: estable, no reversible, nunca la clave ni su base64;
+- si el backup tiene huella y el destino tiene otra clave **o ninguna**, restore
+  se niega con `secret_key_mismatch`, nada cambia;
+- `--allow-secret-key-mismatch` restaura con un aviso explícito: los datos no se
+  borran pero esas filas quedan ilegibles hasta reintroducirlas (probado con el
+  `secretbox` real: ilegibles con la clave nueva, legibles al devolver la
+  original);
+- `ao backup create` recuerda que la clave no va en el backup. **Respalda
+  `secret.key` aparte, con su propia protección.**
+
+Nunca hay un restore RESTORED silencioso con filas cifradas irrecuperables.
 
 ## 21-22. Compatibilidad de esquema
 
@@ -361,7 +443,7 @@ bucles de arranque. Integración futura: en `daemon.RunWithConfig`, tras
 | 0 | éxito / `VALID` compatible o `upgrade_required` |
 | 1 | fallo interno o de E/S |
 | 2 | uso incorrecto |
-| 3 | rechazado por seguridad (`daemon_active`, `daemon_unverified`, `daemon_ambiguous`, `data_dir_locked`, `db_in_use`, `backup_in_use`, `no_rollback_possible`, `installation_mismatch`, `secret_key_mismatch`, `source_inside_destination`, `insufficient_space`, `restore_interrupted`, `unsafe_path`, `invalid_backup_root`) |
+| 3 | rechazado por seguridad (`daemon_active`, `daemon_unverified`, `daemon_ambiguous`, `data_dir_locked`, `db_in_use`, `backup_in_use`, `no_rollback_possible`, `installation_mismatch`, `secret_key_mismatch`, `source_inside_destination`, `destination_inside_source`, `destination_damaged`, `insufficient_space`, `restore_interrupted`, `unsafe_path`, `invalid_backup_root`) |
 | 4 | backup `INVALID` |
 | 5 | backup `UNSUPPORTED` o `newer_than_binary` |
 | 6 | `RESTORE_FAILED_ROLLED_BACK` |
@@ -426,6 +508,25 @@ ao start
 ```
 
 La salida nombra el backup de rollback `pre-restore` creado.
+
+### Restaurar cuando la base actual está corrupta
+
+```bash
+ao stop
+ao backup restore ~/.ao/backups/aob-…      # exit 3 destination_damaged
+ao backup restore ~/.ao/backups/aob-… --preserve-broken-state
+```
+
+La salida nombra `~/.ao/backups/aof-…` (`forensic_copy`). Para volver al estado
+dañado (p. ej. para forense): con AO parado, copia de vuelta al data dir los
+archivos que lista `forensic.json` (`ao.db`, laterales, `installation_id`,
+`skills/catalog`) retirando antes los actuales. No es un backup: `ao backup
+restore` no la acepta.
+
+### Si restore dice `recoverRequired` / "run `ao backup recover`"
+
+No arranques AO; ejecuta `ao backup recover` (idempotente: repetirlo no mueve
+nada). Si `db_in_use`: cierra el proceso que nombra y repite.
 
 ### Rollback manual
 
@@ -581,19 +682,72 @@ Hallazgos y disposición — todos corregidos, cada uno con su prueba:
 
 | # | Severidad | Hallazgo | Corrección | Prueba |
 | --- | --- | --- | --- | --- |
-| F1 | media | Si fallaba escribir `complete` en el journal se informaba RESTORED con el journal en `swapped`, y el `recover` recomendado deshacía el restore | Se elimina el journal; si tampoco se puede, rollback inmediato | `TestRestoreCompletionThatCannotBeJournaledStaysRestored`, `TestRestoreCompletionWithNoUsableJournalRollsBack` |
+| F1 | media | Si fallaba escribir `complete` en el journal se informaba RESTORED con el journal en `swapped`, y el `recover` recomendado deshacía el restore | *(Sustituido por R2 de la revisión independiente: ahora rollback, nunca exit 0)* | `TestRestoreCompletionThatCannotBeJournaledIsNeverReportedRestored` |
 | F2 | media | Sin `ao.db` no hay backup pre-restore, pero el `skills/catalog` (y la identidad con `--identity=backup`) se borraban al terminar | Rechazo `no_rollback_possible` | `TestRestoreRefusesToReplaceWhatADatabaselessDataDirAloneHolds` |
 | F3 | media | `ao import` y el backfill escribían sobre un restore interrumpido a mitad del swap (escritura perdida o recuperación rota) | El guard offline aplica la puerta de arranque | `TestHoldDataDirOfflineRefusesAnInterruptedRestore` |
 | F4 | baja | Mensajes "el data dir no cambió" imprecisos (la sonda puede checkpointear; el lector deja laterales vacíos) | Redacción exacta en código y documento | revisión de texto |
 | F5 | baja | Borrar el lock file al soltarlo permitía dos dueños; el origen fuera de `--root` no se bloqueaba | Los lock files no los borra quien los tiene; el origen se bloquea en su raíz; prune barre huérfanos | `TestRestoreLocksTheSourceInItsOwnRoot`, `TestLockFilesStayWithHoldersAndPruneSweepsOrphans` |
 | F6 | baja | Recover seguía symlinks dentro del work dir | Rechazo antes de mover nada | `TestRecoverRefusesToMoveFilesThroughASymlinkedWorkDir` |
 
+### Revisión de integración independiente (P10 review)
+
+Revisión adversarial independiente de `674fa2c28` antes del merge en ECC, sin
+confiar en el informe anterior: lectura de todo el código, experimentos con
+procesos reales (`sqlite3`, crashes con `os.Exit`, journal inmutable con
+`chflags`), inyección de fallos en cada escritura del journal y en cada rename.
+
+| # | Severidad | Hallazgo (reproducido) | Corrección | Prueba |
+| --- | --- | --- | --- | --- |
+| R1 | **BLOCKER** | Un `sqlite3` abierto y ocioso (sin lock) pasaba las dos sondas; tras el swap su escritura creaba un WAL que se adjuntaba a la base **restaurada** y la corrompía (`database disk image is malformed`) con el restore informado RESTORED. Igual si se abría dentro de la ventana | Cuarta capa: descriptores abiertos del SO antes del pre-restore, antes del swap y **después de los renames** sobre `previous/` (cierra la ventana; si alguien tiene el inode viejo, rollback); no poder listarlos rechaza | `TestRestoreRefusesAProcessThatOpenedTheDatabaseWithoutReading`, `TestRestoreRollsBackWhenAProcessOpenedTheDatabaseInsideTheWindow`, `TestRestoreFailsClosedWhenOpenFilesCannotBeListed`, `TestOpenHoldersFollowsTheDescriptorAcrossARename` |
+| R2 | HIGH | Journal inmutable tras el swap: el rollback borraba su work dir, decía "nada más que hacer", dejaba `swapped` bloqueando cada arranque y un `recover` que sólo podía fallar. Y `complete` no escribible salía 0 | Journal primero y work dir después en abandon/rollback/recover; reescritura a fase asentada; si no, work dir conservado y `recoverRequired`; `complete` no escribible → rollback; `complete` contradicho por `failed/` = no asentado | `TestRestoreJournalFailureMatrix` (8 fases × único/persistente × escrito-o-no), `TestRestoreWhoseJournalCannotBeClearedStaysRecoverable`, `TestACompletionRecordContradictedByARollbackIsNotTrusted` |
+| R3 | HIGH | `recover` sondeaba la base abriéndola: borraba el `-shm` vacío preexistente que el rollback había devuelto y `checkRolledBack` fallaba para siempre (`ao.db-shm present=false`) tras cualquier rollback terminado (p. ej. crash durante el rollback) | `recover` usa descriptores del SO (no muta); `-wal`/`-shm` no son estado (el stamp de `ao.db` prueba que no se perdió ningún frame); rollback/recover se niegan si alguien tiene abierta la base restaurada | `TestCrashDuringRestoreIsAlwaysResolvable/after-rollback`, `TestRollbackRefusesWhileTheRestoredDatabaseIsOpen` |
+| R4 | BLOCKER operativo | Base destino corrupta (la propia sonda fallaba) o con violaciones FK (sin pre-restore VALID): restore imposible para siempre, justo cuando más se necesita | `destination_damaged` por defecto; `--preserve-broken-state` con copia forense verificada byte a byte (§E2); no cubre espacio/E/S/cancelación | `TestRestoreRefusesADamagedDestinationByDefault`, `TestRestoreWithPreserveBrokenStateKeepsAForensicCopy`, `TestPreserveBrokenStateDoesNotOverrideAnOrdinaryPreRestoreFailure`, `TestRecoverPutsADamagedOriginalBackByteForByte`, `TestRestoreCLI_DamagedDestinationNeedsPreserveBrokenState` |
+| R5 | MEDIUM | Data dir (o raíz del pre-restore) dentro del backup origen: aceptado; el restore escribía dentro del backup, que dejaba de verificar | `destination_inside_source` antes de crear nada | `TestRestoreRefusesToWriteIntoItsOwnSource` |
+| R6 | LOW | Claves JSON duplicadas: `encoding/json` se queda con la última (un manifest "manual" aquí, "pre-restore" o v2 para otro lector) | Manifest y journal ambiguos → INVALID / no confiable | `TestManifestAndJournalRejectDuplicateKeys` |
+
+Confirmado sin cambios: `VACUUM INTO` abre una única transacción de lectura sobre
+`main` durante toda la copia (`sqlite3RunVacuum` → `BtreeBeginTrans(pMain, 0)`
+cuando hay `INTO`, en el fuente transpilado de modernc v1.51.0); crash real tras
+**cada** rename del swap y antes de `complete` con `recover` ×3 idempotente
+(`TestCrashAfterEveryRenameIsRecoveredIdempotently`); journals hostiles
+(malformado, campos desconocidos, symlink, directorio, traversal, work dir
+ausente) fallan cerrados; online bajo escrituras reales ×5
+(`TestOnlineBackupsUnderWritesAreAlwaysSnapshots`); create+prune concurrentes
+(`TestCreateAndPruneConcurrently`); privacidad en todos los informes
+(`TestNoSecretReachesAnyReport`); identidad × P9
+(`TestExplicitIdentityModesNeverOwnTheOtherInstallationsRuntimes`,
+`TestP10_RestoreIdentityModesThroughTheBinary`); `secret.key` con el `secretbox`
+real (`TestRestoredSealedRowsAreNeverSilentlyUnreadable`,
+`TestSecretKeyFingerprintIsOneWayAndStable`).
+
+Gates tras las correcciones (macOS arm64, AO real parado):
+
+| Gate | Resultado |
+| --- | --- |
+| `gofmt -l`, `go build ./...`, `go vet ./internal/...`, `GOOS=linux go vet` / `GOOS=windows go build` de backup | OK |
+| `go test` backup (68.5 s), cli, daemon, daemonlock, runfile, daemonmeta, telemetrymeta, workerownership, secretbox | OK |
+| `go test ./internal/storage/sqlite/` | OK (39.7 s) |
+| E2E daemon real `AO_P10_E2E=1` (4 pruebas, incluida identidad por el binario) | OK (10 s) |
+| `-race` backup (465 s, crashes en proceso hijo y `sqlite3` reales), cli backup/restore/import/guard/backfill/discovery/stop (50 s), daemonlock | OK, sin data races |
+| golangci-lint v2.12.2 `--new-from-rev=847c47808` | 0 issues |
+| Race amplio de workflow / frontend | no aplica: sin cambios de workflow/lifecycle ni de API HTTP |
+
 ### Deudas restantes
 
 - **Hook de backup previo a migración** (§31): documentado, no activado.
-- **Riesgo residual de exclusión**: un proceso no AO (un `sqlite3` manual) que abra
-  `ao.db` entre la segunda sonda y el `rename`. AO no puede excluir lo que no
-  respeta `daemon.lock`.
+- **Exclusión**: depende de `lsof` en macOS/BSD (sistema) o `/proc` en Linux; sin
+  ellos restore rechaza. Un proceso de **otro usuario** (root) con la base abierta
+  no se ve en Linux. Un proceso que abra la base restaurada durante un rollback lo
+  bloquea hasta cerrarlo (explícito, recuperable).
+- **Copia forense**: un `.staging-aof-*` huérfano por crash no lo poda `prune`
+  (borrado manual); no hay comando para devolverla (runbook manual).
+- **Coherencia skills ↔ base**: el backup refleja el catálogo tal cual; filas de
+  `skill_installs` cuyo paquete falte en el origen no se detectan al crear (en uso,
+  `LoadPackage` verifica el digest y falla cerrado).
+- **Colisión de rutas por normalización Unicode** (NFC/NFD en APFS): no se
+  detecta en el manifest; en restore el `O_EXCL` del staging falla cerrado.
+- **FreeBSD** no compila `fsutil_unix.go` (`Statfs_t.Bavail` con signo); no es
+  plataforma objetivo.
 - **Windows**: compila, no está probado (`flock`, `rename` sobre abiertos, fsync de
   directorios).
 - **`secret.key`** fuera del backup por diseño: el operador debe respaldarla aparte.
