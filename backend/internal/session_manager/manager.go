@@ -1740,7 +1740,9 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 	if mode == domain.SessionModeChat {
 		return m.relaunchSession(ctx, "resume agent", rec, project, ws, nil)
 	}
-	handle := ports.RuntimeHandle{ID: meta.RuntimeHandleID}
+	// P9: the recorded incarnation travels with the name, so the runtime restamps
+	// and verifies THAT incarnation -- never whatever answers under the name.
+	handle := ports.RuntimeHandle{ID: meta.RuntimeHandleID, InstanceID: meta.RuntimeInstanceID}
 	return m.relaunchSession(ctx, "resume agent", rec, project, ws, &handle)
 }
 
@@ -1933,12 +1935,13 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 func (m *Manager) restartRuntime(ctx context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
-		if !errors.Is(err, ports.ErrRuntimeUnavailable) {
+		if !errors.Is(err, ports.ErrRuntimeServerAbsent) {
 			return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
 		}
-		// The runtime infrastructure itself is gone (e.g. the tmux server was
-		// killed). Restore/restart is exactly the recovery path for that
-		// outage, so proceed as "no existing runtime" and create a fresh one.
+		// P9: the runtime server provably does not exist (its socket is gone,
+		// e.g. after a reboot). Only that is "no existing runtime"; a server
+		// that merely could not be reached may still hold a live session, and
+		// creating over it would put a second process on one session.
 		alive = false
 	}
 	if alive {
@@ -2103,9 +2106,12 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 			alive, err := m.runtime.IsAlive(ctx, handle)
 			switch {
 			case err == nil:
-			case errors.Is(err, ports.ErrRuntimeUnavailable):
-				// Normal after a machine reboot: the runtime is conclusively gone,
-				// so preserve work and create the restore marker below.
+			case errors.Is(err, ports.ErrRuntimeServerAbsent):
+				// Normal after a machine reboot: the runtime server's socket is
+				// gone, so the runtime is conclusively gone -- preserve work and
+				// create the restore marker below. P9: a server that merely could
+				// not be REACHED is not this case; it falls to the default and the
+				// live session (and its worktree) is left exactly as it is.
 				alive = false
 			default:
 				// A failed probe is not proof of death: leave the session as-is.

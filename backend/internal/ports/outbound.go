@@ -446,6 +446,13 @@ var (
 	// every session on the board). Adapters wrap this sentinel via fmt.Errorf
 	// so callers can match it with errors.Is.
 	ErrRuntimeUnavailable = errors.New("runtime: infrastructure unavailable")
+	// ErrRuntimeServerAbsent (P9) is the one unavailable answer that is itself
+	// a FACT: the runtime server's rendezvous (tmux's socket file) does not
+	// exist at all, so no session of this installation can exist. It always
+	// wraps together with ErrRuntimeUnavailable. Any other failure to reach the
+	// server -- a refused connection, a permission error, a timeout -- is only
+	// an inability to tell, and must never be read as a dead runtime.
+	ErrRuntimeServerAbsent = errors.New("runtime: no server exists for this installation")
 	// ErrRuntimeOrphanedSession reports the one outcome a failed Create must
 	// never hide: the session was created, could not be made ownable, AND could
 	// not be proven torn down.

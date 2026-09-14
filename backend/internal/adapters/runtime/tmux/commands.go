@@ -327,14 +327,6 @@ func capturePaneStyledArgs(id string, lines int) []string {
 // other.
 const ownerEnvKey = "AO_SESSION_OWNER"
 
-// sessionOwnerArgs reads the ownership token back.
-//
-// tmux exits non-zero ("unknown variable") when the session carries no such
-// variable, which the caller reads as "unmarked", not as an error.
-func sessionOwnerArgs(id string) []string {
-	return sessionEnvArgs(id, ownerEnvKey)
-}
-
 // installationEnvKey and daemonInstanceEnvKey are P9's provenance stamps: which
 // AO installation (data dir) and which daemon process created the session. They
 // live in the session environment beside the owner token for the same
@@ -374,7 +366,22 @@ func setRemainOnExitOffArgs(id string) []string {
 // sessionInstanceArgs re-reads just the instance id, for the revalidation that
 // closes a read-then-act window.
 func sessionInstanceArgs(id string) []string {
-	return []string{"display-message", "-p", "-t", id, "#{session_id}"}
+	// Exact target (P9): a bare name lets tmux fall back to prefix and pattern
+	// matching, so "proj-1" could resolve to "proj-12" -- another session's
+	// incarnation answering for this one.
+	return []string{"display-message", "-p", "-t", exactSessionFormatTarget(id), "#{session_id}"}
+}
+
+// exactSessionFormatTarget is the exact-match target for commands that resolve
+// a PANE (display-message). Measured on tmux 3.7b: `-t =name` there answers
+// EMPTY with exit 0 -- which would read a live session as absent -- while
+// `-t =name:` resolves exactly that session and never a prefix of another. An
+// instance id is already exact.
+func exactSessionFormatTarget(id string) string {
+	if isSessionInstanceID(id) {
+		return id
+	}
+	return "=" + id + ":"
 }
 
 // killSessionInstanceArgs destroys ONE EXACT session incarnation.

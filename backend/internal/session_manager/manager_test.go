@@ -6982,3 +6982,46 @@ func TestSend_StaysBlockedForDialogsAfterStructuredResponsesExist(t *testing.T) 
 		t.Fatalf("%d messages reached the pane, want 0", len(msg.msgs))
 	}
 }
+
+// P9 review 2.1: a tmux server that could not be REACHED is not a dead runtime.
+// Boot reconciliation must neither stash, terminate nor tear down a session
+// whose runtime may still be running behind a refused connection.
+func TestReconcileLive_UnreachableServerIsNotDeath(t *testing.T) {
+	st := newFakeStore()
+	rt := &fakeRuntime{aliveErr: fmt.Errorf("probe: %w: no server running on /tmp/tmux-501/ao", ports.ErrRuntimeUnavailable)}
+	ws := &fakeWorkspace{}
+	lcm := &fakeLCM{store: st}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: rt, Agents: fakeAgents{}, Workspace: ws, Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm, LookPath: lookPath})
+	rec := domain.SessionRecord{ID: "s9", ProjectID: "p1",
+		Metadata: domain.SessionMetadata{Branch: "ao/s9/root", WorkspacePath: "/wt/s9", RuntimeHandleID: "s9"}}
+
+	if err := m.reconcileLive(context.Background(), rec); err == nil {
+		t.Fatal("reconcileLive concluded something from an unreachable server")
+	}
+	if ws.stashCalls != 0 || lcm.terminated["s9"] != 0 || rt.destroyed != 0 || len(st.worktrees["s9"]) != 0 {
+		t.Fatalf("an unreachable server was treated as death: stash=%d terminated=%d destroyed=%d markers=%v",
+			ws.stashCalls, lcm.terminated["s9"], rt.destroyed, st.worktrees["s9"])
+	}
+}
+
+// Only a runtime server whose socket provably does not exist (a reboot) is the
+// conclusive "gone": the session is preserved for restore exactly as before.
+func TestReconcileLive_AbsentServerIsDeath(t *testing.T) {
+	st := newFakeStore()
+	rt := &fakeRuntime{aliveErr: fmt.Errorf("probe: %w: %w: error connecting to /tmp/tmux-501/ao (No such file or directory)",
+		ports.ErrRuntimeUnavailable, ports.ErrRuntimeServerAbsent)}
+	ws := &fakeWorkspace{stashRef: "refs/ao/preserved/s8"}
+	lcm := &fakeLCM{store: st}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: rt, Agents: fakeAgents{}, Workspace: ws, Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm, LookPath: lookPath})
+	rec := domain.SessionRecord{ID: "s8", ProjectID: "p1",
+		Metadata: domain.SessionMetadata{Branch: "ao/s8/root", WorkspacePath: "/wt/s8", RuntimeHandleID: "s8"}}
+
+	if err := m.reconcileLive(context.Background(), rec); err != nil {
+		t.Fatalf("reconcileLive: %v", err)
+	}
+	if ws.stashCalls != 1 || lcm.terminated["s8"] != 1 {
+		t.Fatalf("a provably absent server was not recovered: stash=%d terminated=%d", ws.stashCalls, lcm.terminated["s8"])
+	}
+}

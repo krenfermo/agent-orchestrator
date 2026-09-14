@@ -374,16 +374,36 @@ func TestRealTmuxP9_T10_CleanupIsIdempotentAndExact(t *testing.T) {
 	}
 }
 
-// A machine reboot (or a lost tmux server): nothing answers on this
-// installation's private socket at all. That is a proven absence -- the launch
-// takes the bounded retry -- never an indefinitely unprovable runtime.
-func TestRealTmuxP9_ServerGoneIsAProvenAbsence(t *testing.T) {
+// Integration review 2.1, on the real tmux: a server that cannot be REACHED is
+// not a dead runtime. After kill-server the socket file is still there and tmux
+// answers "no server running" -- exactly what a wedged or restarting server
+// also answers -- so the proof is UNAVAILABLE (wait, grace, fail closed), never
+// ABSENT (which would authorize a second worker). Only when the socket itself
+// does not exist -- a reboot cleared /tmp -- is the absence proven.
+func TestRealTmuxP9_UnreachableServerIsUnavailableAndOnlyAMissingSocketIsAbsent(t *testing.T) {
 	s := newServer(t)
 	r := s.runtime(installationA, "aod-me")
 	w := launch(t, r, "p9-server-gone", "launch-1", "stay")
 	row := durable(t, w.rec)
+	out, err := exec.Command("tmux", "-L", s.socket, "display-message", "-p", "#{socket_path}").Output()
+	if err != nil {
+		t.Fatalf("socket path: %v", err)
+	}
+	socketPath := strings.TrimSpace(string(out))
+	if !strings.Contains(socketPath, "ao-p9-e2e-") {
+		t.Fatalf("refusing to touch a socket that is not this test's own: %q", socketPath)
+	}
 	if out, err := exec.Command("tmux", "-L", s.socket, "kill-server").CombinedOutput(); err != nil {
 		t.Fatalf("kill-server: %v: %s", err, out)
+	}
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Fatalf("tmux removed its socket on kill-server here (%v); the unreachable case cannot be staged", err)
+	}
+	wantProof(t, classify(t, row, s.runtime(installationA, "aod-after-kill"), installationA), domain.WorkerRuntimeUnavailable)
+
+	// The reboot: the socket file is gone.
+	if err := os.Remove(socketPath); err != nil {
+		t.Fatalf("remove this test's socket: %v", err)
 	}
 	wantProof(t, classify(t, row, s.runtime(installationA, "aod-after-reboot"), installationA), domain.WorkerRuntimeAbsent)
 }

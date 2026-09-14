@@ -113,8 +113,10 @@ func TestClassifyTable(t *testing.T) {
 		{name: "unsupported runtime (conpty)", rec: rec, nilRdr: true, want: domain.WorkerRuntimeUnsupported},
 		{name: "probe failure concludes nothing", rec: rec, reader: &scriptedReader{errInst: errors.New("tmux: exit 1")}, want: domain.WorkerRuntimeUnavailable},
 		{name: "name probe failure concludes nothing", rec: rec, reader: &scriptedReader{errName: errors.New("tmux: exit 1")}, want: domain.WorkerRuntimeUnavailable},
-		{name: "no tmux server for this installation is a proven absence", rec: rec, reader: &scriptedReader{errInst: fmt.Errorf("probe: %w: no server running", ports.ErrRuntimeUnavailable)}, want: domain.WorkerRuntimeAbsent},
-		{name: "server gone while resolving the name is a proven absence", rec: rec, reader: &scriptedReader{errName: ports.ErrRuntimeUnavailable}, want: domain.WorkerRuntimeAbsent},
+		{name: "no tmux socket for this installation is a proven absence", rec: rec, reader: &scriptedReader{errInst: fmt.Errorf("probe: %w: %w: error connecting to /tmp/s (No such file or directory)", ports.ErrRuntimeUnavailable, ports.ErrRuntimeServerAbsent)}, want: domain.WorkerRuntimeAbsent},
+		{name: "socket gone while resolving the name is a proven absence", rec: rec, reader: &scriptedReader{errName: fmt.Errorf("%w: %w", ports.ErrRuntimeUnavailable, ports.ErrRuntimeServerAbsent)}, want: domain.WorkerRuntimeAbsent},
+		{name: "review 2.1: a refused connection is NOT absence", rec: rec, reader: &scriptedReader{errInst: fmt.Errorf("probe: %w: no server running on /tmp/s", ports.ErrRuntimeUnavailable)}, want: domain.WorkerRuntimeUnavailable},
+		{name: "review 2.1: an unreachable server while resolving the name is NOT absence", rec: rec, reader: &scriptedReader{errName: ports.ErrRuntimeUnavailable}, want: domain.WorkerRuntimeUnavailable},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -71,13 +71,12 @@ func Classify(
 	}
 
 	facts, exists, err := reader.SessionFacts(ctx, ports.RuntimeHandle{ID: md.RuntimeHandleID, InstanceID: md.RuntimeInstanceID})
-	if errors.Is(err, ports.ErrRuntimeUnavailable) {
-		// The runtime SERVER for this installation is not running at all ("no
-		// server running" / "error connecting" on AO's own, data-dir-scoped tmux
-		// socket): no session of this installation can exist. This is the same
-		// conclusion session_manager's boot reconciliation already draws after a
-		// machine reboot, and it is what lets a launch interrupted by a reboot
-		// take the bounded retry instead of parking as unprovable.
+	if errors.Is(err, ports.ErrRuntimeServerAbsent) {
+		// The runtime server's rendezvous does not EXIST (a reboot cleared it,
+		// or it never existed): no session of this installation can. Only this
+		// answer is absence; a refused connection, a permission error or a
+		// timeout is ErrRuntimeUnavailable alone and stays unavailable below --
+		// a transient failure must never authorize a second worker.
 		obs.Proof = domain.WorkerRuntimeAbsent
 		obs.Detail = "no runtime server is running for this installation, so no session of it can exist"
 		return obs
@@ -91,7 +90,7 @@ func Classify(
 		// The recorded incarnation is gone. Who, if anyone, holds the name?
 		byName, nameExists, nerr := reader.SessionFacts(ctx, ports.RuntimeHandle{ID: md.RuntimeHandleID})
 		switch {
-		case errors.Is(nerr, ports.ErrRuntimeUnavailable):
+		case errors.Is(nerr, ports.ErrRuntimeServerAbsent):
 			obs.Proof = domain.WorkerRuntimeAbsent
 			obs.Detail = "no runtime server is running for this installation, so no session of it can exist"
 		case nerr != nil:
