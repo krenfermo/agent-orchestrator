@@ -11,7 +11,8 @@ import (
 
 // dbFamily names a database file in dir and the sidecars SQLite keeps beside it.
 func dbFamily(dir string) []string {
-	out := []string{filepath.Join(dir, DatabaseAsset)}
+	out := make([]string, 0, 1+len(sqliteSidecars))
+	out = append(out, filepath.Join(dir, DatabaseAsset))
 	for _, s := range sqliteSidecars {
 		out = append(out, filepath.Join(dir, s))
 	}

@@ -41,23 +41,6 @@ func (p Phase) critical() bool {
 	return false
 }
 
-// unsettled reports whether the data dir may hold a mix of two states: the
-// phase is critical, or it reads "complete" although a rollback has started
-// since (a rollback creates failed/ before it moves anything). The second is a
-// completion record that reached the disk while its write reported failure,
-// which the rollback that followed could not overwrite.
-func (j *journal) unsettled(dataDir string) bool {
-	if j.Phase.critical() {
-		return true
-	}
-	if j.Phase == PhaseComplete {
-		if _, err := os.Lstat(filepath.Join(dataDir, j.WorkDir, "failed")); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
 func (p Phase) known() bool {
 	switch p {
 	case PhasePreparing, PhaseRollbackReady, PhaseStaged, PhaseSwapping, PhaseSwapped,
@@ -132,6 +115,23 @@ func (j *journal) validate() error {
 		}
 	}
 	return nil
+}
+
+// unsettled reports whether the data dir may hold a mix of two states: the
+// phase is critical, or it reads "complete" although a rollback has started
+// since (a rollback creates failed/ before it moves anything). The second is a
+// completion record that reached the disk while its write reported failure,
+// which the rollback that followed could not overwrite.
+func (j *journal) unsettled(dataDir string) bool {
+	if j.Phase.critical() {
+		return true
+	}
+	if j.Phase == PhaseComplete {
+		if _, err := os.Lstat(filepath.Join(dataDir, j.WorkDir, "failed")); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJournal(dataDir string, j *journal) error {

@@ -114,6 +114,9 @@ func integrityOf(t *testing.T, dataDir string) (string, []string) {
 		_ = rows.Scan(&id)
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		return "error: " + err.Error(), nil
+	}
 	return strings.Join(lines, "; "), ids
 }
 
