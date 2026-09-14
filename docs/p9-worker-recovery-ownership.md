@@ -387,3 +387,19 @@ gated behind `?ownership=1` so the UI's 5-second recovery poll does not run it.
 * Trusted-local mode issues no worker credential, so a work report is fenced by the
   session binding alone.
 * Soak (P11): 15-minute unreadable grace and fix silence window unvalidated over days.
+
+## 21. Independent adversarial review (fresh context, read-only) — dispositions
+
+| # | Finding | Status | Disposition |
+| --- | --- | --- | --- |
+| 1 | "Resume agent" respawns through `Restart` with a name-only handle; the empty instance id overwrote the recorded `$N`, so every restored worker became `provenance_missing` forever. T5 missed it because it restarted with the `Create` handle. | CONFIRMED | Fixed in `relaunchSessionWithPolicy`: the recorded incarnation is carried over when the runtime returns the same session without naming one. `TestP9ResumeThroughRestartKeepsTheRecordedIncarnation` goes through `ResumeAgentWithMode`. |
+| 2 | Startup skipped a live daemon behind the CONFIGURED run-file when it served another data dir, so a scratch daemon sharing `~/.ao/running.json` would overwrite (and on exit delete) a live daemon's handshake. | CONFIRMED | Fixed: a live daemon behind the configured run-file refuses the start whatever data dir it serves. Test covers the shared path. |
+| 3 | Startup compared data dirs with `filepath.Clean` only; `/tmp/ao` vs `/private/tmp/ao` would be two daemons on one DB. | CONFIRMED | Fixed: symlink-aware comparison (`sameDataDirPath`), as the CLI already did. Test covers a symlinked data dir. |
+| 4 | Unreadable-runtime grace measured from record age: after a reboot the first failed read parked immediately; a dead tmux server was `unavailable`, not `absent`. | PLAUSIBLE → fixed | "no server running" / "error connecting" on AO's private socket is now `absent` (session_manager's boot reconciliation already draws that conclusion after a reboot); other failed reads get a grace measured from the first failed read in THIS process. Tests: real tmux `kill-server`, decision table, hours-old launch. |
+| 5 | A concurrent pass could fail an in-flight launch closed inside the 30 s settle window (conpty `unsupported`). | PLAUSIBLE → fixed | Inside the settle window only an adoption may be concluded. `TestP9_InFlightLaunchIsNotStoppedInsideTheSettleWindow`. |
+| 6 | After an AO restore of an unconfirmed session (new launch L2, record still L1), natural-key adoption fails closed on `launch_mismatch`. | PLAUSIBLE | Kept deliberately: the launch fence pre-dates P9 in `adoptLiveLaunch`; P9 applies it on every adoption path. The false stop is conservative, rare (restore of a never-confirmed worker) and names its reason; relaxing the fence needs its own proof. Documented debt. |
+| minor | A lost session bind leaves the spawned runtime unbound (logged, not destroyed); a failed `respawn-pane` after the restamp reads as `owner_mismatch`. | noted | Debts; neither creates a second owner. |
+
+Reviewer's "no defect found": no fail-open or second-owner path with the port wired; reviewer
+terminal guard correctly scoped; readback writes nothing and leaks nothing; CLI stop/status
+never act on unverified or foreign daemons.

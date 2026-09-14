@@ -809,3 +809,23 @@ func TestP9Crash_TerminalRunIsNeverRecoveredIntoRunning(t *testing.T) {
 	}
 	f.assertSpawns(1, 1)
 }
+
+// Finding 4 of the independent review: after a long gap (a reboot, a slept
+// laptop) the dispatch record is hours old. The unreadable-runtime grace runs
+// from the FIRST failed read in this process, so one failed read at boot is
+// never an immediate stop.
+func TestP9Crash_HoursOldLaunchIsNotParkedOnItsFirstUnreadableRead(t *testing.T) {
+	f := newP9Fixture(t)
+	f.spawner.crashAfterRuntime[1] = true
+	f.startCrashing(f.coord)
+	f.clk.Advance(6 * time.Hour)
+	f.boot()
+	f.reconcile(2)
+	if f.run().State == domain.WorkflowRunNeedsAttention {
+		t.Fatalf("an hours-old launch was parked on its first unreadable read; phases=%v", phasesOf(f.ledger()))
+	}
+	f.clk.Advance(20 * time.Minute)
+	f.reconcile(1)
+	f.assertParkedOwnershipUnproven()
+	f.assertSpawns(1, 1)
+}

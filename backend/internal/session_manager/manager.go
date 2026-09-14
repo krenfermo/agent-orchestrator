@@ -1872,6 +1872,16 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 		handle, err = m.runtime.Create(ctx, runtimeCfg)
 	} else {
 		handle, err = m.restartRuntime(ctx, *restartHandle, runtimeCfg)
+		// P9: a respawn of a live pane keeps its tmux incarnation, but the
+		// handle built from the row carries only the name, so Restart hands back
+		// no instance id -- and writing that empty value would erase the `$N`
+		// every later ownership proof needs, failing a legitimately restored
+		// worker closed forever. The recorded incarnation is carried over when
+		// the runtime returned the same session without naming one; a runtime
+		// that created a new incarnation names it and wins.
+		if err == nil && handle.InstanceID == "" && handle.ID == rec.Metadata.RuntimeHandleID {
+			handle.InstanceID = rec.Metadata.RuntimeInstanceID
+		}
 	}
 	if err != nil {
 		m.cleanupSystemPromptDir(rec.ID)

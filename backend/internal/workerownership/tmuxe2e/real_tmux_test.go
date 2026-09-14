@@ -373,3 +373,17 @@ func TestRealTmuxP9_T10_CleanupIsIdempotentAndExact(t *testing.T) {
 		}
 	}
 }
+
+// A machine reboot (or a lost tmux server): nothing answers on this
+// installation's private socket at all. That is a proven absence -- the launch
+// takes the bounded retry -- never an indefinitely unprovable runtime.
+func TestRealTmuxP9_ServerGoneIsAProvenAbsence(t *testing.T) {
+	s := newServer(t)
+	r := s.runtime(installationA, "aod-me")
+	w := launch(t, r, "p9-server-gone", "launch-1", "stay")
+	row := durable(t, w.rec)
+	if out, err := exec.Command("tmux", "-L", s.socket, "kill-server").CombinedOutput(); err != nil {
+		t.Fatalf("kill-server: %v: %s", err, out)
+	}
+	wantProof(t, classify(t, row, s.runtime(installationA, "aod-after-reboot"), installationA), domain.WorkerRuntimeAbsent)
+}

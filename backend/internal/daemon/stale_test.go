@@ -144,12 +144,37 @@ func TestLiveDaemonForDataDirSeesBothConventions(t *testing.T) {
 		t.Fatalf("live=%v path=%q err=%v, want the daemon under the data-dir convention", live, path, err)
 	}
 
-	other := filepath.Join(root, "other")
-	otherPort := serve("/elsewhere")
-	if err := runfile.Write(filepath.Join(other, "running.json"), runfile.Info{PID: pid, Port: otherPort, StartedAt: time.Now().UTC()}); err != nil {
+	// A daemon serving ANOTHER data dir under this installation's alternate
+	// location does not block the start.
+	elsewhere := filepath.Join(root, "elsewhere-data")
+	foreignPort := serve("/some/other/data")
+	if err := runfile.Write(filepath.Join(elsewhere, "running.json"), runfile.Info{PID: pid, Port: foreignPort, StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if live, _, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, "127.0.0.1", filepath.Join(other, "running.json"), other); err != nil || live != nil {
-		t.Fatalf("a daemon serving another data dir blocked this start: %+v %v", live, err)
+	if live, _, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, "127.0.0.1", filepath.Join(root, "unused-running.json"), elsewhere); err != nil || live != nil {
+		t.Fatalf("a daemon serving another data dir at the alternate location blocked this start: %+v %v", live, err)
+	}
+
+	// The CONFIGURED run-file is shared: a live daemon behind it is refused
+	// whatever data dir it serves, or this start would overwrite its handshake.
+	shared := filepath.Join(root, "shared-running.json")
+	if err := runfile.Write(shared, runfile.Info{PID: pid, Port: foreignPort, StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if live, path, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, "127.0.0.1", shared, filepath.Join(root, "scratch-data")); err != nil || live == nil || path != shared {
+		t.Fatalf("a live daemon behind the shared run-file did not block the start: live=%v path=%q err=%v", live, path, err)
+	}
+
+	// One data dir spelled through a symlink is ONE installation.
+	link := filepath.Join(root, "data-link")
+	if err := os.Symlink(dataDir, link); err != nil {
+		t.Fatal(err)
+	}
+	linkedPort := serve(link)
+	if err := runfile.Write(filepath.Join(dataDir, "running.json"), runfile.Info{PID: pid, Port: linkedPort, StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if live, _, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, "127.0.0.1", filepath.Join(root, "unused-running.json"), dataDir); err != nil || live == nil {
+		t.Fatalf("a daemon serving this data dir through a symlink was taken for another installation: %+v %v", live, err)
 	}
 }

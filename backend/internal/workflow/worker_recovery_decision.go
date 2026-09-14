@@ -98,6 +98,11 @@ type workerAdoptionFacts struct {
 	// waited out before the wait itself becomes the stop (see
 	// workerRuntimeUnreadableGrace).
 	Now time.Time
+	// UnreadableSince is when THIS process first failed to read the session's
+	// runtime (zero when it has not). The grace is measured from it -- never
+	// from the age of a dispatch record, which after a reboot or a long sleep is
+	// hours old and would turn one failed read into an immediate stop.
+	UnreadableSince time.Time
 }
 
 // workerRuntimeUnreadableGrace is how long recovery waits out a runtime it
@@ -150,7 +155,7 @@ func decideWorkerAdoption(f workerAdoptionFacts) WorkerRecoveryDecision {
 			// next pass asks again -- for a bounded time, after which the wait
 			// is the stop.
 			detail := orValue(obs.Detail, "the runtime could not be read")
-			if !f.Now.IsZero() && !f.ClaimedAt.IsZero() && f.Now.Sub(f.ClaimedAt) > workerRuntimeUnreadableGrace {
+			if !f.Now.IsZero() && !f.UnreadableSince.IsZero() && f.Now.Sub(f.UnreadableSince) > workerRuntimeUnreadableGrace {
 				return failClosed(WorkerReasonRuntimeUnavailable, fmt.Sprintf(
 					"the runtime has stayed unreadable for more than %s: %s", workerRuntimeUnreadableGrace, detail))
 			}
@@ -204,7 +209,24 @@ func (c *Coordinator) observeWorkerRuntime(ctx stdctx.Context, id domain.Session
 	if !obs.Proof.Valid() {
 		obs.Proof = domain.WorkerRuntimeUnavailable
 	}
+	if obs.Proof == domain.WorkerRuntimeUnavailable {
+		c.runtimeUnreadableSince.LoadOrStore(id, c.clock())
+	} else {
+		c.runtimeUnreadableSince.Delete(id)
+	}
 	return &obs
+}
+
+// unreadableSince is when this process first failed to read id's runtime, or
+// zero. In memory on purpose: a restarted daemon owes every runtime a fresh
+// read before a failure to read it may become a stop.
+func (c *Coordinator) unreadableSince(id domain.SessionID) time.Time {
+	if v, ok := c.runtimeUnreadableSince.Load(id); ok {
+		if at, ok := v.(time.Time); ok {
+			return at
+		}
+	}
+	return time.Time{}
 }
 
 // workerAdoptionFactsFor assembles the decision's inputs for adopting rec as the
@@ -225,6 +247,7 @@ func (c *Coordinator) workerAdoptionFactsFor(
 		SessionCreatedAt: rec.CreatedAt,
 		RecordedLaunchID: c.recordedLaunchIDForStep(ctx, run.ID, step.ID),
 		Now:              c.clock(),
+		UnreadableSince:  c.unreadableSince(rec.ID),
 	}
 	f.RecordedWorktree, f.RecordedBranch = c.recordedWorkspaceForStep(ctx, step.ID)
 	if entry.DispatchedAt != nil {

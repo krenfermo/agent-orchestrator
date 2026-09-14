@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -658,6 +659,9 @@ type Coordinator struct {
 	workerLauncher         WorkerLauncher
 	sessionOwnership       SessionOwnership
 	workerRuntimeOwnership WorkerRuntimeOwnership
+	// runtimeUnreadableSince (P9) remembers, per session, when this process first
+	// failed to read its runtime identity. See unreadableSince.
+	runtimeUnreadableSince sync.Map
 	// workerCredentialAdopter re-attaches an orphaned worker credential on the
 	// adoption path. Optional.
 	workerCredentialAdopter WorkerCredentialAdopter

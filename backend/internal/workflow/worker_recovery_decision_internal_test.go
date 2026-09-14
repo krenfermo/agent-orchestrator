@@ -49,10 +49,17 @@ func TestDecideWorkerAdoptionTable(t *testing.T) {
 		{"conpty: unsupported fails closed", with(func(f *workerAdoptionFacts) { f.Runtime = obsOf(domain.WorkerRuntimeUnsupported) }), WorkerRecoveryFailClosed, WorkerReasonRuntimeUnsupported},
 		{"unavailable probe waits, concludes nothing", with(func(f *workerAdoptionFacts) {
 			f.Runtime = obsOf(domain.WorkerRuntimeUnavailable)
+			f.UnreadableSince = claimed
 			f.Now = claimed.Add(time.Minute)
+		}), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},
+		{"an hours-old claim with a FIRST failed read still waits", with(func(f *workerAdoptionFacts) {
+			f.Runtime = obsOf(domain.WorkerRuntimeUnavailable)
+			f.Now = claimed.Add(6 * time.Hour)
+			f.UnreadableSince = f.Now
 		}), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},
 		{"a runtime unreadable past the grace fails closed, never adopts", with(func(f *workerAdoptionFacts) {
 			f.Runtime = obsOf(domain.WorkerRuntimeUnavailable)
+			f.UnreadableSince = claimed
 			f.Now = claimed.Add(workerRuntimeUnreadableGrace + time.Second)
 		}), WorkerRecoveryFailClosed, WorkerReasonRuntimeUnavailable},
 		{"out-of-vocabulary proof waits", with(func(f *workerAdoptionFacts) { f.Runtime = obsOf("bogus") }), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},

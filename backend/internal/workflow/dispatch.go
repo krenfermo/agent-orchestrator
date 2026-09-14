@@ -768,9 +768,16 @@ func (c *Coordinator) adoptOrMarkAmbiguous(ctx stdctx.Context, run domain.Workfl
 		// ambiguity below with that fact in its sentence -- never to a second
 		// launch from here.
 		decision := decideWorkerAdoption(c.workerAdoptionFactsFor(ctx, run, step, entry, rec, c.observeWorkerRuntime(ctx, rec.ID)))
-		switch decision.Action {
-		case WorkerRecoveryAdopt:
+		if decision.Action == WorkerRecoveryAdopt {
 			return c.recordDispatchSuccess(ctx, run, step, entry, rec)
+		}
+		// A launch still inside its settle window may be IN FLIGHT in another
+		// pass, which has not yet stamped or confirmed what this pass is reading.
+		// Nothing but an adoption is concluded about it yet: no stop, no retry.
+		if entry.DispatchedAt != nil && c.clock().Sub(*entry.DispatchedAt) < dispatchReconcileSettleWindow {
+			return step, nil
+		}
+		switch decision.Action {
 		case WorkerRecoveryFailClosed:
 			return c.stopWorkerOwnershipUnproven(ctx, run, step, rec.ID, decision)
 		case WorkerRecoveryWait, WorkerRecoveryNoop:

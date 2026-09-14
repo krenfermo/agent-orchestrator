@@ -98,10 +98,30 @@ func liveDaemonForDataDir(client *http.Client, host, runFilePath, dataDir string
 		if !serving {
 			continue
 		}
-		if servedDir != "" && filepath.Clean(servedDir) != filepath.Clean(dataDir) {
+		if i == 0 {
+			// The CONFIGURED run-file is the one this daemon is about to write.
+			// A live daemon behind it is refused whatever data dir it serves:
+			// starting would overwrite its handshake (and exiting would delete
+			// it), leaving that daemon undiscoverable.
+			return live, path, nil
+		}
+		if servedDir != "" && !sameDataDirPath(servedDir, dataDir) {
 			continue
 		}
 		return live, path, nil
 	}
 	return nil, "", nil
+}
+
+// sameDataDirPath compares two data dirs after resolving symlinks, so
+// /tmp/ao and /private/tmp/ao on macOS are one installation, never two daemons
+// on one database.
+func sameDataDirPath(a, b string) bool {
+	ca, cb := filepath.Clean(a), filepath.Clean(b)
+	if ca == cb {
+		return true
+	}
+	ea, errA := filepath.EvalSymlinks(ca)
+	eb, errB := filepath.EvalSymlinks(cb)
+	return errA == nil && errB == nil && ea == eb
 }

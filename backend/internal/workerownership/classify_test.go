@@ -3,6 +3,7 @@ package workerownership
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -111,7 +112,9 @@ func TestClassifyTable(t *testing.T) {
 		{name: "row contradicts itself", rec: selfContradicting, reader: &scriptedReader{}, want: domain.WorkerRuntimeOwnerMismatch},
 		{name: "unsupported runtime (conpty)", rec: rec, nilRdr: true, want: domain.WorkerRuntimeUnsupported},
 		{name: "probe failure concludes nothing", rec: rec, reader: &scriptedReader{errInst: errors.New("tmux: exit 1")}, want: domain.WorkerRuntimeUnavailable},
-		{name: "name probe failure concludes nothing", rec: rec, reader: &scriptedReader{errName: ports.ErrRuntimeUnavailable}, want: domain.WorkerRuntimeUnavailable},
+		{name: "name probe failure concludes nothing", rec: rec, reader: &scriptedReader{errName: errors.New("tmux: exit 1")}, want: domain.WorkerRuntimeUnavailable},
+		{name: "no tmux server for this installation is a proven absence", rec: rec, reader: &scriptedReader{errInst: fmt.Errorf("probe: %w: no server running", ports.ErrRuntimeUnavailable)}, want: domain.WorkerRuntimeAbsent},
+		{name: "server gone while resolving the name is a proven absence", rec: rec, reader: &scriptedReader{errName: ports.ErrRuntimeUnavailable}, want: domain.WorkerRuntimeAbsent},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

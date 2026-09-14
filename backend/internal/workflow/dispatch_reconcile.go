@@ -768,10 +768,10 @@ func (c *Coordinator) reconcileWorkStepDispatch(
 
 	// P9: a runtime that could not be READ is waited out for a bounded time
 	// before it is allowed to become a stop. One failed tmux read must not park
-	// a live worker; the recorded launch evidence dates how long AO has been
-	// unable to tell.
+	// a live worker; the grace runs from the first failed read in THIS process,
+	// never from the age of the launch record (hours old after a reboot).
 	if owned.Unprovable() && owned.Runtime != nil && owned.Runtime.Proof == domain.WorkerRuntimeUnavailable &&
-		!status.Record.CreatedAt.IsZero() && c.clock().Sub(status.Record.CreatedAt) <= workerRuntimeUnreadableGrace {
+		c.clock().Sub(c.unreadableSince(owned.SessionID)) <= workerRuntimeUnreadableGrace {
 		result.Detail = fmt.Sprintf("the runtime behind this dispatch could not be read; nothing is concluded yet (%s)",
 			owned.describe())
 		return result, run, nil

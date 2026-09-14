@@ -71,6 +71,17 @@ func Classify(
 	}
 
 	facts, exists, err := reader.SessionFacts(ctx, ports.RuntimeHandle{ID: md.RuntimeHandleID, InstanceID: md.RuntimeInstanceID})
+	if errors.Is(err, ports.ErrRuntimeUnavailable) {
+		// The runtime SERVER for this installation is not running at all ("no
+		// server running" / "error connecting" on AO's own, data-dir-scoped tmux
+		// socket): no session of this installation can exist. This is the same
+		// conclusion session_manager's boot reconciliation already draws after a
+		// machine reboot, and it is what lets a launch interrupted by a reboot
+		// take the bounded retry instead of parking as unprovable.
+		obs.Proof = domain.WorkerRuntimeAbsent
+		obs.Detail = "no runtime server is running for this installation, so no session of it can exist"
+		return obs
+	}
 	if err != nil {
 		obs.Proof = domain.WorkerRuntimeUnavailable
 		obs.Detail = fmt.Sprintf("reading runtime %s failed: %s", md.RuntimeInstanceID, boundedError(err))
@@ -80,6 +91,9 @@ func Classify(
 		// The recorded incarnation is gone. Who, if anyone, holds the name?
 		byName, nameExists, nerr := reader.SessionFacts(ctx, ports.RuntimeHandle{ID: md.RuntimeHandleID})
 		switch {
+		case errors.Is(nerr, ports.ErrRuntimeUnavailable):
+			obs.Proof = domain.WorkerRuntimeAbsent
+			obs.Detail = "no runtime server is running for this installation, so no session of it can exist"
 		case nerr != nil:
 			obs.Proof = domain.WorkerRuntimeUnavailable
 			obs.Detail = fmt.Sprintf("incarnation %s is gone and its name could not be resolved: %s",
@@ -147,9 +161,6 @@ const maxErrorDetail = 240
 
 func boundedError(err error) string {
 	msg := err.Error()
-	if errors.Is(err, ports.ErrRuntimeUnavailable) {
-		msg = "runtime unavailable: " + msg
-	}
 	if len(msg) > maxErrorDetail {
 		msg = msg[:maxErrorDetail] + "…"
 	}
