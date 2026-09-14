@@ -514,3 +514,80 @@ func readInstallation(t *testing.T, dataDir string) string {
 	}
 	return strings.TrimSpace(string(b))
 }
+
+// runFileInstallation reads the installation identity the running daemon
+// published in its run-file.
+func (s *scratch) runFileInstallation() string {
+	s.t.Helper()
+	b, err := os.ReadFile(s.runFile)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	var info struct {
+		InstallationID string `json:"installationId"`
+	}
+	if err := json.Unmarshal(b, &info); err != nil {
+		s.t.Fatal(err)
+	}
+	return info.InstallationID
+}
+
+// Independent review §14/§36 — the installation identity policy through the
+// real binary and daemon. A backup of installation A restored over installation
+// D refuses by default and changes nothing; --identity=destination restores the
+// data but keeps D; --identity=backup adopts A. Each time the daemon boots with
+// exactly the identity on disk -- it never mints a third one.
+func TestP10_RestoreIdentityModesThroughTheBinary(t *testing.T) {
+	s := newScratch(t)
+	s.startDaemon()
+	s.stopDaemon()
+	idA := readInstallation(t, s.dataDir)
+	s.insertProject("state-a")
+	out, code := s.ao("backup", "create", "--json")
+	if code != 0 {
+		t.Fatalf("backup (exit %d): %s", code, out)
+	}
+	var created createOut
+	s.jsonOut(out, &created)
+
+	// The data dir becomes another installation, D, with state the backup lacks.
+	const idD = "aoi-d0d0d0d0-d0d0-4d0d-8d0d-d0d0d0d0d0d0"
+	if err := os.WriteFile(filepath.Join(s.dataDir, daemonmeta.InstallationIDFile), []byte(idD+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.insertProject("state-d")
+
+	out, code = s.ao("restore", created.Path, "--yes", "--json")
+	if code != 3 || !strings.Contains(out, "installation_mismatch") {
+		t.Fatalf("default restore across installations: exit %d: %s", code, out)
+	}
+	if readInstallation(t, s.dataDir) != idD || !slices.Contains(s.projectIDs(), "state-d") {
+		t.Fatal("the refused restore changed the destination")
+	}
+
+	out, code = s.ao("restore", created.Path, "--yes", "--json", "--identity=destination")
+	if code != 0 || !strings.Contains(out, "kept_destination") {
+		t.Fatalf("--identity=destination: exit %d: %s", code, out)
+	}
+	if readInstallation(t, s.dataDir) != idD || slices.Contains(s.projectIDs(), "state-d") || !slices.Contains(s.projectIDs(), "state-a") {
+		t.Fatal("--identity=destination did not restore the data under identity D")
+	}
+	s.startDaemon()
+	if got := s.runFileInstallation(); got != idD {
+		t.Fatalf("daemon booted as %q after --identity=destination, want %q", got, idD)
+	}
+	s.stopDaemon()
+
+	out, code = s.ao("restore", created.Path, "--yes", "--json", "--identity=backup")
+	if code != 0 || !strings.Contains(out, "replaced_with_backup") {
+		t.Fatalf("--identity=backup: exit %d: %s", code, out)
+	}
+	if readInstallation(t, s.dataDir) != idA {
+		t.Fatal("--identity=backup did not adopt identity A")
+	}
+	s.startDaemon()
+	if got := s.runFileInstallation(); got != idA {
+		t.Fatalf("daemon booted as %q after --identity=backup, want %q", got, idA)
+	}
+	s.stopDaemon()
+}
