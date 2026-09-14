@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -225,6 +226,63 @@ type WorkflowRecoveryResponse struct {
 	// in, what it is waiting for, and the bounded history that got it there.
 	// Absent only when the daemon could not compose it.
 	Status *WorkflowRecoveryStatusView `json:"status,omitempty"`
+	// WorkerOwnership is P9's ownership readback: per worker step, whether AO
+	// can PROVE the runtime is the one it launched, and what recovery would
+	// decide about it. Absent when the daemon cannot compose it.
+	WorkerOwnership []WorkflowWorkerOwnershipView `json:"workerOwnership,omitempty"`
+}
+
+// WorkflowWorkerOwnershipView is one worker step's ownership as recovery sees it.
+// Identities and closed codes only: no prompt, no command, no environment, no
+// token.
+type WorkflowWorkerOwnershipView struct {
+	StepID    string `json:"stepId"`
+	StepKind  string `json:"stepKind"`
+	StepState string `json:"stepState"`
+	SessionID string `json:"sessionId,omitempty"`
+	// Ownership folds the proof into what a person reads.
+	Ownership string `json:"ownership" enum:"proven,unproven,legacy_unknown,not_applicable"`
+	// Proof is the runtime read-back's closed classification.
+	Proof                  string     `json:"proof,omitempty"`
+	RuntimeInstanceID      string     `json:"runtimeInstanceId,omitempty"`
+	ObservedInstanceID     string     `json:"observedInstanceId,omitempty"`
+	ObservedInstallationID string     `json:"observedInstallationId,omitempty"`
+	LaunchState            string     `json:"launchState,omitempty"`
+	DispatchGeneration     string     `json:"dispatchGeneration,omitempty"`
+	DispatchPhase          string     `json:"dispatchPhase,omitempty"`
+	AttemptID              string     `json:"attemptId,omitempty"`
+	LastSignalAt           *time.Time `json:"lastSignalAt,omitempty"`
+	// RecoveryDecision / RecoveryReason are what recovery would decide NOW:
+	// adopt, relaunch, wait, noop or fail_closed, with a closed reason code.
+	RecoveryDecision string `json:"recoveryDecision,omitempty"`
+	RecoveryReason   string `json:"recoveryReason,omitempty"`
+	Detail           string `json:"detail,omitempty"`
+}
+
+// workerOwnershipReader is the optional service capability behind the readback.
+type workerOwnershipReader interface {
+	WorkerOwnershipFor(ctx context.Context, runID string) ([]workflowcore.WorkerOwnershipReadback, error)
+}
+
+func workflowWorkerOwnershipViews(rows []workflowcore.WorkerOwnershipReadback) []WorkflowWorkerOwnershipView {
+	out := make([]WorkflowWorkerOwnershipView, 0, len(rows))
+	for _, r := range rows {
+		v := WorkflowWorkerOwnershipView{
+			StepID: r.StepID, StepKind: string(r.StepKind), StepState: string(r.StepState), SessionID: r.SessionID,
+			Ownership: string(r.Ownership), Proof: string(r.Proof),
+			RuntimeInstanceID: r.RuntimeInstanceID, ObservedInstanceID: r.ObservedInstanceID,
+			ObservedInstallationID: r.ObservedInstallationID,
+			LaunchState:            string(r.LaunchState), DispatchGeneration: r.DispatchGeneration,
+			DispatchPhase: string(r.DispatchPhase), AttemptID: r.AttemptID,
+			RecoveryDecision: string(r.Decision), RecoveryReason: string(r.Reason), Detail: r.Detail,
+		}
+		if !r.LastSignalAt.IsZero() {
+			at := r.LastSignalAt
+			v.LastSignalAt = &at
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // WorkflowRecoveryStatusView is the recovery projection (P3-D §6/§7).
@@ -506,6 +564,12 @@ func (c *WorkflowsController) getRecovery(w http.ResponseWriter, r *http.Request
 	// assessment above is still the answer an operator came for.
 	if status, serr := svc.RecoveryStatusFor(r.Context(), runID); serr == nil {
 		out.Status = workflowRecoveryStatusView(status)
+	}
+	// P9: the ownership readback rides on the same read, for the same reason.
+	if reader, ok := svc.(workerOwnershipReader); ok {
+		if rows, oerr := reader.WorkerOwnershipFor(r.Context(), runID); oerr == nil {
+			out.WorkerOwnership = workflowWorkerOwnershipViews(rows)
+		}
 	}
 	envelope.WriteJSON(w, http.StatusOK, out)
 }

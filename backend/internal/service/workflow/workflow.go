@@ -460,6 +460,12 @@ func (s *Service) RecoveryStatusFor(ctx context.Context, runID string) (workflow
 	return s.coordinator.RecoveryStatusFor(ctx, runID)
 }
 
+// WorkerOwnershipFor is P9's ownership readback: per worker step, whether AO can
+// prove it owns the runtime and what recovery would decide. A strict read.
+func (s *Service) WorkerOwnershipFor(ctx context.Context, runID string) ([]workflowcore.WorkerOwnershipReadback, error) {
+	return s.coordinator.WorkerOwnershipFor(ctx, runID)
+}
+
 // AssessRecovery implements RecoveryManager.
 func (s *Service) AssessRecovery(ctx context.Context, runID string) (workflowcore.RecoveryAssessment, error) {
 	return s.coordinator.AssessRecovery(ctx, runID)

@@ -459,6 +459,7 @@ var schemaNames = map[string]string{
 	"ControllersWorkflowRepairArtifactView":       "WorkflowRepairArtifactView",
 	"ControllersWorkflowRepairResponse":           "WorkflowRepairResponse",
 	"ControllersWorkflowRecoveryResponse":         "WorkflowRecoveryResponse",
+	"ControllersWorkflowWorkerOwnershipView":      "WorkflowWorkerOwnershipView",
 	"ControllersPlacementOverrideRequestBody":     "PlacementOverrideRequestBody",
 	"ControllersPlacementOverrideView":            "PlacementOverrideView",
 	"ControllersPlacementOverrideResponse":        "PlacementOverrideResponse",

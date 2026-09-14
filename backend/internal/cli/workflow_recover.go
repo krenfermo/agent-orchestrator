@@ -77,6 +77,7 @@ func newWorkflowRecoverCommand(ctx *commandContext) *cobra.Command {
 			"None of them infers the missing fact, and none of them skips a review or a verification.",
 	}
 	cmd.AddCommand(newRecoverStatusCommand(ctx))
+	cmd.AddCommand(newRecoverOwnershipCommand(ctx))
 	cmd.AddCommand(newRecoverReviewProvenanceCommand(ctx))
 	cmd.AddCommand(newRecoverPlanCommand(ctx))
 	return cmd
@@ -165,4 +166,81 @@ func newRecoverPlanCommand(ctx *commandContext) *cobra.Command {
 	cmd.Flags().StringVar(&opts.observedUpdatedAt, "observed-plan-updated-at", "",
 		"The plan's updatedAt as your view read it, RFC3339 (required)")
 	return cmd
+}
+
+// workerOwnershipRow mirrors controllers.WorkflowWorkerOwnershipView.
+type workerOwnershipRow struct {
+	StepID             string     `json:"stepId"`
+	StepKind           string     `json:"stepKind"`
+	StepState          string     `json:"stepState"`
+	SessionID          string     `json:"sessionId"`
+	Ownership          string     `json:"ownership"`
+	Proof              string     `json:"proof"`
+	RuntimeInstanceID  string     `json:"runtimeInstanceId"`
+	ObservedInstanceID string     `json:"observedInstanceId"`
+	LaunchState        string     `json:"launchState"`
+	DispatchGeneration string     `json:"dispatchGeneration"`
+	DispatchPhase      string     `json:"dispatchPhase"`
+	AttemptID          string     `json:"attemptId"`
+	LastSignalAt       *time.Time `json:"lastSignalAt"`
+	RecoveryDecision   string     `json:"recoveryDecision"`
+	RecoveryReason     string     `json:"recoveryReason"`
+	Detail             string     `json:"detail"`
+}
+
+// newRecoverOwnershipCommand is P9's ownership readback: whether AO can PROVE it
+// owns each worker of a run, and what recovery would decide. Reads only.
+func newRecoverOwnershipCommand(ctx *commandContext) *cobra.Command {
+	return &cobra.Command{
+		Use:   "ownership <workflow-id>",
+		Short: "Show whether AO can prove it owns each worker of a run, and what recovery would decide",
+		Long: "For every worker step: the session, the runtime identity AO recorded and the one the runtime answered\n" +
+			"with, the launch generation and attempt, the last signal, and the recovery decision with its reason code.\n\n" +
+			"\"unproven\" means AO cannot prove the runtime is the one it launched -- not that the worker failed.\n" +
+			"It reads only -- nothing here adopts, relaunches or stops anything.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID, err := workflowIDArg(args)
+			if err != nil {
+				return err
+			}
+			var res struct {
+				WorkerOwnership []workerOwnershipRow `json:"workerOwnership"`
+			}
+			if err := ctx.getJSON(cmd.Context(), "workflows/"+url.PathEscape(runID)+"/recovery", &res); err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if len(res.WorkerOwnership) == 0 {
+				_, err := fmt.Fprintln(out, "no worker ownership readback for this run")
+				return err
+			}
+			for _, row := range res.WorkerOwnership {
+				_, _ = fmt.Fprintf(out, "step %s (%s, %s): ownership %s", row.StepID, row.StepKind, row.StepState, row.Ownership)
+				if row.Proof != "" {
+					_, _ = fmt.Fprintf(out, " [%s]", row.Proof)
+				}
+				_, _ = fmt.Fprintln(out)
+				if row.SessionID != "" {
+					runtime := row.RuntimeInstanceID
+					if row.ObservedInstanceID != "" && row.ObservedInstanceID != row.RuntimeInstanceID {
+						runtime += " -> " + row.ObservedInstanceID
+					}
+					_, _ = fmt.Fprintf(out, "  session %s  runtime %s\n", row.SessionID, orDash(runtime))
+				}
+				_, _ = fmt.Fprintf(out, "  launch %s  generation %s  phase %s  attempt %s\n",
+					orDash(row.LaunchState), orDash(row.DispatchGeneration), orDash(row.DispatchPhase), orDash(row.AttemptID))
+				if row.LastSignalAt != nil {
+					_, _ = fmt.Fprintf(out, "  last signal %s\n", row.LastSignalAt.UTC().Format(time.RFC3339))
+				}
+				if row.RecoveryDecision != "" {
+					_, _ = fmt.Fprintf(out, "  recovery: %s (%s)\n", row.RecoveryDecision, row.RecoveryReason)
+				}
+				if row.Detail != "" {
+					_, _ = fmt.Fprintf(out, "  %s\n", row.Detail)
+				}
+			}
+			return nil
+		},
+	}
 }

@@ -25259,6 +25259,10 @@ components:
           $ref: '#/components/schemas/WorkflowRepairPlanView'
         status:
           $ref: '#/components/schemas/ControllersWorkflowRecoveryStatusView'
+        workerOwnership:
+          items:
+            $ref: '#/components/schemas/WorkflowWorkerOwnershipView'
+          type: array
       required:
       - recovery
       - repair
@@ -26438,6 +26442,56 @@ components:
       - scope
       - reasons
       - changedFiles
+      type: object
+    WorkflowWorkerOwnershipView:
+      properties:
+        attemptId:
+          type: string
+        detail:
+          type: string
+        dispatchGeneration:
+          type: string
+        dispatchPhase:
+          type: string
+        lastSignalAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        launchState:
+          type: string
+        observedInstallationId:
+          type: string
+        observedInstanceId:
+          type: string
+        ownership:
+          enum:
+          - proven
+          - unproven
+          - legacy_unknown
+          - not_applicable
+          type: string
+        proof:
+          type: string
+        recoveryDecision:
+          type: string
+        recoveryReason:
+          type: string
+        runtimeInstanceId:
+          type: string
+        sessionId:
+          type: string
+        stepId:
+          type: string
+        stepKind:
+          type: string
+        stepState:
+          type: string
+      required:
+      - stepId
+      - stepKind
+      - stepState
+      - ownership
       type: object
     WorkspaceFileResponse:
       properties:

@@ -8832,6 +8832,7 @@ export interface components {
             recovery: components["schemas"]["WorkflowRecoveryView"];
             repair: components["schemas"]["WorkflowRepairPlanView"];
             status?: components["schemas"]["ControllersWorkflowRecoveryStatusView"];
+            workerOwnership?: components["schemas"]["WorkflowWorkerOwnershipView"][];
         };
         WorkflowRecoveryView: {
             automaticAllowed: boolean;
@@ -9252,6 +9253,27 @@ export interface components {
             policyVersion: string;
             reasons: string[];
             scope: string;
+        };
+        WorkflowWorkerOwnershipView: {
+            attemptId?: string;
+            detail?: string;
+            dispatchGeneration?: string;
+            dispatchPhase?: string;
+            /** Format: date-time */
+            lastSignalAt?: null | string;
+            launchState?: string;
+            observedInstallationId?: string;
+            observedInstanceId?: string;
+            /** @enum {string} */
+            ownership: "proven" | "unproven" | "legacy_unknown" | "not_applicable";
+            proof?: string;
+            recoveryDecision?: string;
+            recoveryReason?: string;
+            runtimeInstanceId?: string;
+            sessionId?: string;
+            stepId: string;
+            stepKind: string;
+            stepState: string;
         };
         WorkspaceFileResponse: {
             additions: number;
