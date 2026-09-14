@@ -376,16 +376,25 @@ gated behind `?ownership=1` so the UI's 5-second recovery poll does not run it.
 
 ## 20. Debts left for P10 / P11 and risks
 
-* Electron wedged-orphan takeover signals a PID that is merely alive (`main.ts`).
+* ~~Electron wedged-orphan takeover signals a PID that is merely alive (`main.ts`).~~ Fixed in
+  the integration review (§22): no signal is ever sent to a port holder.
 * session_manager's boot `reconcileLive` still adopts a session whose tmux NAME is alive
-  (it grants no workflow ownership, but it is the same weaker probe).
+  (it grants no workflow ownership, but it is the same weaker probe). It now treats only a
+  missing socket as death (§22).
 * Reviewer residues (untokened ack, status-only still-authorized check) — documented, not
   changed (closed lifecycle, no duplicate demonstrated).
-* conpty recovery parity.
+* conpty recovery parity (fail-closed on restart adoption; does not block the macOS merge).
 * `ao import` checks only the configured run-file.
-* Attempt-outcome refinements in `failover.go` / `work_adoption.go` stay unconditional.
+* ~~Attempt-outcome refinements in `failover.go` / `work_adoption.go` stay unconditional.~~
+  Fixed in §22.
 * Trusted-local mode issues no worker credential, so a work report is fenced by the
-  session binding alone.
+  session binding alone (tested in §22: a replaced generation's late report is refused).
+* A tmux `$N` is unique only within one server lifetime: after a server restart a NEW
+  session can receive a recycled `$N`. The owner token (session + launch) is still compared,
+  so a recycled `$N` alone never proves ownership.
+* An unprovable reviewer that outlives a CLOSED run is visible only as a (deduplicated)
+  warning log; the closed run's ledger stays immutable (§22). A read-only diagnostics surface
+  for it is P10/P11 work.
 * Soak (P11): 15-minute unreadable grace and fix silence window unvalidated over days.
 
 ## 21. Independent adversarial review (fresh context, read-only) — dispositions
@@ -395,11 +404,61 @@ gated behind `?ownership=1` so the UI's 5-second recovery poll does not run it.
 | 1 | "Resume agent" respawns through `Restart` with a name-only handle; the empty instance id overwrote the recorded `$N`, so every restored worker became `provenance_missing` forever. T5 missed it because it restarted with the `Create` handle. | CONFIRMED | Fixed in `relaunchSessionWithPolicy`: the recorded incarnation is carried over when the runtime returns the same session without naming one. `TestP9ResumeThroughRestartKeepsTheRecordedIncarnation` goes through `ResumeAgentWithMode`. |
 | 2 | Startup skipped a live daemon behind the CONFIGURED run-file when it served another data dir, so a scratch daemon sharing `~/.ao/running.json` would overwrite (and on exit delete) a live daemon's handshake. | CONFIRMED | Fixed: a live daemon behind the configured run-file refuses the start whatever data dir it serves. Test covers the shared path. |
 | 3 | Startup compared data dirs with `filepath.Clean` only; `/tmp/ao` vs `/private/tmp/ao` would be two daemons on one DB. | CONFIRMED | Fixed: symlink-aware comparison (`sameDataDirPath`), as the CLI already did. Test covers a symlinked data dir. |
-| 4 | Unreadable-runtime grace measured from record age: after a reboot the first failed read parked immediately; a dead tmux server was `unavailable`, not `absent`. | PLAUSIBLE → fixed | "no server running" / "error connecting" on AO's private socket is now `absent` (session_manager's boot reconciliation already draws that conclusion after a reboot); other failed reads get a grace measured from the first failed read in THIS process. Tests: real tmux `kill-server`, decision table, hours-old launch. |
+| 4 | Unreadable-runtime grace measured from record age: after a reboot the first failed read parked immediately; a dead tmux server was `unavailable`, not `absent`. | PLAUSIBLE → fixed, then narrowed in §22 | (Superseded by §22 2.1: only a MISSING socket is `absent`; "no server running" stays `unavailable`.) Originally: "no server running" / "error connecting" on AO's private socket is now `absent` (session_manager's boot reconciliation already draws that conclusion after a reboot); other failed reads get a grace measured from the first failed read in THIS process. Tests: real tmux `kill-server`, decision table, hours-old launch. |
 | 5 | A concurrent pass could fail an in-flight launch closed inside the 30 s settle window (conpty `unsupported`). | PLAUSIBLE → fixed | Inside the settle window only an adoption may be concluded. `TestP9_InFlightLaunchIsNotStoppedInsideTheSettleWindow`. |
-| 6 | After an AO restore of an unconfirmed session (new launch L2, record still L1), natural-key adoption fails closed on `launch_mismatch`. | PLAUSIBLE | Kept deliberately: the launch fence pre-dates P9 in `adoptLiveLaunch`; P9 applies it on every adoption path. The false stop is conservative, rare (restore of a never-confirmed worker) and names its reason; relaxing the fence needs its own proof. Documented debt. |
+| 6 | After an AO restore of an unconfirmed session (new launch L2, record still L1), natural-key adoption fails closed on `launch_mismatch`. | PLAUSIBLE → fixed in §22 | (Superseded by §22.) Originally kept deliberately: the launch fence pre-dates P9 in `adoptLiveLaunch`; P9 applies it on every adoption path. The false stop is conservative, rare (restore of a never-confirmed worker) and names its reason; relaxing the fence needs its own proof. Documented debt. |
 | minor | A lost session bind leaves the spawned runtime unbound (logged, not destroyed); a failed `respawn-pane` after the restamp reads as `owner_mismatch`. | noted | Debts; neither creates a second owner. |
 
 Reviewer's "no defect found": no fail-open or second-owner path with the port wired; reviewer
 terminal guard correctly scoped; readback writes nothing and leaks nothing; CLI stop/status
 never act on unverified or foreign daemons.
+
+## 22. Independent integration review — dispositions
+
+The integration review re-derived every invariant from the code instead of the author report,
+with two fresh-context reviewers plus an own pass. Every correction lives on the feature
+branch, in separate commits. "Test" names the test that fails without the fix.
+
+### Stale-generation writes (merge blocker class)
+
+| # | Finding | Disposition | Test |
+| --- | --- | --- | --- |
+| S1 | `failover.go` success path concluded the predecessor with an unconditional update and opened a successor with a plain create: two passes reporting one failure could both open generation N+1, or a stale pass could overwrite a newer outcome. | Predecessor concluded through `ClaimWorkflowAttemptOutcome`; successor opened through the serialized `ClaimOpenWorkflowAttempt`; a lost claim writes nothing further. | `TestP9StaleGeneration_FailoverLosesThePredecessorAndWritesNothing` (gen-2 wins inside gen-1's claim; -race) |
+| S2 | `failLiveWorkAttempt` parked the step and wrote a failure checkpoint without owning the attempt. | Claims the attempt first; a lost claim is a no-op (no waiting, no park, no checkpoint). A ledger refusal whose obligation already has a successor (`failoverAdvancedElsewhere`) is "not yours", never a park. | `TestP9StaleGeneration_FailLiveWorkAttemptLosesAndDoesNotPark` |
+| S3 | `work_adoption.go` ignored the result of every step CAS, closed "whatever attempt is latest", and could adopt under an authorized launch. | Refuses while the step's spawn command is pending/dispatched; every hop's CAS result is honoured; only the adopted dispatch's attempt is closed, through the claim. | `TestP9StaleGeneration_AdoptionThatLosesTheStepCASCompletesNothing`, `TestP9StaleGeneration_AdoptionRefusesWhileAWorkerLaunchIsAuthorized` |
+| S4 | `worker_progress.go` refined a concluded attempt unconditionally. | `RefineConcludedWorkflowAttempt` compare-and-swaps on the outcome the caller read. | `TestRefineConcludedWorkflowAttemptIsFencedByTheReadOutcome` (store, -race) |
+| S5 | Trusted-local work report from a replaced generation. | Already bound to the step's CURRENT session; now proven. | `TestP9Crash_ReplacedGenerationsLateWorkReportIsRefused` |
+
+### Recovery decision
+
+| # | Finding | Disposition |
+| --- | --- | --- |
+| 1.1 | The generation fence was skipped whenever ANY launch was recorded, including an older generation's record. | Evidence is read from the CURRENT generation only (`currentGenerationLaunchEvidence`: the outbox token names the intent, the intent names the attempt); the creation-instant fence applies whenever the runtime was read. |
+| 1.2 | A zero claim instant disabled the fence. | Zero `ClaimedAt` or zero session creation instant fails closed (`generation_mismatch`). |
+| 4 | `launch_mismatch` after AO's own restore of the same session was a false stop. | Adopted only when the runtime PROVES the row's current launch and this generation's evidence names this very session; a new launch on any other session stays `launch_mismatch`. `TestP9Crash_C3_SameSessionRelaunchedByAOIsAdopted` + decision table. |
+| T | A terminated session row could be adopted. | Never adopted (`runtime_missing` → relaunch path). |
+| 3.x | Grace measured on the wall clock; readback started it. | Measured on a monotonic clock from this process's first failed read; only a successful read ends the episode (sparse polling cannot reset it); readback is read-only and reports `settle_window` inside the window. |
+| 7 | `stopWorkerOwnershipUnproven` could stop a run that became terminal meanwhile. | Re-reads terminal state on disk first. |
+
+### Runtime facts (tmux)
+
+| # | Finding | Disposition |
+| --- | --- | --- |
+| 2.1 | Any unreachable server was `absent`, so a transient tmux failure could relaunch a second worker (and session_manager could stash/terminate a live session). | New `ports.ErrRuntimeServerAbsent`, wrapped ONLY for `error connecting to <socket> (No such file or directory)` (measured on tmux 3.7b). Classify, `reconcileLive` and `restartRuntime` treat only that as death. Real tmux: kill-server with the socket left → `unavailable`; socket removed → `absent`. |
+| 2.2 | `instanceEnv` read any failure as "unmarked". | Only `unknown variable` is unmarked; `no such session` (3.7b) is instance-gone; everything else is an error. |
+| 1.3 | Name resolution used a bare target (prefix match). | Measured: `display-message -t =name` answers EMPTY with exit 0 (would read a live session as absent); `-t =name:` is exact. `exactSessionFormatTarget`. |
+| 5.1 | Resume handle carried no incarnation. | `RuntimeHandle{ID, InstanceID}` from the row. |
+| 5.2 | Restart restamped the owner without rollback. | Reads the previous owner from the exact incarnation first (refuses if unreadable) and restores it on any later failure. Unit tests with the fake runner. |
+
+### Daemon, discovery, Electron
+
+| # | Finding | Disposition |
+| --- | --- | --- |
+| B1 | Startup guard missed the default run-file for `--data-dir`. | `config.DefaultRunFilePath()` is a candidate; an unreadable candidate refuses the start. |
+| B2 | Check-then-write race between two starting daemons. | `internal/daemonlock`: exclusive non-blocking OS locks (flock / LockFileEx) on `<dataDir>/daemon.lock` and `<runFile>.lock`, held for the daemon lifetime, taken before the store opens. Race test: 16 acquirers → 1 winner. |
+| B3 | `installation_id` could be observed empty/partial; a malformed one ran unstamped. | Staged temp file + fsync + `os.Link` (exclusive publish) + dir fsync, 0600; a malformed identity refuses the daemon start and is never rewritten. |
+| B6 | Unprovable reviewer on a closed run was invisible. | Deduplicated warning log; the closed run's ledger stays immutable (a durable record was tried and rejected: it violates §14). Immutability test now counts the ledger before any read and guards against vacuity (`probeCalls` must move). |
+| B10 | CLI: live PID + probe answered by another process → `stale` (file removed). | `running_unverified`: no stop, no signal, file kept. |
+| E | Electron takeover sent SIGTERM to a merely-alive PID. | `decidePortHolderTakeover` → spawn / graceful_shutdown (HTTP, identity-verified, PID and instance must match) / refuse. No signal path remains. |
+| E2E-3 | — | Real daemon: forged run-file naming a live bystander PID with a mismatched instance → `ao status` unverified, `ao stop` refuses, the bystander receives no signal, the answering daemon survives, the file is kept, and a second daemon on the same data dir refuses to start. |
+
