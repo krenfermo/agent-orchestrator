@@ -24,32 +24,32 @@ package domain
 type WorkerRuntimeProof string
 
 const (
-	// WorkerRuntimeOwned: every identity link holds and the workload is alive
+	// WorkerRuntimeOwned means every identity link holds and the workload is alive
 	// (or its liveness is unreadable while the exact incarnation still exists).
 	WorkerRuntimeOwned WorkerRuntimeProof = "owned"
-	// WorkerRuntimeOwnedExited: every identity link holds and the workload
+	// WorkerRuntimeOwnedExited means every identity link holds and the workload
 	// process is provably gone, while the pane is still there.
 	WorkerRuntimeOwnedExited WorkerRuntimeProof = "owned_exited"
-	// WorkerRuntimeAbsent: the runtime answered that neither the recorded
+	// WorkerRuntimeAbsent means the runtime answered that neither the recorded
 	// incarnation nor any session under the recorded name exists.
 	WorkerRuntimeAbsent WorkerRuntimeProof = "absent"
-	// WorkerRuntimeInstanceMismatch: something answers under the recorded
+	// WorkerRuntimeInstanceMismatch means something answers under the recorded
 	// name, but it is a different incarnation than the one AO recorded.
 	WorkerRuntimeInstanceMismatch WorkerRuntimeProof = "instance_mismatch"
-	// WorkerRuntimeOwnerMismatch: the incarnation exists and carries an
+	// WorkerRuntimeOwnerMismatch means the incarnation exists and carries an
 	// ownership token that is not the one this session's launch recorded.
 	WorkerRuntimeOwnerMismatch WorkerRuntimeProof = "owner_mismatch"
-	// WorkerRuntimeInstallationMismatch: the runtime is stamped by a different
+	// WorkerRuntimeInstallationMismatch means the runtime is stamped by a different
 	// AO installation than the one reading it.
 	WorkerRuntimeInstallationMismatch WorkerRuntimeProof = "installation_mismatch"
-	// WorkerRuntimeProvenanceMissing: the row (or the runtime) carries no
+	// WorkerRuntimeProvenanceMissing means the row (or the runtime) carries no
 	// ownership provenance to compare — a legacy session, or a launch whose
 	// runtime identity was never made durable. Never inferred, never adopted.
 	WorkerRuntimeProvenanceMissing WorkerRuntimeProof = "provenance_missing"
-	// WorkerRuntimeUnsupported: the runtime adapter cannot read identity back
+	// WorkerRuntimeUnsupported means the runtime adapter cannot read identity back
 	// (conpty/Windows today). Recovery fails closed on it.
 	WorkerRuntimeUnsupported WorkerRuntimeProof = "unsupported"
-	// WorkerRuntimeUnavailable: the read itself failed. Nothing is concluded.
+	// WorkerRuntimeUnavailable means the read itself failed. Nothing is concluded.
 	WorkerRuntimeUnavailable WorkerRuntimeProof = "unavailable"
 )
 
@@ -116,6 +116,7 @@ type WorkerRuntimeObservation struct {
 // WorkerOwnershipStatus is the operator-facing summary of a proof (readback).
 type WorkerOwnershipStatus string
 
+// The operator-facing ownership answers.
 const (
 	WorkerOwnershipProven        WorkerOwnershipStatus = "proven"
 	WorkerOwnershipUnproven      WorkerOwnershipStatus = "unproven"

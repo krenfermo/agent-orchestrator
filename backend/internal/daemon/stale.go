@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
@@ -82,7 +83,7 @@ func startupRunFileCandidates(runFilePath, dataDir string) []string {
 // liveDaemonForDataDir reports a daemon that is SERVING and serves dataDir (or
 // is too old to say which, in which case a file this installation's paths lead
 // to is taken as its own -- refusing to start is the safe error).
-func liveDaemonForDataDir(client *http.Client, host, runFilePath, dataDir string) (*runfile.Info, string, error) {
+func liveDaemonForDataDir(client *http.Client, runFilePath, dataDir string) (*runfile.Info, string, error) {
 	for i, path := range startupRunFileCandidates(runFilePath, dataDir) {
 		live, err := runfile.CheckStale(path)
 		if err != nil {
@@ -94,7 +95,7 @@ func liveDaemonForDataDir(client *http.Client, host, runFilePath, dataDir string
 		if live == nil {
 			continue
 		}
-		serving, servedDir := runFileDaemonServing(client, host, live)
+		serving, servedDir := runFileDaemonServing(client, config.LoopbackHost, live)
 		if !serving {
 			continue
 		}

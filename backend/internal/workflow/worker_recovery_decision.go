@@ -32,6 +32,7 @@ type WorkerRuntimeOwnership interface {
 // WorkerRecoveryAction is the closed set of things recovery may do.
 type WorkerRecoveryAction string
 
+// The actions recovery may take.
 const (
 	WorkerRecoveryAdopt      WorkerRecoveryAction = "adopt"
 	WorkerRecoveryRelaunch   WorkerRecoveryAction = "relaunch"
@@ -44,6 +45,7 @@ const (
 // are never taken on free text; Detail is for people.
 type WorkerRecoveryReason string
 
+// The closed reason codes.
 const (
 	WorkerReasonMatchingRuntime         WorkerRecoveryReason = "matching_runtime"
 	WorkerReasonRuntimeExited           WorkerRecoveryReason = "runtime_exited"

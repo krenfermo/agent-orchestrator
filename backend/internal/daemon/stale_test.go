@@ -139,7 +139,7 @@ func TestLiveDaemonForDataDirSeesBothConventions(t *testing.T) {
 	if err := runfile.Write(filepath.Join(dataDir, "running.json"), runfile.Info{PID: pid, Port: port, StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	live, path, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, "127.0.0.1", filepath.Join(root, "running.json"), dataDir)
+	live, path, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, filepath.Join(root, "running.json"), dataDir)
 	if err != nil || live == nil || path != filepath.Join(dataDir, "running.json") {
 		t.Fatalf("live=%v path=%q err=%v, want the daemon under the data-dir convention", live, path, err)
 	}
@@ -151,7 +151,7 @@ func TestLiveDaemonForDataDirSeesBothConventions(t *testing.T) {
 	if err := runfile.Write(filepath.Join(elsewhere, "running.json"), runfile.Info{PID: pid, Port: foreignPort, StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if live, _, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, "127.0.0.1", filepath.Join(root, "unused-running.json"), elsewhere); err != nil || live != nil {
+	if live, _, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, filepath.Join(root, "unused-running.json"), elsewhere); err != nil || live != nil {
 		t.Fatalf("a daemon serving another data dir at the alternate location blocked this start: %+v %v", live, err)
 	}
 
@@ -161,7 +161,7 @@ func TestLiveDaemonForDataDirSeesBothConventions(t *testing.T) {
 	if err := runfile.Write(shared, runfile.Info{PID: pid, Port: foreignPort, StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if live, path, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, "127.0.0.1", shared, filepath.Join(root, "scratch-data")); err != nil || live == nil || path != shared {
+	if live, path, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, shared, filepath.Join(root, "scratch-data")); err != nil || live == nil || path != shared {
 		t.Fatalf("a live daemon behind the shared run-file did not block the start: live=%v path=%q err=%v", live, path, err)
 	}
 
@@ -174,7 +174,7 @@ func TestLiveDaemonForDataDirSeesBothConventions(t *testing.T) {
 	if err := runfile.Write(filepath.Join(dataDir, "running.json"), runfile.Info{PID: pid, Port: linkedPort, StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if live, _, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, "127.0.0.1", filepath.Join(root, "unused-running.json"), dataDir); err != nil || live == nil {
+	if live, _, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, filepath.Join(root, "unused-running.json"), dataDir); err != nil || live == nil {
 		t.Fatalf("a daemon serving this data dir through a symlink was taken for another installation: %+v %v", live, err)
 	}
 }

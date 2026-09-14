@@ -6,7 +6,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"log/slog"
 	"net/http"
 	"os"
@@ -27,6 +26,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/codegraph"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
@@ -153,7 +153,7 @@ func RunWithConfig(cfg config.Config) error {
 	// P9: both run-file conventions for this data dir are checked, so a daemon
 	// started as `ao server --data-dir X` (X/running.json) is not missed by a
 	// start that reads the default path -- the two-daemons-on-one-DB shape.
-	if live, path, err := liveDaemonForDataDir(&http.Client{Timeout: staleProbeTimeout}, config.LoopbackHost, cfg.RunFilePath, cfg.DataDir); err != nil {
+	if live, path, err := liveDaemonForDataDir(&http.Client{Timeout: staleProbeTimeout}, cfg.RunFilePath, cfg.DataDir); err != nil {
 		return fmt.Errorf("inspect run-file: %w", err)
 	} else if live != nil {
 		return fmt.Errorf("daemon already running for data dir %s (pid %d, port %d, run-file %s); refusing to start",

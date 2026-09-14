@@ -174,15 +174,18 @@ func (c *commandContext) inspectRunFile(ctx context.Context, cfg config.Config, 
 		return st, info, nil
 	}
 
-	health, err := c.readProbe(ctx, info.Port, "healthz")
-	if err != nil {
+	// Probe failures are FINDINGS about this location, recorded on its status;
+	// they are read as text so none of them is mistaken for a failure of the
+	// inspection itself.
+	health, probeFailure := c.probeText(ctx, info.Port, "healthz")
+	if probeFailure != "" {
 		st.State = stateUnhealthy
-		st.Error = err.Error()
+		st.Error = probeFailure
 		return st, info, nil
 	}
-	if err := verifyProbeOwner(health, info.PID, "healthz"); err != nil {
+	if mismatch := probeOwnerMismatch(health, info.PID, "healthz"); mismatch != "" {
 		st.State = stateStale
-		st.Error = err.Error()
+		st.Error = mismatch
 		return st, info, nil
 	}
 	if reason := probeIdentityMismatch(health, info, cfg.DataDir); reason != "" {
@@ -200,16 +203,16 @@ func (c *commandContext) inspectRunFile(ctx context.Context, cfg config.Config, 
 		return st, info, nil
 	}
 
-	ready, err := c.readProbe(ctx, info.Port, "readyz")
-	if err != nil {
+	ready, probeFailure := c.probeText(ctx, info.Port, "readyz")
+	if probeFailure != "" {
 		st.State = stateNotReady
-		st.Error = err.Error()
+		st.Error = probeFailure
 		return st, info, nil
 	}
-	if err := verifyProbeOwner(ready, info.PID, "readyz"); err != nil {
+	if mismatch := probeOwnerMismatch(ready, info.PID, "readyz"); mismatch != "" {
 		st.State = stateStale
 		st.owned = false
-		st.Error = err.Error()
+		st.Error = mismatch
 		return st, info, nil
 	}
 	if reason := probeIdentityMismatch(ready, info, cfg.DataDir); reason != "" {
@@ -254,4 +257,21 @@ func sameDataDir(a, b string) bool {
 	ea, errA := filepath.EvalSymlinks(ca)
 	eb, errB := filepath.EvalSymlinks(cb)
 	return errA == nil && errB == nil && ea == eb
+}
+
+// probeText is readProbe with its failure rendered as the finding it is.
+func (c *commandContext) probeText(ctx context.Context, port int, path string) (probeResult, string) {
+	probe, err := c.readProbe(ctx, port, path)
+	if err != nil {
+		return probeResult{}, err.Error()
+	}
+	return probe, ""
+}
+
+// probeOwnerMismatch is verifyProbeOwner rendered as a finding ("" = matches).
+func probeOwnerMismatch(probe probeResult, wantPID int, path string) string {
+	if err := verifyProbeOwner(probe, wantPID, path); err != nil {
+		return err.Error()
+	}
+	return ""
 }

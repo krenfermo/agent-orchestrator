@@ -159,7 +159,7 @@ func buildAO(t *testing.T) string {
 		cmd := exec.Command("go", "build", "-o", builtBin, "./cmd/ao")
 		cmd.Dir = moduleDir
 		if b, err := cmd.CombinedOutput(); err != nil {
-			buildErr = fmt.Errorf("go build ao: %v: %s", err, b)
+			buildErr = fmt.Errorf("go build ao: %w: %s", err, b)
 		}
 	})
 	if buildErr != nil {
@@ -381,6 +381,22 @@ func (s *scratch) ao(args ...string) string {
 	return string(out)
 }
 
+// postJSON issues a body-less POST and reports only transport/status failure.
+func (s *scratch) postJSON(path string) error {
+	req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", s.port, path), strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("POST %s: %d", path, resp.StatusCode)
+	}
+	return nil
+}
+
 func (s *scratch) getJSON(path string, v any) error {
 	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d%s", s.port, path), http.NoBody)
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
@@ -411,7 +427,7 @@ func (s *scratch) workOwnership(runID string) ownershipRow {
 	var res struct {
 		WorkerOwnership []ownershipRow `json:"workerOwnership"`
 	}
-	if err := s.getJSON("/api/v1/workflows/"+runID+"/recovery", &res); err != nil {
+	if err := s.getJSON("/api/v1/workflows/"+runID+"/recovery?ownership=1", &res); err != nil {
 		s.t.Fatalf("recovery readback: %v", err)
 	}
 	for _, r := range res.WorkerOwnership {
@@ -601,6 +617,19 @@ func TestP9Daemon_RefusesARuntimeThatIsNotThisLaunch(t *testing.T) {
 	seed := s.seedCrashedLaunch("a-launch-this-row-never-recorded")
 
 	s.startDaemon()
+	// Boot reconciliation runs seconds after the crash, inside the launch's
+	// 30-second settle window, where only an ADOPTION may be concluded (a launch
+	// that young may still be in flight in another pass). Nothing is adopted --
+	// the runtime is not this launch's -- and nothing is stopped yet. The stop is
+	// taken by the first pass after the window: a person's Continue, repeated
+	// until the run reports it, against a deadline.
+	if row := s.workOwnership(seed.runID); row.StepState == "running" && row.SessionID != "" && row.Ownership == "proven" {
+		t.Fatalf("an unproven runtime was adopted at boot: %+v", row)
+	}
+	waitFor(t, 120*time.Second, "the refusal to be taken once the settle window has passed", func() bool {
+		_ = s.postJSON("/api/v1/workflows/" + seed.runID + "/continue")
+		return s.runState(seed.runID) == "needs_attention"
+	})
 	row := s.workOwnership(seed.runID)
 	if row.Ownership != "unproven" || row.Proof != "owner_mismatch" {
 		t.Fatalf("ownership row = %+v, want unproven/owner_mismatch", row)
