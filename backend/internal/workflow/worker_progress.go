@@ -817,8 +817,14 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 			// must still land — the claim would match zero rows and silently
 			// drop it, hiding the ambiguity from the UI exactly as the stranded
 			// row above used to.
+			//
+			// P9: the refinement is itself a compare-and-swap against the
+			// outcome this pass READ, so a verdict another actor recorded in the
+			// meantime is never overwritten by a stale one.
 			if latestAttempt.Outcome == "" && latestAttempt.FinishedAt == nil {
 				_, _ = c.store.ClaimWorkflowAttemptOutcome(ctx, latestAttempt.ID, finishedAt, outcome, errClass)
+			} else if refiner, ok := c.store.(concludedAttemptRefiner); ok {
+				_, _ = refiner.RefineConcludedWorkflowAttempt(ctx, latestAttempt.ID, latestAttempt.Outcome, finishedAt, outcome, errClass)
 			} else {
 				_ = c.store.UpdateWorkflowAttemptOutcome(ctx, latestAttempt.ID, finishedAt, outcome, errClass)
 			}
@@ -886,4 +892,12 @@ func sessionIDIfFound(found bool, sess domain.SessionRecord) domain.SessionID {
 		return ""
 	}
 	return sess.ID
+}
+
+// concludedAttemptRefiner is the optional store capability behind the attempt
+// refinement (P9): update a CONCLUDED attempt only while its outcome is still
+// the one the caller read.
+type concludedAttemptRefiner interface {
+	RefineConcludedWorkflowAttempt(ctx stdctx.Context, attemptID string, expectedOutcome domain.WorkflowAttemptOutcome,
+		finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) (bool, error)
 }

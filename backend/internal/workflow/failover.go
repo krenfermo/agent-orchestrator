@@ -119,8 +119,21 @@ func (c *Coordinator) selectFallbackForWork(ctx stdctx.Context, run domain.Workf
 // surfaces needs_attention on the run.
 func (c *Coordinator) failLiveWorkAttempt(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, attempt domain.WorkflowAttempt, cls ProviderFailureClassification, reason string, now time.Time) (domain.WorkflowStep, error) {
 	if attempt.Outcome == "" {
-		if err := c.store.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, now, domain.WorkflowAttemptFailed, cls.Class); err != nil {
+		// P9: concluded through the CLAIM, not an unconditional update. This
+		// path runs on an attempt read several calls ago; if another actor has
+		// concluded it since (a completing observation, a winning failover),
+		// this attempt is no longer this actor's to fail -- and neither is the
+		// step or the run. Losing the claim writes nothing at all.
+		claimed, err := c.store.ClaimWorkflowAttemptOutcome(ctx, attempt.ID, now, domain.WorkflowAttemptFailed, cls.Class)
+		if err != nil {
 			return step, err
+		}
+		if !claimed {
+			if c.log != nil {
+				c.log.Info("workflow: a provider-failure stop lost its attempt to another actor; nothing written",
+					"step", step.ID, "attempt", attempt.ID)
+			}
+			return step, nil
 		}
 	}
 	if step.State == domain.WorkflowStepRunning {
@@ -272,6 +285,12 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 			return c.failLiveWorkAttempt(ctx, run, step, current, classification, "provider failover refused: "+ferr.Error(), now)
 		}
 		if !hopped {
+			if c.failoverAdvancedElsewhere(ctx, run, step, ledgerAttempt) {
+				// P9: another pass already moved this obligation to a successor.
+				// The refusal is not "no more hops", it is "not yours": nothing
+				// is failed and nothing is parked.
+				return step, nil
+			}
 			return c.failLiveWorkAttempt(ctx, run, step, current, classification,
 				"the durable provider-attempt ledger refused another hop (budget spent, or every provider already tried)", now)
 		}
@@ -325,11 +344,29 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 		return step, nil
 	}
 
-	if err := c.store.UpdateWorkflowAttemptOutcome(ctx, current.ID, now, domain.WorkflowAttemptFailed, classification.Class); err != nil {
+	// P9: the predecessor is concluded through the CLAIM and the successor is
+	// opened through the serialized open-attempt claim. Two passes reporting the
+	// same failure both reach this point through the idempotent switch; only the
+	// one that concludes the predecessor may open generation N+1, and the other
+	// writes nothing -- never a second attempt, never an overwrite.
+	claimed, err := c.store.ClaimWorkflowAttemptOutcome(ctx, current.ID, now, domain.WorkflowAttemptFailed, classification.Class)
+	if err != nil {
 		return step, err
 	}
-	if _, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), step.ID, string(fallback), "", now); err != nil {
+	if !claimed {
+		if c.log != nil {
+			c.log.Info("workflow: provider failover lost its predecessor attempt to another actor; no successor opened",
+				"step", step.ID, "attempt", current.ID)
+		}
+		return step, nil
+	}
+	if _, created, err := c.store.ClaimOpenWorkflowAttempt(ctx, "wfa-"+c.newID(), step.ID, string(fallback), "", now); err != nil {
 		return step, err
+	} else if !created {
+		if c.log != nil {
+			c.log.Warn("workflow: provider failover found another open attempt; no successor opened", "step", step.ID)
+		}
+		return step, nil
 	}
 	// §I: the successor inherits the SAME frozen placement and the SAME live
 	// session. Nothing about the placement changed — the provider did — so the
@@ -359,4 +396,23 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 		return step, err
 	}
 	return step, nil
+}
+
+// failoverAdvancedElsewhere reports that the provider-attempt obligation this
+// pass read has already been handed to a successor by another pass (P9). A
+// ledger refusal in that state means "not yours", never "no provider left".
+func (c *Coordinator) failoverAdvancedElsewhere(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, read domain.ProviderAttempt) bool {
+	if !c.providerAttemptsEnabled() || read.ID == "" {
+		return false
+	}
+	attempts, err := c.providerAttempts.ListProviderAttemptsForObligation(ctx, run.ID, step.ID, read.LifecycleGeneration)
+	if err != nil {
+		return false
+	}
+	for _, a := range attempts {
+		if a.ID != read.ID && a.Ordinal > read.Ordinal {
+			return true
+		}
+	}
+	return false
 }
