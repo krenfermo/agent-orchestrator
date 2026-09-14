@@ -38,6 +38,9 @@ const (
 	CodeInstallationMismatch    Code = "installation_mismatch"
 	CodeSecretKeyMismatch       Code = "secret_key_mismatch"
 	CodeSourceInsideDestination Code = "source_inside_destination"
+	// CodeDestinationInsideSource: the data dir or the pre-restore backup root
+	// lives inside the backup being restored.
+	CodeDestinationInsideSource Code = "destination_inside_source"
 	CodeInsufficientSpace       Code = "insufficient_space"
 	CodeRestoreInterrupted      Code = "restore_interrupted"
 	CodeUnsafePath              Code = "unsafe_path"

@@ -178,6 +178,9 @@ func ParseManifest(data []byte) (*Manifest, Status, []Finding) {
 	if err := json.Unmarshal(data, &head); err != nil {
 		return invalid(CodeManifestInvalid, "manifest is not valid JSON: %v", err)
 	}
+	if err := rejectDuplicateKeys(data); err != nil {
+		return invalid(CodeManifestInvalid, "manifest is ambiguous: %v", err)
+	}
 	if head.Format != FormatV1 {
 		if formatPattern.MatchString(head.Format) {
 			return nil, StatusUnsupported, []Finding{{Code: CodeUnsupportedManifest,
@@ -199,6 +202,58 @@ func ParseManifest(data []byte) (*Manifest, Status, []Finding) {
 		return &m, StatusInvalid, findings
 	}
 	return &m, StatusValid, nil
+}
+
+const maxJSONDepth = 32
+
+// rejectDuplicateKeys fails on any JSON object that names a key twice.
+// encoding/json silently keeps the last value, so without this one document
+// could read one way here and another way to a tool that keeps the first: a
+// "manual" backup that another reader sees as "pre-restore", or a v1 manifest
+// that another reader sees as v2. data must already be valid JSON.
+func rejectDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var walk func(depth int) error
+	walk = func(depth int) error {
+		if depth > maxJSONDepth {
+			return errors.New("JSON nests too deeply")
+		}
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := tok.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := map[string]bool{}
+			for dec.More() {
+				kt, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, _ := kt.(string)
+				if seen[key] {
+					return fmt.Errorf("key %q appears twice in one object", key)
+				}
+				seen[key] = true
+				if err := walk(depth + 1); err != nil {
+					return err
+				}
+			}
+		case '[':
+			for dec.More() {
+				if err := walk(depth + 1); err != nil {
+					return err
+				}
+			}
+		}
+		_, err = dec.Token() // the closing delimiter
+		return err
+	}
+	return walk(0)
 }
 
 func (m *Manifest) validate() []Finding {

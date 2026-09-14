@@ -180,6 +180,20 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		return rep, refusedf(CodeSourceInsideDestination,
 			"backup %s lives inside the data dir %s being restored; move it outside first", source, dataDir)
 	}
+	// Nor may a restore write into its own source -- neither the data dir nor
+	// the pre-restore backup -- checked before either is created.
+	if within(dataDir, source) {
+		return rep, refusedf(CodeDestinationInsideSource,
+			"the data dir %s lives inside the backup %s being restored; a restore never writes into its own source", dataDir, source)
+	}
+	rootCandidate := opts.Root
+	if rootCandidate == "" {
+		rootCandidate = DefaultRoot(dataDir)
+	}
+	if rc, rerr := resolveExisting(rootCandidate); rerr == nil && within(rc, source) {
+		return rep, refusedf(CodeDestinationInsideSource,
+			"the backup root %s lives inside the backup %s being restored; the pre-restore backup would be written into its own source", rc, source)
+	}
 	root, err = resolveRoot(dataDir, opts.Root)
 	if err != nil {
 		return rep, err

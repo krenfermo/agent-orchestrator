@@ -158,6 +158,12 @@ func readJournal(dataDir string) (*journal, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !json.Valid(data) {
+		return nil, errors.New("parse restore journal: not valid JSON")
+	}
+	if err := rejectDuplicateKeys(data); err != nil {
+		return nil, fmt.Errorf("parse restore journal: %w", err)
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var j journal
