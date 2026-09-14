@@ -25,6 +25,12 @@ type Runtime interface {
 	GetOutput(ctx context.Context, handle ports.RuntimeHandle, lines int) (string, error)
 }
 
+// Identity is the provenance a runtime stamps into what it creates (P9).
+type Identity struct {
+	InstallationID   string
+	DaemonInstanceID string
+}
+
 // Compile-time assertions: both adapters must implement the union interface.
 var _ Runtime = (*tmux.Runtime)(nil)
 var _ Runtime = (*conpty.Runtime)(nil)
@@ -43,9 +49,17 @@ var _ Runtime = (*conpty.Runtime)(nil)
 // commands on their way into the pane's shell (Checkpoint 8P-E.13C). Callers
 // pass an AO-owned directory (under the data dir) so nothing AO writes lands
 // outside it; empty falls back to the OS temp dir. Ignored on Windows.
-func New(_ *slog.Logger, tmuxSocket, scratchDir string) Runtime {
+//
+// identity carries P9's provenance stamps (installation + daemon instance) into
+// every tmux session the runtime creates. conpty has no session environment to
+// stamp and no SessionFactsReader, so on Windows it is ignored and recovery
+// fails closed on the missing proof instead of pretending to have it.
+func New(_ *slog.Logger, tmuxSocket, scratchDir string, identity Identity) Runtime {
 	if runtime.GOOS != "windows" {
-		return tmux.New(tmux.Options{Socket: tmuxSocket, ScratchDir: scratchDir})
+		return tmux.New(tmux.Options{
+			Socket: tmuxSocket, ScratchDir: scratchDir,
+			InstallationID: identity.InstallationID, DaemonInstanceID: identity.DaemonInstanceID,
+		})
 	}
 	return conpty.New(conpty.Options{})
 }

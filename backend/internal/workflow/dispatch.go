@@ -759,15 +759,31 @@ func (c *Coordinator) adoptOrMarkAmbiguous(ctx stdctx.Context, run domain.Workfl
 	if err != nil {
 		return step, err
 	}
+	runtimeAbsent := ""
 	if found && (rec.Metadata.WorkspacePath != "" || rec.Metadata.Branch != "") {
-		return c.recordDispatchSuccess(ctx, run, step, entry, rec)
+		// P9: a session under the natural key with a workspace is a CANDIDATE,
+		// not evidence. It is adopted only when its runtime proves it is this
+		// dispatch's launch; a contradiction or a missing provenance stops with
+		// ownership unproven, and a runtime proven absent falls through to the
+		// ambiguity below with that fact in its sentence -- never to a second
+		// launch from here.
+		decision := decideWorkerAdoption(c.workerAdoptionFactsFor(ctx, run, step, entry, rec, c.observeWorkerRuntime(ctx, rec.ID)))
+		switch decision.Action {
+		case WorkerRecoveryAdopt:
+			return c.recordDispatchSuccess(ctx, run, step, entry, rec)
+		case WorkerRecoveryFailClosed:
+			return c.stopWorkerOwnershipUnproven(ctx, run, step, rec.ID, decision)
+		case WorkerRecoveryWait, WorkerRecoveryNoop:
+			return step, nil
+		}
+		runtimeAbsent = decision.Detail
 	}
 	// Session creation persists the natural-key row before workspace
 	// provisioning finishes. A concurrent GetRun/reconcile can therefore see a
 	// freshly dispatched command plus a real but not-yet-populated session. Give
 	// that in-flight provisioning window time to settle; old/unknown dispatched
 	// commands still take the conservative ambiguous path below.
-	if entry.DispatchedAt != nil && c.clock().Sub(*entry.DispatchedAt) < 30*time.Second {
+	if runtimeAbsent == "" && entry.DispatchedAt != nil && c.clock().Sub(*entry.DispatchedAt) < 30*time.Second {
 		return step, nil
 	}
 
@@ -775,6 +791,9 @@ func (c *Coordinator) adoptOrMarkAmbiguous(ctx stdctx.Context, run domain.Workfl
 	nextAction := "ambiguous_worker_state: no session found for dispatched command"
 	if found {
 		nextAction = fmt.Sprintf("ambiguous_worker_state: orphaned session %s with no workspace after restart", rec.ID)
+		if runtimeAbsent != "" {
+			nextAction = fmt.Sprintf("ambiguous_worker_state: session %s was never confirmed and its runtime is gone (%s)", rec.ID, runtimeAbsent)
+		}
 	}
 	// The evidence gate. This path says "ambiguous_worker_state" in the sentence
 	// a person reads, so it owes the same bounded snapshot every other
@@ -1072,8 +1091,28 @@ func (c *Coordinator) confirmWorkerDispatch(
 		}
 		entry.Status = domain.WorkflowOutboxAcknowledged
 	}
-	if _, err := c.store.UpdateWorkflowStepSession(ctx, step.ID, sessID, now); err != nil {
+	bound, err := c.store.UpdateWorkflowStepSession(ctx, step.ID, sessID, now)
+	if err != nil {
 		return step, err
+	}
+	if !bound {
+		// P9 (I1): the bind is `session_id IS NULL`, so losing it means the step
+		// already holds a session. Only the SAME session is an idempotent
+		// replay (a crash between this write and the RUNNING transition). Any
+		// other session is a second owner for one step: nothing that asserts
+		// ownership -- the usage window, the branch lock pointer, RUNNING -- may
+		// be written for this one.
+		current, found, gerr := c.getWorkflowStep(ctx, run.ID, step.ID)
+		if gerr != nil {
+			return step, gerr
+		}
+		if !found || current.SessionID == nil || *current.SessionID != sessID {
+			if c.log != nil {
+				c.log.Warn("workflow: refusing to bind a worker session to a step that already holds another",
+					"run", run.ID, "step", step.ID, "session", sessID)
+			}
+			return step, nil
+		}
 	}
 	step.SessionID = &sessID
 
@@ -1131,16 +1170,19 @@ func (c *Coordinator) confirmWorkerDispatch(
 // idempotently (the crash-between-acknowledge-and-session-write window), not a
 // different pass's claim.
 //
-// A read it cannot perform answers TRUE. This is a pre-check whose job is to
-// stop obviously-lost passes early; the durable arbiter is the generation-fenced
-// acknowledge, and failing closed here would turn an unreadable outbox into a
-// refusal to confirm a launch that is genuinely this pass's own.
+// A read it cannot perform answers FALSE (P9). It used to answer true, on the
+// argument that the generation-fenced acknowledge is the durable arbiter -- but
+// every write BEFORE that acknowledge (the confirmation record, the
+// worker_dispatched phase marker, the repair workspace evidence) would then land
+// for a claim nobody could prove this pass still held. Refusing costs nothing
+// that matters: the launch is recorded as unconfirmed, naming its session, and
+// the next pass adopts it only on a runtime ownership proof.
 func (c *Coordinator) stillOwnsWorkerDispatch(
 	ctx stdctx.Context, run domain.WorkflowRun, entry domain.WorkflowOutboxEntry, intent workerDispatchIntent,
 ) bool {
 	entries, err := c.store.ListWorkflowOutboxByRun(ctx, run.ID)
 	if err != nil {
-		return true
+		return false
 	}
 	for _, e := range entries {
 		if e.ID != entry.ID {

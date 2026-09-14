@@ -139,6 +139,14 @@ type Config struct {
 	// fresh id per boot, which correctly makes any surviving shell terminals
 	// from an earlier run look like orphans and get cleaned up.
 	AppRunID string
+	// InstallationID and DaemonInstanceID are P9's identities, resolved by the
+	// daemon at startup (never from the environment): the installation is a
+	// file inside DataDir created once, the daemon instance is minted per
+	// process. Both are published in running.json and the probes so discovery
+	// can prove a daemon belongs to THIS data dir, and stamped into runtimes so
+	// recovery can prove a worker belongs to this installation.
+	InstallationID   string
+	DaemonInstanceID string
 	// AllowedOrigins are the browser origins granted CORS read access (see
 	// DefaultAllowedOrigins). Overridden by AO_ALLOWED_ORIGINS.
 	AllowedOrigins []string

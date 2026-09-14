@@ -488,6 +488,13 @@ type SessionFacts struct {
 	// must treat as uncertainty rather than exit.
 	WorkloadAlive bool
 	WorkloadKnown bool
+	// Installation is the AO installation stamp read back from the same
+	// incarnation (P9); InstallationKnown is false for a runtime created
+	// without one (before P9, or by a runtime that cannot stamp). An unstamped
+	// runtime is not a mismatch — the owner token still proves ownership — but
+	// a stamp naming another installation is.
+	Installation      string
+	InstallationKnown bool
 }
 
 // SessionFactsReader is the optional runtime capability that answers about a

@@ -301,10 +301,11 @@ type Store interface {
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
 // the outbound ports. User-facing read-model assembly lives in the service package.
 type Manager struct {
-	runtime   runtimeController
-	agents    ports.AgentResolver
-	workspace ports.Workspace
-	store     Store
+	installationID string
+	runtime        runtimeController
+	agents         ports.AgentResolver
+	workspace      ports.Workspace
+	store          Store
 	// messenger is a sessionguard.Guard wrapping the raw messenger, so every
 	// pane write is guarded (re-read state, refuse a blocked session) without
 	// each call site re-deriving the check. Send/confirmActive use Deliver for
@@ -609,6 +610,10 @@ type Deps struct {
 	// harness is now missing/disabled. Optional: nil preserves pre-8P-B.2
 	// behavior exactly (relaunch/restore never touches env at all).
 	RuntimeIsolation RelaunchRuntimeIsolation
+	// InstallationID (P9) is this AO installation's identity. It is what a
+	// runtime's installation stamp is compared against when a worker's
+	// ownership is proven after a restart. Empty disables that one check.
+	InstallationID string
 }
 
 // RelaunchRuntimeIsolation is session_manager's narrow view of
@@ -623,6 +628,7 @@ type RelaunchRuntimeIsolation interface {
 // time.Now when Deps.Clock is nil.
 func New(d Deps) *Manager {
 	m := &Manager{
+		installationID:               d.InstallationID,
 		runtime:                      d.Runtime,
 		agents:                       d.Agents,
 		workspace:                    d.Workspace,

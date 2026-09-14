@@ -336,6 +336,13 @@ type Deps struct {
 	// ownership proof read back from it, can each be faked independently.
 	WorkerLauncher   WorkerLauncher
 	SessionOwnership SessionOwnership
+
+	// WorkerRuntimeOwnership (P9) reads a worker session's runtime identity back
+	// and classifies it. Every path that acts on a worker without the launching
+	// process's memory -- reconciliation, adoption after a restart, a human
+	// reopen -- consults it before adopting. Optional: nil keeps the pre-P9
+	// behaviour (unit fixtures with no runtime); the daemon always wires it.
+	WorkerRuntimeOwnership WorkerRuntimeOwnership
 	// WorkerCredentialAdopter re-attaches an orphaned worker credential when a
 	// launch is adopted after a crash between Spawn and bind
 	// (worker_credential_adoption.go). Optional: a nil adopter is the pre-P5
@@ -648,8 +655,9 @@ type Coordinator struct {
 	// SessionFacts. They exist as separate, injectable interfaces so a test can
 	// drive launch success, launch failure and evidence-free success without a
 	// process or a timer.
-	workerLauncher   WorkerLauncher
-	sessionOwnership SessionOwnership
+	workerLauncher         WorkerLauncher
+	sessionOwnership       SessionOwnership
+	workerRuntimeOwnership WorkerRuntimeOwnership
 	// workerCredentialAdopter re-attaches an orphaned worker credential on the
 	// adoption path. Optional.
 	workerCredentialAdopter WorkerCredentialAdopter
@@ -860,6 +868,7 @@ func New(d Deps) *Coordinator {
 		workspaceFacts:           d.WorkspaceFacts,
 		workerLauncher:           d.WorkerLauncher,
 		sessionOwnership:         d.SessionOwnership,
+		workerRuntimeOwnership:   d.WorkerRuntimeOwnership,
 		workerCredentialAdopter:  d.WorkerCredentialAdopter,
 		reviewerLauncher:         d.ReviewerLauncher,
 		incidentAgents:           d.IncidentAgents,

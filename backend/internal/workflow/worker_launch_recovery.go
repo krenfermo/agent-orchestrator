@@ -459,7 +459,10 @@ func (c *Coordinator) latestWorkerLaunchRecord(ctx stdctx.Context, runID, stepID
 func (c *Coordinator) workerLaunchAttemptCount(ctx stdctx.Context, runID, stepID string) int {
 	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
 	if err != nil {
-		return 0
+		// P9: an unreadable ledger is never budget left. It used to answer 0,
+		// which let a storage failure buy unlimited automatic launches, while
+		// workerLaunchRecoveryGenerations answered the maximum on the same error.
+		return maxWorkerLaunchAttempts
 	}
 	count := 0
 	for _, cp := range cps {
@@ -621,7 +624,26 @@ func (c *Coordinator) resumeWorkerLaunchAfterFailure(
 		if ferr != nil {
 			return run, step, false, ferr
 		}
+		adopt := false
 		if found && (rec.Metadata.WorkspacePath != "" || rec.Metadata.Branch != "") {
+			// P9: the session is adopted only on a runtime ownership proof. A
+			// contradiction stops with ownership unproven and reopens nothing --
+			// a person pressing Continue does not make a stranger's runtime AO's.
+			// A runtime proven absent is a dead session, so the ordinary reopen
+			// below proceeds and exactly one new worker is launched.
+			decision := decideWorkerAdoption(c.workerAdoptionFactsFor(ctx, run, step, entry, rec, c.observeWorkerRuntime(ctx, rec.ID)))
+			switch decision.Action {
+			case WorkerRecoveryAdopt:
+				adopt = true
+			case WorkerRecoveryFailClosed:
+				c.recordAttentionStopOnce(ctx, run, &step.ID, ReasonWorkerOwnershipUnproven,
+					fmt.Sprintf("session %s may not be adopted (%s): %s", rec.ID, decision.Reason, decision.Detail))
+				return run, step, false, nil
+			case WorkerRecoveryWait, WorkerRecoveryNoop:
+				return run, step, false, nil
+			}
+		}
+		if adopt {
 			if _, rerr := c.store.ReopenFailedWorkflowStep(ctx, step.ID, c.clock()); rerr != nil {
 				return run, step, false, rerr
 			}

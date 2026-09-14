@@ -326,6 +326,14 @@ const (
 	// question: that one is "AO cannot prove whether a worker exists", this one
 	// is "AO knows the worker exists and cannot prove which token it holds".
 	ReasonWorkerCredentialUnadoptable = "worker_credential_unadoptable" //nolint:gosec // G101 false positive: an attention reason, not a secret.
+	// ReasonWorkerOwnershipUnproven (P9) is a worker AO found after a restart
+	// and could not PROVE is the one it launched for this dispatch: the runtime's
+	// incarnation, ownership token or installation stamp disagrees with the
+	// session row, the row carries no provenance to compare (a legacy session),
+	// or the runtime cannot read identity back at all. It is deliberately NOT a
+	// failure reason: nothing says the worker failed, only that AO will neither
+	// adopt it nor start a second worker beside it.
+	ReasonWorkerOwnershipUnproven = "worker_ownership_unproven"
 	// ReasonWorkerWorkspaceUnreadable is a worker whose turn AO can PROVE
 	// finished — the provider's own turn receipt for this dispatch — and whose
 	// repository AO could not read, so what the turn produced is unknown.
@@ -482,6 +490,10 @@ var attentionDispositions = map[string]AttentionDisposition{
 	ReasonWorkerCredentialUnadoptable: {
 		Recovery:    domain.RecoveryOperatorAction,
 		HumanAction: "AO restarted between starting this worker and giving it its identity, and it cannot prove which credential that worker is holding — so the worker is running but cannot report on its own work. The checkpoint names the session. Cancel that worker and continue this run, and AO starts exactly one replacement with an identity of its own.",
+	},
+	ReasonWorkerOwnershipUnproven: {
+		Recovery:    domain.RecoveryOperatorAction,
+		HumanAction: "AO restarted and found a worker session for this step that it cannot prove it launched (the checkpoint names the session and the identity that disagreed). The worker may still be running. Check that session: cancel it if it is not yours or no longer needed, then continue this run and AO starts exactly one replacement. AO did not start a second worker and did not treat this as a failure.",
 	},
 	ReasonProviderDialogUnreadable: {
 		HumanAction: "AO decided this question automatically but cannot read the prompt the agent is showing, so it has not sent the answer. Open that session and choose the option AO recorded, then continue this run.",

@@ -17,7 +17,13 @@ import (
 // constructing the session, so the session cannot become visible to a probe
 // before it carries its identity. Ownership is therefore a property of
 // creation, not a follow-up write.
-func newSessionArgs(id, cwd, shellPath, launchCmd, owner string) []string {
+//
+// identityEnv carries P9's provenance stamps (`AO_INSTALLATION_ID=…`,
+// `AO_DAEMON_INSTANCE_ID=…`) as further `-e` pairs, for the same reason the
+// owner token is one: provenance that is part of creation cannot be missing
+// from a session a probe can already see. Identities only — never a prompt, a
+// command or a secret.
+func newSessionArgs(id, cwd, shellPath, launchCmd, owner string, identityEnv ...string) []string {
 	args := []string{
 		"new-session", "-d",
 		// -P -F prints the NEW session's immutable instance id as part of the
@@ -33,6 +39,11 @@ func newSessionArgs(id, cwd, shellPath, launchCmd, owner string) []string {
 	}
 	if owner != "" {
 		args = append(args, "-e", ownerEnvKey+"="+owner)
+	}
+	for _, kv := range identityEnv {
+		if kv != "" {
+			args = append(args, "-e", kv)
+		}
 	}
 	return append(args, shellPath, "-c", launchCmd)
 }
@@ -321,7 +332,28 @@ const ownerEnvKey = "AO_SESSION_OWNER"
 // tmux exits non-zero ("unknown variable") when the session carries no such
 // variable, which the caller reads as "unmarked", not as an error.
 func sessionOwnerArgs(id string) []string {
-	return []string{"show-environment", "-t", exactSessionTarget(id), ownerEnvKey}
+	return sessionEnvArgs(id, ownerEnvKey)
+}
+
+// installationEnvKey and daemonInstanceEnvKey are P9's provenance stamps: which
+// AO installation (data dir) and which daemon process created the session. They
+// live in the session environment beside the owner token for the same
+// atomic-with-creation reason.
+const (
+	installationEnvKey   = "AO_INSTALLATION_ID"
+	daemonInstanceEnvKey = "AO_DAEMON_INSTANCE_ID"
+)
+
+// sessionEnvArgs reads one session-environment variable of an exact target.
+func sessionEnvArgs(id, key string) []string {
+	return []string{"show-environment", "-t", exactSessionTarget(id), key}
+}
+
+// setSessionEnvArgs rewrites one session-environment variable of an exact
+// target. Used only by Restart, which replaces the pane's process under a NEW
+// launch of the same session and must carry that launch's ownership token.
+func setSessionEnvArgs(id, key, value string) []string {
+	return []string{"set-environment", "-t", exactSessionTarget(id), key, value}
 }
 
 // paneDeadArgs asks whether each pane's process has exited.

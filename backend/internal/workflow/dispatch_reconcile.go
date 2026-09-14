@@ -204,12 +204,25 @@ type ownedExecution struct {
 	// actually ran and answered. Without it, "AO holds no session id" means
 	// only that AO did not look.
 	NaturalKeyRead bool
+
+	// Runtime is P9's read-back of the session's RUNTIME identity (incarnation,
+	// owner token, installation stamp), nil when no WorkerRuntimeOwnership port
+	// is wired. When present it outranks the row and the name probe: a session
+	// row and a live pane under its NAME are not ownership, and only an owned
+	// proof may make a worker Live.
+	Runtime *domain.WorkerRuntimeObservation
 }
 
 // Live reports a worker AO can prove is running under this identity.
 func (o ownedExecution) Live() bool {
 	if o.SessionID == "" || !o.Evidence.Observed || o.RowTerminated {
 		return false
+	}
+	if o.Runtime != nil {
+		// P9: live means the runtime PROVED it is this launch and its workload
+		// runs. A mismatch, a legacy row, an unsupported runtime or an unread
+		// probe is never live -- and never gone either (see Unprovable).
+		return o.Runtime.Proof == domain.WorkerRuntimeOwned
 	}
 	return !o.LivenessKnown || o.LivenessAlive
 }
@@ -224,6 +237,8 @@ func (o ownedExecution) ProvenGone() bool {
 	}
 	switch {
 	case o.Evidence.Missing, o.RowTerminated:
+		return true
+	case o.Runtime != nil && o.Runtime.Proof.ExecutionProvenGone():
 		return true
 	case o.LivenessKnown && !o.LivenessAlive:
 		return true
@@ -242,7 +257,27 @@ func (o ownedExecution) ExecutionProvenGone() bool {
 	if o.SessionID == "" {
 		return false
 	}
+	if o.Runtime != nil && o.Runtime.Proof.ExecutionProvenGone() {
+		return true
+	}
 	return o.Evidence.Missing || (o.LivenessKnown && !o.LivenessAlive)
+}
+
+// runtimeOwnershipUnproven reports that the runtime read-back is what makes this
+// execution undecidable: it contradicts the row, the row has no provenance, or
+// the runtime cannot read identity back. That stop is named
+// worker_ownership_unproven, never a worker failure.
+func (o ownedExecution) runtimeOwnershipUnproven() bool {
+	if o.Runtime == nil {
+		return false
+	}
+	switch o.Runtime.Proof {
+	case domain.WorkerRuntimeInstanceMismatch, domain.WorkerRuntimeOwnerMismatch,
+		domain.WorkerRuntimeInstallationMismatch, domain.WorkerRuntimeProvenanceMissing,
+		domain.WorkerRuntimeUnsupported:
+		return true
+	}
+	return false
 }
 
 // PhantomRunning is the contradiction this file is named for: the records say a
@@ -323,6 +358,8 @@ func (o ownedExecution) describe() string {
 		return "no session exists under this dispatch key"
 	case o.SessionID == "":
 		return "no session identity is recorded and none could be looked up"
+	case o.runtimeOwnershipUnproven():
+		return fmt.Sprintf("session %s: runtime ownership is %s (%s)", o.SessionID, o.Runtime.Proof, o.Runtime.Detail)
 	case o.RowFound && !o.RowTerminated && !o.RowTurnCompletedAt.IsZero() && o.ExecutionProvenGone():
 		return fmt.Sprintf(
 			"session %s completed a turn at %s and its execution has since exited",
@@ -353,6 +390,7 @@ func (o ownedExecution) describe() string {
 func (c *Coordinator) observeOneOwnedExecution(ctx stdctx.Context, id domain.SessionID) ownedExecution {
 	o := ownedExecution{SessionID: id}
 	o.Evidence = c.sessionOwnershipOrDefault().ObserveSessionOwnership(ctx, id)
+	o.Runtime = c.observeWorkerRuntime(ctx, id)
 	if c.sessionFacts != nil {
 		if rec, found, err := c.sessionFacts.GetSession(ctx, id); err == nil && found {
 			o.RowFound = true
@@ -794,17 +832,31 @@ func (c *Coordinator) adoptLiveLaunch(
 	// id at all (an older row, a runtime that does not report one) is not
 	// contradicted by anything, and adoption proceeds on the liveness proof it
 	// always did -- the fence refuses only a stated DISAGREEMENT.
-	if recorded := c.recordedLaunchIDForStep(ctx, run.ID, step.ID); recorded != "" &&
-		rec.Metadata.RuntimeLaunchID != "" && recorded != rec.Metadata.RuntimeLaunchID {
-		result.Contradiction = ContradictionUnprovable
-		result.Detail = fmt.Sprintf(
-			"session %s is alive under runtime launch %s, but the launch AO recorded for this step was %s — this is not the execution AO started, and reconciliation may not adopt it",
-			owned.SessionID, shortFingerprint(rec.Metadata.RuntimeLaunchID), shortFingerprint(recorded))
-		return c.stopReconciledDispatch(ctx, run, step, attempt, hasAttempt, owned, result)
-	}
+	//
+	// P9 folds that fence into decideWorkerAdoption, beside the runtime proof,
+	// the generation fence and the workspace fences, so this adoption and the
+	// two natural-key adoptions in dispatch.go cannot give different answers.
 	entry, err := c.dispatchOutboxEntry(ctx, run, step)
 	if err != nil {
 		return result, run, err
+	}
+	decision := decideWorkerAdoption(c.workerAdoptionFactsFor(ctx, run, step, entry, rec, owned.Runtime))
+	switch decision.Action {
+	case WorkerRecoveryAdopt:
+	case WorkerRecoveryFailClosed:
+		result.Contradiction = ContradictionUnprovable
+		if decision.Reason == WorkerReasonLaunchMismatch {
+			result.Detail = fmt.Sprintf(
+				"session %s is alive, but %s — this is not the execution AO started, and reconciliation may not adopt it",
+				owned.SessionID, decision.Detail)
+			return c.stopReconciledDispatch(ctx, run, step, attempt, hasAttempt, owned, result)
+		}
+		result.Detail = fmt.Sprintf("session %s may not be adopted (%s): %s", owned.SessionID, decision.Reason, decision.Detail)
+		return c.stopReconciledDispatchFor(ctx, run, step, attempt, hasAttempt, owned, result, ReasonWorkerOwnershipUnproven)
+	default:
+		// Wait / noop: nothing is adopted and nothing is stopped on this pass.
+		result.Detail = fmt.Sprintf("adoption of session %s deferred (%s): %s", owned.SessionID, decision.Reason, decision.Detail)
+		return result, run, nil
 	}
 	// The attempt is settled BEFORE anything is recorded, because the credential
 	// adoption below has to be fenced to it and because a record that does not
@@ -984,7 +1036,13 @@ func (c *Coordinator) stopReconciledDispatch(
 	owned ownedExecution,
 	result DispatchReconciliation,
 ) (DispatchReconciliation, domain.WorkflowRun, error) {
-	return c.stopReconciledDispatchFor(ctx, run, step, attempt, hasAttempt, owned, result, ReasonWorkerDispatchAmbiguous)
+	reason := ReasonWorkerDispatchAmbiguous
+	if owned.runtimeOwnershipUnproven() {
+		// P9: "AO cannot prove this runtime is its own" is a different stop from
+		// "AO cannot prove what happened to this launch", with a different remedy.
+		reason = ReasonWorkerOwnershipUnproven
+	}
+	return c.stopReconciledDispatchFor(ctx, run, step, attempt, hasAttempt, owned, result, reason)
 }
 
 // stopReconciledDispatchFor is stopReconciledDispatch with the attention reason

@@ -431,8 +431,11 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// provider can start without an operator. Both are optional by
 		// construction and both answer "unknown" rather than "no" whenever they
 		// cannot tell, so neither can ground a dispatch on its own uncertainty.
-		WorkerLiveness:  workflowWorkerLiveness{mgr: sessionMgr},
-		WorkerPreflight: &providerpreflight.Checker{Agents: agents, AuthMode: cfg.ProviderAuthMode},
+		WorkerLiveness: workflowWorkerLiveness{mgr: sessionMgr},
+		// P9: every recovery path proves a worker's ownership from its RUNTIME
+		// (incarnation + owner token + installation stamp), not from its row.
+		WorkerRuntimeOwnership: sessionMgr,
+		WorkerPreflight:        &providerpreflight.Checker{Agents: agents, AuthMode: cfg.ProviderAuthMode},
 		// Checkpoint 8P-E.13A.4: without an active prober, a provider profile
 		// that has never been dispatched to reports CapacityUnknown until a
 		// human happens to run it, which is how an authenticated Codex reviewer
