@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { components } from "../../api/schema";
+import { LIVENESS_QUIET_THRESHOLD_SECONDS } from "../lib/workflow-control-center";
 
 /**
  * workflow-liveness-panel.tsx — the two clocks, side by side.
@@ -32,9 +33,10 @@ type LivenessResponse = components["schemas"]["ControllersWorkerLivenessResponse
  * is silent for minutes at a time and is perfectly healthy, and warning about
  * it is exactly the misreport this panel exists to end. A genuinely dead worker
  * is the recovery path's business — that path is untouched and is not gated on
- * this number.
+ * this number. Shared with the control-center header (P8) so the two surfaces
+ * cannot disagree about the same clock.
  */
-const quietThresholdSeconds = 600;
+const quietThresholdSeconds = LIVENESS_QUIET_THRESHOLD_SECONDS;
 
 function agoText(t: TFunction, seconds: number | null | undefined): string {
 	if (seconds === null || seconds === undefined) return t("shell.liveness.unknown");

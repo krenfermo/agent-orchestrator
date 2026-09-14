@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * Asserting navigation would not have caught that, and would not catch it
  * coming back. So every test below asserts the **endpoint actually reached**:
  *
- *   "New workflow run"  ->  POST /api/v1/projects/{projectId}/workflows
+ *   "New work"          ->  POST /api/v1/projects/{projectId}/workflows
  *   "New session"       ->  POST /api/v1/orchestrators/delegate
  *
  * The mock is placed at `apiClient`, the lowest layer either path crosses, so
@@ -146,7 +146,7 @@ describe("creation surfaces reach the endpoint their name promises", () => {
 		await userEvent.click(screen.getByRole("radio", { name: /^Task/ }));
 		await userEvent.type(screen.getAllByLabelText(/command/i)[0], "npm");
 
-		await userEvent.click(screen.getByRole("button", { name: /create workflow run/i }));
+		await userEvent.click(screen.getByRole("button", { name: /create work/i }));
 
 		await waitFor(() => expect(creationPosts()).toHaveLength(1));
 		const [created] = creationPosts();
@@ -196,7 +196,7 @@ describe("the workflow form refuses a run it knows would be doomed", () => {
 
 		await userEvent.type(screen.getByLabelText(/objective/i), "Fix the flaky checkout test");
 		await userEvent.click(screen.getByRole("radio", { name: /^Task/ }));
-		await userEvent.click(screen.getByRole("button", { name: /create workflow run/i }));
+		await userEvent.click(screen.getByRole("button", { name: /create work/i }));
 
 		// Nothing is POSTed at all: the refusal happens before a run exists,
 		// rather than after a worker has already done the job.
@@ -210,7 +210,7 @@ describe("the workflow form refuses a run it knows would be doomed", () => {
 		await userEvent.type(screen.getByLabelText(/objective/i), "Fix the flaky checkout test");
 		await userEvent.click(screen.getByRole("radio", { name: /^Task/ }));
 		await userEvent.type(screen.getAllByLabelText(/command/i)[0], "npm");
-		await userEvent.click(screen.getByRole("button", { name: /create workflow run/i }));
+		await userEvent.click(screen.getByRole("button", { name: /create work/i }));
 
 		expect(await screen.findByText(/verification is required/i)).toBeInTheDocument();
 	});
@@ -234,7 +234,7 @@ describe("a refusal from the daemon is reported, never swallowed", () => {
 		await userEvent.type(screen.getByLabelText(/objective/i), "Fix the flaky checkout test");
 		await userEvent.click(screen.getByRole("radio", { name: /^Task/ }));
 		await userEvent.type(screen.getAllByLabelText(/command/i)[0], "npm");
-		await userEvent.click(screen.getByRole("button", { name: /create workflow run/i }));
+		await userEvent.click(screen.getByRole("button", { name: /create work/i }));
 
 		expect(await screen.findByText(apiError.message)).toBeInTheDocument();
 		// The work the user typed survives a refusal they have to act on.
@@ -270,7 +270,7 @@ describe("the run's frozen axes travel with the create call", () => {
 		await userEvent.type(screen.getByLabelText(/objective/i), "Ship it");
 		await userEvent.click(screen.getByRole("radio", { name: /^Task/ }));
 		await userEvent.type(screen.getAllByLabelText(/command/i)[0], "npm");
-		await userEvent.click(screen.getByRole("button", { name: /create workflow run/i }));
+		await userEvent.click(screen.getByRole("button", { name: /create work/i }));
 
 		await waitFor(() => expect(creationPosts()).toHaveLength(1));
 		const body = creationPosts()[0].options.body;
@@ -308,7 +308,7 @@ describe("the project preselect survives the desktop app's hash history", () => 
 		await userEvent.type(screen.getByLabelText(/objective/i), "Ship it");
 		await userEvent.click(screen.getByRole("radio", { name: /^Task/ }));
 		await userEvent.type(screen.getAllByLabelText(/command/i)[0], "npm");
-		await userEvent.click(screen.getByRole("button", { name: /create workflow run/i }));
+		await userEvent.click(screen.getByRole("button", { name: /create work/i }));
 
 		await waitFor(() => expect(creationPosts()).toHaveLength(1));
 		expect(creationPosts()[0].options.params?.path?.projectId).toBe("proj-a");

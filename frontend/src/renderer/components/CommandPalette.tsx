@@ -189,6 +189,9 @@ export function CommandPalette() {
 					// Modal — do not route to /settings (that legacy path redirects home).
 					useUiStore.getState().openGlobalSettings();
 					break;
+				case "/workflows":
+					void navigate({ to: target.to, search: target.search });
+					break;
 				case "/projects/$projectId":
 					void navigate({ to: target.to, params: target.params });
 					break;

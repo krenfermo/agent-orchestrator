@@ -217,7 +217,7 @@ describe("WorkflowRunView", () => {
 		render(<WorkflowRunView workflowId="wf-active" />, { wrapper });
 
 		await waitFor(() => expect(screen.getByText("Ship the board activity indicator")).toBeInTheDocument());
-		expect(screen.getByTestId("workflow-stage-badge")).toHaveTextContent("Working");
+		expect(screen.getByTestId("workflow-headline-status")).toHaveTextContent("Working");
 		// §16: the page answers "what do I do" without anyone reading a log.
 		expect(screen.getByTestId("workflow-status-guidance")).toHaveTextContent(
 			"AO is working. You do not need to do anything.",
@@ -230,13 +230,16 @@ describe("WorkflowRunView", () => {
 		expect(location).toHaveTextContent("feat/board-activity");
 		expect(location).not.toHaveTextContent("Integrates into");
 		expect(screen.getByRole("status", { name: "In progress" })).toBeInTheDocument();
-		const panel = screen.getByTestId("workflow-activity-panel");
-		expect(panel).toHaveTextContent("Working right now");
-		expect(panel).toHaveTextContent("7m");
-		expect(panel).toHaveTextContent("claude-code");
-		expect(panel).toHaveTextContent("feat/board-activity");
-		// No usage record on this run: the total stays Unknown rather than 0.
-		expect(panel).toHaveTextContent("Unknown");
+		// P8: the control-center facts answer "what is it doing, who is working,
+		// since when" in one block, in place of the old activity panel.
+		expect(screen.getByTestId("workflow-fact-step")).toHaveTextContent("#2 · Worker");
+		expect(screen.getByTestId("workflow-fact-agent")).toHaveTextContent("Worker · claude-code");
+		expect(screen.getByTestId("workflow-fact-duration")).toHaveTextContent("7m");
+		// No liveness reading on this run: the page says so rather than inventing a clock.
+		expect(screen.getByTestId("workflow-fact-signal")).toHaveTextContent("Agent clocks not available for this step");
+		// No usage record on this run: no usage digest, rather than a zero.
+		expect(screen.queryByTestId("workflow-usage-digest")).toBeNull();
+		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
 	});
 
 	it("shows a finished run without a spinner or an activity block", async () => {
@@ -280,10 +283,42 @@ describe("WorkflowRunView", () => {
 		render(<WorkflowRunView workflowId="wf-done" />, { wrapper });
 
 		await waitFor(() => expect(screen.getByText("Already finished")).toBeInTheDocument());
-		expect(screen.getByTestId("workflow-stage-badge")).toHaveTextContent("Completed");
+		expect(screen.getByTestId("workflow-headline-status")).toHaveTextContent("Completed");
 		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
 		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
 	});
+	// P8 review: a pasted specification rendered whole as the heading pushed the
+	// run's status below the first screen. The heading is the first line; the
+	// body stays one click away, unabridged.
+	it("titles a run by its objective's first line and keeps the full specification folded", async () => {
+		const objective = "Add batch-file loading\n\nA book can be built in code.\n1. Add internal/importer";
+		getMock.mockResolvedValue({
+			data: {
+				workflow: {
+					run: {
+						id: "wf-spec",
+						projectId: "proj-1",
+						objective,
+						state: "completed",
+						phase: "completed",
+						createdAt: "2026-01-01T00:00:00Z",
+						updatedAt: "2026-01-01T00:10:00Z",
+						executionMode: "autonomous",
+					},
+					steps: [],
+				},
+			},
+			error: undefined,
+		});
+
+		render(<WorkflowRunView workflowId="wf-spec" />, { wrapper });
+
+		await waitFor(() => expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Add batch-file loading$/));
+		const full = screen.getByTestId("workflow-objective-full");
+		expect(full).toHaveTextContent("A book can be built in code.");
+		expect(full).not.toHaveAttribute("open");
+	});
+
 	// P4-I: the two buttons that did nothing. On a run stopped in review the
 	// daemon offers "Open session" and "Repair", and this page had a handler
 	// for neither -- so both rendered greyed out with no explanation, and a

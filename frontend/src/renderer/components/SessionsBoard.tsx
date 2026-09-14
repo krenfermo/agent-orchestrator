@@ -263,7 +263,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 						<TopbarButton
 							aria-label={t("shell.newTask")}
 							className="topbar-control--labeled"
-							data-priority="primary"
+							data-priority="secondary"
 							disabled={isProjectRestarting}
 							onClick={() => projectId && requestNewTask(projectId)}
 							variant="accent"
@@ -288,7 +288,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 						<TopbarButton
 							aria-label={t("shell.newWorkflowRun")}
 							className="topbar-control--labeled"
-							data-priority="secondary"
+							data-priority="primary"
 							disabled={isProjectRestarting}
 							onClick={() => projectId && void navigate({ to: "/workflows", search: { projectId } })}
 							variant="primary"

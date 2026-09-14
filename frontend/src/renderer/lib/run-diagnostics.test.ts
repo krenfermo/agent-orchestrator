@@ -189,6 +189,175 @@ describe("buildRunDiagnostics", () => {
 		expect(text).not.toContain("token-should-never-appear");
 	});
 
+	// P8: the bundle now also carries what the control center shows — fix budget,
+	// review/Verify outcomes, the agent's clocks, usage totals and the build —
+	// and still nothing that could carry a secret: a check label is a command,
+	// and its arguments never travel.
+	it("carries fix budget, outcomes, liveness, usage totals and version, but never a check's command", () => {
+		const base = detail();
+		const d = buildRunDiagnostics(
+			{
+				...base,
+				run: {
+					...base.run,
+					maxFixCycles: 3,
+					workerLiveness: { observed: true, lastSignalAt: "2026-09-01T10:29:00.000Z", silentForSeconds: 60 },
+				},
+				steps: [
+					{ id: "r", kind: "review", ordinal: 1, state: "completed", verdict: "changes_requested", attempts: [], createdAt: "x", updatedAt: "x" },
+					{ id: "f", kind: "fix", ordinal: 2, state: "completed", attempts: [], createdAt: "x", updatedAt: "x", fixDelivery: { cycleNumber: 2 } },
+					{
+						id: "v",
+						kind: "verify",
+						ordinal: 3,
+						state: "completed",
+						attempts: [],
+						createdAt: "x",
+						updatedAt: "x",
+						verification: {
+							passed: false,
+							checks: [{ kind: "command", label: "deploy --token=SECRET-VERIFY-ARG", passed: false, stderrTail: "SECRET-STDERR" }],
+							preFingerprint: "",
+							postFingerprint: "",
+							reviewedFingerprint: "",
+							targetKey: "",
+							version: "v1",
+						},
+					},
+				],
+				usage: {
+					tokens: {
+						recorded: true,
+						source: "provider_reported",
+						totals: { input: 100, output: 20, total: 120 },
+						cost: { known: false, basis: "unknown", amount: 0, unpricedModels: ["sonnet"] },
+						budget: { state: "unset" },
+					},
+				},
+			} as unknown as WorkflowRunDetailView,
+			{ appVersion: "1.2.3" },
+		);
+		const text = formatRunDiagnostics(d);
+		expect(text).toContain("appVersion: 1.2.3");
+		expect(text).toContain("fixCycle: 2 of 3");
+		expect(text).toContain("reviewOutcome: changes_requested");
+		expect(text).toContain("verifyOutcome: failed");
+		expect(text).toContain("verifyFailedChecks: 1");
+		expect(text).toContain("lastSignalAt: 2026-09-01T10:29:00.000Z");
+		expect(text).toContain("tokenSource: provider_reported");
+		expect(text).toContain("inputTokens: 100");
+		expect(text).toContain("costKnown: false");
+		expect(text).toContain("unpricedModels: sonnet");
+		// An unknown cost is never printed as an amount.
+		expect(text).not.toContain("costAmount");
+		expect(text).not.toContain("SECRET-VERIFY-ARG");
+		expect(text).not.toContain("SECRET-STDERR");
+	});
+
+	// P8 independent review: every place a secret-shaped value can live in the
+	// daemon's response, filled with a marker. None may reach the bundle; only
+	// ids, states, timestamps, counts, token totals and model ids do.
+	it("carries no prompt, objective body, command, stderr, env, token, path, conversation or tool args", () => {
+		const base = detail();
+		const secret = (name: string) => `SECRET-${name}-MARKER`;
+		const leaky = {
+			...base,
+			run: {
+				...base.run,
+				objective: `Fix the flaky checkout test\n${secret("OBJECTIVE-BODY")}`,
+				nextAction: secret("NEXT-ACTION"),
+				prompt: secret("PROMPT"),
+				env: { ANTHROPIC_API_KEY: secret("ENV") },
+				conversation: [{ role: "user", content: secret("CONVERSATION") }],
+				toolArgs: { command: secret("TOOL-ARGS") },
+			},
+			plan: { status: "approved", generated: { summary: secret("PLAN") } },
+			tasks: [{ id: "t", title: secret("TASK-TITLE"), description: secret("TASK-DESC"), verify: { commands: [{ command: secret("TASK-CMD") }] } }],
+			questions: [{ id: "q", question: secret("QUESTION"), answer: secret("ANSWER"), state: "answered" }],
+			presentation: {
+				stage: "needs_attention",
+				summaryCode: "verify_failed",
+				requiresHuman: true,
+				automaticActionActive: false,
+				placement: {
+					type: "isolated_worktree",
+					chosenBy: "automatic",
+					repoPath: "/Users/someone/private/repo",
+					worktreePath: "/Users/someone/.ao/worktrees/wt-9",
+					executionBranch: "ao/wf-1234abcd",
+				},
+				technical: { sessionId: "sess-1", attemptNumber: 1 },
+			},
+			steps: [
+				{
+					id: "w",
+					kind: "work",
+					ordinal: 1,
+					state: "completed",
+					createdAt: "x",
+					updatedAt: "x",
+					worktreePath: "/Users/someone/.ao/worktrees/wt-9",
+					nextAction: secret("STEP-NEXT"),
+					findingsSummary: secret("FINDINGS"),
+					attempts: [{ id: "a", attemptNumber: 1, startedAt: "x", harness: "claude-code", model: "claude-opus-5" }],
+					fixDelivery: { cycleNumber: 1, findingsSnippet: secret("SNIPPET"), promptReceipt: secret("RECEIPT"), submission: secret("SUBMISSION") },
+				},
+				{
+					id: "v",
+					kind: "verify",
+					ordinal: 2,
+					state: "completed",
+					createdAt: "x",
+					updatedAt: "x",
+					attempts: [],
+					verification: {
+						passed: false,
+						checks: [
+							{
+								kind: "command",
+								label: `curl -H "Authorization: Bearer ${secret("BEARER")}"`,
+								passed: false,
+								stdoutTail: secret("STDOUT"),
+								stderrTail: secret("STDERR"),
+								failureReason: secret("FAILURE-REASON"),
+								resolvedPath: "/Users/someone/private/bin/curl",
+							},
+						],
+						infraFailure: { kind: "missing_tool", command: secret("INFRA-CMD"), directory: "/Users/someone/cwd", detail: secret("INFRA-DETAIL") },
+						pathContext: "/Users/someone/cwd",
+						preFingerprint: "",
+						postFingerprint: "",
+						reviewedFingerprint: "",
+						targetKey: "",
+						version: "v1",
+					},
+				},
+			],
+			usage: {
+				checkpoint: { objective: secret("CHECKPOINT-OBJECTIVE"), decisions: [secret("DECISION")] },
+				roles: [{ role: "worker", stepKind: "work", sessionId: "sess-1", usage: { transcriptPath: "/Users/someone/.claude/t.jsonl" } }],
+				tokens: {
+					recorded: true,
+					source: "provider_reported",
+					totals: { input: 10, output: 5, total: 15 },
+					cost: { known: true, basis: "calculated", amount: 0.12, currency: "USD", unpricedModels: [] },
+					budget: { state: "unset" },
+				},
+			},
+		} as unknown as WorkflowRunDetailView;
+
+		const text = formatRunDiagnostics(buildRunDiagnostics(leaky, { appVersion: "1.2.3" }));
+		expect(text).not.toMatch(/SECRET-[A-Z-]+-MARKER/);
+		expect(text).not.toContain("/Users/");
+		expect(text).not.toContain("Authorization");
+		// Safe metadata does travel.
+		expect(text).toContain("title: Fix the flaky checkout test");
+		expect(text).toContain("worktree: wt-9");
+		expect(text).toContain("claude-code/claude-opus-5");
+		expect(text).toContain("inputTokens: 10");
+		expect(text).toContain("verifyFailedChecks: 1");
+	});
+
 	it("omits absent facts rather than printing empty or invented ones", () => {
 		const text = formatRunDiagnostics(buildRunDiagnostics(detail()));
 		expect(text).toContain("run: wf-1234abcd");

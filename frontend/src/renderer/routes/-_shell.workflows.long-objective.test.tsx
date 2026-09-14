@@ -133,7 +133,7 @@ describe("Task specification input", () => {
 		// specification does NOT require Autonomous or Master, so the test has
 		// to pick the strategy the feature is about rather than the form's
 		// default.
-		await userEvent.click(screen.getByRole("radio", { name: /task/i }));
+		await userEvent.click(screen.getByRole("radio", { name: /^Task/ }));
 		await pasteObjective(SPECIFICATION);
 		// A Task must state how it will be checked. Nothing here is read out of
 		// the specification, however long it is -- the command is typed.

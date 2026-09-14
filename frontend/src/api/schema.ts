@@ -9000,6 +9000,7 @@ export interface components {
             lastActivityAt: string;
             /** Format: date-time */
             lastMeaningfulActivityAt?: null | string;
+            maxFixCycles?: null | number;
             nextAction?: string;
             /** Format: date-time */
             nextWakeAt?: null | string;

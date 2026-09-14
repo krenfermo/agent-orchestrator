@@ -178,7 +178,7 @@ describe("SessionsBoard", () => {
 
 	// The two buttons beside each other do different things, and the board is
 	// where that was confusable: "New session" delegates a worker through
-	// /orchestrators/delegate, "New workflow run" opens the workflow form with
+	// /orchestrators/delegate, "New work" opens the workflow form with
 	// this project preselected. This asserts the second one exists on a board
 	// with no workflow runs at all -- ProjectWorkflowLane renders nothing then,
 	// which is exactly when there was no way to reach a real workflow.
@@ -191,7 +191,7 @@ describe("SessionsBoard", () => {
 
 		renderBoard("p1");
 
-		fireEvent.click(screen.getByRole("button", { name: "New workflow run" }));
+		fireEvent.click(screen.getByRole("button", { name: "New work" }));
 
 		expect(navigateMock).toHaveBeenCalledWith({ to: "/workflows", search: { projectId: "p1" } });
 	});

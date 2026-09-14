@@ -9,7 +9,7 @@ import { useWorkflowRecovery } from "../hooks/useWorkflowRecovery";
 import { useWorkflowStatusLabel } from "../hooks/useWorkflowExecutionStatus";
 import { useChildTaskRouting } from "../hooks/useChildTaskRouting";
 import { WorkflowVerifyDetails } from "../components/workflow-verify-details";
-import { WorkflowLivenessPanel } from "../components/workflow-liveness-panel";
+import { WorkflowControlCenter, WorkflowRunAnatomy } from "../components/workflow-control-center";
 import { WorkflowUsageSection } from "../components/workflow-usage-section";
 import { WorkflowQuestionsSection } from "../components/workflow-questions-section";
 import { WorkflowCapacityWaitBanner } from "../components/workflow-capacity-wait-banner";
@@ -22,24 +22,18 @@ import { WorkflowDiagnosticsButton } from "../components/workflow-diagnostics-bu
 import { WorkflowResumeButton } from "../components/workflow-resume-button";
 import { WorkflowRecoveryPanel } from "../components/workflow-recovery-panel";
 import { WorkItemLinkPanel } from "../components/workitem-link-panel";
-import {
-	translateDynamic,
-	WorkflowActivityPanel,
-	WorkflowStepIcon,
-} from "../components/workflow-activity";
+import { translateDynamic, WorkflowStepIcon } from "../components/workflow-activity";
 import {
 	WorkflowActions,
 	WorkflowCompletionSummary,
 	WorkflowExecutionLocation,
 	WorkflowRepairInline,
-	WorkflowStatusPanel,
 	WorkflowTechnicalDetails,
 	WorkflowTimeline,
 	type WorkflowActionHandlers,
 } from "../components/workflow-status";
 import { WorkflowCommitDialog } from "../components/workflow-commit-dialog";
-import { processedTokens } from "../components/workflow-usage-section";
-import { formatElapsedCompact } from "../lib/format-time";
+import { stepRole } from "../lib/workflow-control-center";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { canCancelAndArchive, useCancelAndArchiveWorkflow } from "../hooks/useWorkflowArchive";
 import type { components } from "../../api/schema";
@@ -50,17 +44,15 @@ export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 
 type TranslateFn = (key: string, opts?: Record<string, unknown>) => string;
 
-// The three canonical execution strategies, mapped to their catalog keys.
-// Exhaustive on purpose: a strategy the UI has no name for must be a
-// compile-time problem, not a raw enum value leaking onto the page.
-const executionStrategyKeys = {
-	task: "shell.workflowsStrategyTaskLabel",
-	autonomous: "shell.workflowsStrategyAutonomousLabel",
-	master: "shell.workflowsStrategyMasterLabel",
-} as const;
+/** The objective's first non-empty line: the run's name. */
+function objectiveHeading(objective: string): string {
+	const first = objective.split("\n", 1)[0]?.trim();
+	return first && first.length > 0 ? first : objective.trim();
+}
 
-function executionStrategyLabel(t: TranslateFn, strategy: keyof typeof executionStrategyKeys): string {
-	return t(executionStrategyKeys[strategy]);
+/** Whether the objective carries more than its first line. */
+function objectiveHasBody(objective: string): boolean {
+	return objective.trim() !== objectiveHeading(objective);
 }
 
 /**
@@ -225,27 +217,17 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 	}
 
 	const isPending = workflow.run.state === "pending";
-	const workStep = workflow.steps.find((step) => step.kind === "work");
-
-	// Facts for the "working right now" panel. Every one of them is a value the
-	// API already returns for this run -- the harness is read the same way the
-	// work step reads it (latest attempt first, since a failover changes the
-	// harness without changing assignedHarness), and the token total stays
-	// Unknown unless the usage record says the number was actually observed.
-	const activeStep = workflow.steps.find((step) => step.state === "running");
-	const activeAttempts = activeStep?.attempts ?? [];
-	const activeHarness = activeAttempts[activeAttempts.length - 1]?.harness || activeStep?.assignedHarness || undefined;
-	const activeBranch = activeStep?.branch || workStep?.branch || undefined;
-	const observedTokens = workflow.usage ? processedTokens(workflow.usage.metrics) : null;
-	const activityFacts = [
-		{ label: t("board.factElapsed"), value: formatElapsedCompact(workflow.run.createdAt) },
-		{ label: t("board.factAgent"), value: activeHarness },
-		{ label: t("board.factBranch"), value: activeBranch },
-		{
-			label: t("board.factTokens"),
-			value: observedTokens === null ? t("board.factUnknown") : observedTokens.toLocaleString(),
-		},
-	];
+	// Agent sessions are reached from the run page by id; the control center and
+	// the anatomy both render this link, which is a navigation and nothing else.
+	const renderSessionLink = (sessionId: string) => (
+		<Link
+			className="font-mono text-primary underline underline-offset-2"
+			params={{ sessionId }}
+			to="/sessions/$sessionId"
+		>
+			{sessionId}
+		</Link>
+	);
 
 	const presentation = workflow.presentation;
 	// The subject of each navigating action, as the daemon named it. Undefined
@@ -318,20 +300,25 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 			    trace of it here. */}
 			<WorkItemLinkPanel projectId={workflow.run.projectId} scope="run" scopeId={workflow.run.id} />
 			<div className="flex flex-col gap-3">
-				<h1 className="min-w-0 flex-1 text-lg font-semibold">{workflow.run.objective}</h1>
-				{/* P3-A: the human status is the headline. Stage, the sentence that
-				    says what is happening, the one-line "¿qué hago?", and the stage
-				    progression — all of it derived by the daemon, so this page and
-				    the board card cannot tell two different stories. The technical
-				    vocabulary keeps its place further down, in a disclosure. */}
-				{presentation ? <WorkflowStatusPanel presentation={presentation} /> : null}
-				{/* P5/P6: the running agent's own clocks, directly under the
-				    status, because "is it alive" is the question the status line
-				    could not answer. The workflow's own last durable act stays
-				    where it is further down: a work step in progress writes no
-				    checkpoints, so it is not a liveness figure and must never be
-				    rendered as one. */}
-				<WorkflowLivenessPanel liveness={workflow.run.workerLiveness} />
+				{/* P8: the objective's first line is the run's name. A pasted
+				    specification rendered whole as the heading pushed the status off
+				    the first screen, so its body sits one click away, unabridged. */}
+				<h1 className="min-w-0 flex-1 text-lg font-semibold">{objectiveHeading(workflow.run.objective)}</h1>
+				{objectiveHasBody(workflow.run.objective) ? (
+					<details className="text-sm text-muted-foreground" data-testid="workflow-objective-full">
+						<summary className="cursor-pointer">{t("cc.objective.full")}</summary>
+						<p className="mt-2 whitespace-pre-wrap">{workflow.run.objective}</p>
+					</details>
+				) : null}
+				{/* P8: the control-center header replaces the separate status panel,
+				    liveness panel, raw-state line and activity block, which told the
+				    same story four times in four vocabularies. One reading: status
+				    over the durable state, mode, current step, who is working, both
+				    agent clocks, the durable timeline, and — for a stopped run — what
+				    happened, what AO knows, what it could not determine and what it
+				    recommends. It renders the daemon's facts and holds no lifecycle
+				    control; the raw codes stay on its technical line. */}
+				<WorkflowControlCenter detail={workflow} renderSessionLink={renderSessionLink} />
 				{/* P3-C: the daemon's own answer to "what do I do now" -- whether
 				    anyone is needed, what AO will do by itself, what comes next,
 				    and every action it is refusing WITH the reason. It sits
@@ -341,26 +328,14 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				{presentation ? (
 					<WorkflowActions busy={continuing || cancelling || recoveryPending} handlers={actionHandlers} presentation={presentation} />
 				) : null}
-				<p className="text-sm text-muted-foreground">
-					{t("shell.workflowsRunHeader", { projectId: workflow.run.projectId, state: workflow.run.state })}
-				</p>
-				<p className="text-sm text-muted-foreground">
-					{/* P1-A: strategy and approval are two facts, shown as two.
-					    executionMode is the approval axis (who drives); the
-					    strategy is the durable orchestration choice, absent only
-					    for a pre-P1-A run the daemon has not reconciled yet. */}
-					{workflow.run.executionStrategy && (
-						<>
-							{t("shell.workflowsStrategyLabel")}: {executionStrategyLabel(t as TranslateFn, workflow.run.executionStrategy.effectiveStrategy)}
-							{" · "}
-						</>
-					)}
-					{t("shell.workflowsMode")}:{" "}
-					{workflow.run.executionMode === "autonomous"
-						? t("shell.workflowsModeAutonomous")
-						: t("shell.workflowsModeManual")}
-					{statusLabel && <> · {statusLabelText(t as TranslateFn, statusLabel)}</>}
-				</p>
+				{/* A planned run's progress through its child tasks ("Executing task 2
+				    of 5", or the child's own review/fix/verify). Strategy and approval
+				    now live on the control center's chips, as two separate facts. */}
+				{workflow.plan && statusLabel ? (
+					<p className="text-sm text-muted-foreground">
+						{t("cc.planProgress", { status: statusLabelText(t as TranslateFn, statusLabel) })}
+					</p>
+				) : null}
 				{workflow.run.nextAction && (
 					<p className="text-sm text-muted-foreground">
 						{t("shell.workflowsNextAction", {
@@ -372,11 +347,6 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 						})}
 					</p>
 				)}
-				<WorkflowActivityPanel
-					detail={statusLabel ? statusLabelText(t as TranslateFn, statusLabel) || undefined : undefined}
-					facts={activityFacts}
-					phase={workflow.run.phase}
-				/>
 			</div>
 
 			<div className="flex items-center gap-2">
@@ -478,6 +448,11 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				<WorkflowCancelAndArchiveButton run={workflow.run} />
 			</div>
 
+			{/* P8: the workflow and its agent sessions, what review and Verify
+			    concluded, and what the run has used — the summary of the detail
+			    that follows, which stays complete below it. */}
+			<WorkflowRunAnatomy detail={workflow} renderSessionLink={renderSessionLink} />
+
 			{workflow.plan && (
 				<section className="flex flex-col gap-3">
 					<div>
@@ -567,7 +542,8 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 						<div className="flex items-center justify-between gap-2">
 							<span className="flex min-w-0 items-center gap-2 font-medium">
 								<WorkflowStepIcon state={step.state} />
-								{step.ordinal}. {step.kind}
+								{step.ordinal}. {t(`cc.role.${stepRole(step.kind)}` as "cc.role.worker")}
+								<span className="font-mono text-xs font-normal text-passive">{step.kind}</span>
 							</span>
 							<span className="shrink-0 text-xs text-muted-foreground">
 								{translateDynamic(t as TFunction, `board.stepState.${step.state}`, step.state)}
@@ -672,7 +648,9 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 						{step.kind === "review" && (step.reviewRunId || step.reviewer) && (
 							<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
 								<dt>{t("shell.workflowsReviewer")}</dt>
-								<dd>{step.reviewer || "claude-code"}</dd>
+								{/* A reviewer the daemon did not name is unknown, not
+								    "claude-code": the old fallback invented an agent. */}
+								<dd>{step.reviewer || t("cc.review.reviewerUnknown")}</dd>
 								{step.target && (
 									<>
 										<dt>{t("shell.workflowsTarget")}</dt>
@@ -682,7 +660,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 								{step.verdict && (
 									<>
 										<dt>{t("shell.workflowsVerdict")}</dt>
-										<dd>{step.verdict}</dd>
+										<dd>{translateDynamic(t as TFunction, `cc.review.outcome.${step.verdict}`, step.verdict)}</dd>
 									</>
 								)}
 								{step.findingsSummary && (
