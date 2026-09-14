@@ -562,13 +562,15 @@ func writeRestoreSummary(w io.Writer, rep *backup.RestoreReport) error {
 	for _, r := range rep.Reasons {
 		fmt.Fprintf(&b, "  - %s: %s\n", r.Code, r.Detail)
 	}
-	switch rep.Result {
-	case backup.ResultRestored:
-		b.WriteString("Start AO with `ao start`.\n")
-	case backup.ResultRolledBack:
-		b.WriteString("The previous state is back. Nothing else needs to be done before starting AO.\n")
-	case backup.ResultRollbackFailed:
+	switch {
+	case rep.Result == backup.ResultRollbackFailed:
 		b.WriteString("DO NOT start AO. Run `ao backup recover`.\n")
+	case rep.RecoverRequired:
+		b.WriteString("The restore journal could not be cleared. Run `ao backup recover` before starting AO.\n")
+	case rep.Result == backup.ResultRestored:
+		b.WriteString("Start AO with `ao start`.\n")
+	case rep.Result == backup.ResultRolledBack:
+		b.WriteString("The previous state is back. Nothing else needs to be done before starting AO.\n")
 	}
 	_, err := io.WriteString(w, b.String())
 	return err

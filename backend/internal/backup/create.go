@@ -78,7 +78,7 @@ func Create(ctx context.Context, opts CreateOptions) (res *CreateResult, err err
 	// anybody should be able to preserve as a "good" backup.
 	if j, err := readJournal(dataDir); err != nil {
 		return nil, refusedf(CodeRestoreInterrupted, "restore journal in %s cannot be read (%v); run `ao backup recover` first", dataDir, err)
-	} else if j != nil && j.Phase.critical() {
+	} else if j != nil && j.unsettled(dataDir) {
 		return nil, refusedf(CodeRestoreInterrupted, "restore %s was interrupted in phase %s; run `ao backup recover` first", j.RestoreID, j.Phase)
 	}
 	root, err := resolveRoot(dataDir, opts.Root)

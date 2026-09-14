@@ -26,10 +26,29 @@ type testHooks struct {
 	beforeStagingCopy func() error
 	createRollback    func(context.Context, CreateOptions) (*CreateResult, error)
 	finalVerify       func() error
-	failJournal       func(Phase) error
-	failJournalRemove func() error
+	journalWrite      func(p Phase, write func() error) error
+	journalRemove     func(remove func() error) error
 	openHolders       func(paths []string) ([]int, error)
 	binaryHead        int64
+}
+
+// recordJournal writes the restore journal. A test can fail the write, or let
+// it land and still report failure -- as a rename that reached the disk before
+// its directory fsync failed would.
+func (h *testHooks) recordJournal(dataDir string, j *journal) error {
+	write := func() error { return writeJournal(dataDir, j) }
+	if h != nil && h.journalWrite != nil {
+		return h.journalWrite(j.Phase, write)
+	}
+	return write()
+}
+
+func (h *testHooks) dropJournal(dataDir string) error {
+	remove := func() error { return removeJournal(dataDir) }
+	if h != nil && h.journalRemove != nil {
+		return h.journalRemove(remove)
+	}
+	return remove()
 }
 
 func (h *testHooks) holders(paths []string) ([]int, error) {

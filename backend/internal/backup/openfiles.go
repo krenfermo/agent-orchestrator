@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,18 @@ func dbFamily(dir string) []string {
 		out = append(out, filepath.Join(dir, s))
 	}
 	return out
+}
+
+// restoredDatabaseFiles names the files a rollback moves away from their name
+// or already moved: the restored database in failed/, and the one under its
+// name once the staged copy was promoted. A process holding one of them would
+// attach its sidecars, by name, to the database the rollback puts back.
+func restoredDatabaseFiles(dataDir, workDir string) []string {
+	paths := dbFamily(filepath.Join(workDir, "failed"))
+	if _, err := os.Lstat(filepath.Join(workDir, "staged", DatabaseAsset)); errors.Is(err, os.ErrNotExist) {
+		paths = append(paths, dbFamily(dataDir)...)
+	}
+	return paths
 }
 
 // refuseOpenHolders refuses while any other process has one of paths open.

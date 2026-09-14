@@ -73,10 +73,13 @@ type RestoreReport struct {
 	Compatibility      Compatibility `json:"compatibility,omitempty"`
 	IdentityAction     string        `json:"identityAction,omitempty"`
 	DestinationTouched bool          `json:"destinationTouched"`
-	Reason             *Finding      `json:"reason,omitempty"`
-	Reasons            []Finding     `json:"reasons,omitempty"`
-	Warnings           []Finding     `json:"warnings"`
-	DurationMs         int64         `json:"durationMs"`
+	// RecoverRequired is set when the restore journal could not be cleared:
+	// whatever the result, `ao backup recover` must run before AO starts.
+	RecoverRequired bool      `json:"recoverRequired,omitempty"`
+	Reason          *Finding  `json:"reason,omitempty"`
+	Reasons         []Finding `json:"reasons,omitempty"`
+	Warnings        []Finding `json:"warnings"`
+	DurationMs      int64     `json:"durationMs"`
 }
 
 func (r *RestoreReport) warn(code Code, format string, args ...any) {
@@ -320,22 +323,8 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	rep.RestoreID = restoreID
 	workDir := filepath.Join(dataDir, restoreWorkPrefix+restoreID)
 	j := &journal{RestoreID: restoreID, SourceBackupID: m.BackupID, SourcePath: source, WorkDir: filepath.Base(workDir), Phase: PhasePreparing}
-	record := func() error {
-		if h := opts.hooks; h != nil && h.failJournal != nil {
-			if err := h.failJournal(j.Phase); err != nil {
-				return err
-			}
-		}
-		return writeJournal(dataDir, j)
-	}
-	dropJournal := func() error {
-		if h := opts.hooks; h != nil && h.failJournalRemove != nil {
-			if err := h.failJournalRemove(); err != nil {
-				return err
-			}
-		}
-		return removeJournal(dataDir)
-	}
+	record := func() error { return opts.hooks.recordJournal(dataDir, j) }
+	dropJournal := func() error { return opts.hooks.dropJournal(dataDir) }
 	if err := record(); err != nil {
 		return rep, failedf(CodeIO, err, "write restore journal")
 	}
@@ -344,9 +333,14 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	// managed entries were not touched, so removing the work dir and the
 	// journal is the whole cleanup.
 	abandon := func(cause error) error {
-		_ = os.RemoveAll(workDir)
-		if rerr := removeJournal(dataDir); rerr != nil {
-			rep.warn(CodeIO, "could not remove the restore journal (%v); `ao backup recover` will", rerr)
+		// The journal goes first: a work dir no journal names is harmless, while a
+		// journal whose work dir is gone is one recover cannot act on -- and the
+		// journal may already read "swapping" if that write landed but failed.
+		if rerr := dropJournal(); rerr != nil {
+			rep.RecoverRequired = true
+			rep.warn(CodeIO, "could not remove the restore journal (%v); %s is kept, and `ao backup recover` must run before AO starts", rerr, workDir)
+		} else if rerr := os.RemoveAll(workDir); rerr != nil {
+			rep.warn(CodeIO, "could not remove %s (%v); no journal refers to it and it is safe to delete by hand", workDir, rerr)
 		}
 		if ctx.Err() != nil {
 			if e, ok := AsError(cause); !ok || e.Class != ClassRefused {
@@ -435,17 +429,49 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	// ---- Critical section: finishes or rolls back; cancellation is ignored. ----
 	rep.DestinationTouched = true
 	critical := context.WithoutCancel(ctx)
+	// settle ends a restore whose data dir holds one whole state again. The
+	// journal goes first and the work dir only once no journal names it; a
+	// journal that cannot be removed is rewritten to the settled phase; when
+	// neither works the work dir stays, so the recover that the journal still
+	// demands can finish. It reports whether that recover is required.
+	settle := func(settled Phase) bool {
+		derr := dropJournal()
+		if derr == nil {
+			if err := os.RemoveAll(workDir); err != nil {
+				rep.warn(CodeIO, "could not remove %s (%v); no journal refers to it and it is safe to delete by hand", workDir, err)
+			}
+			return false
+		}
+		j.Phase = settled
+		if err := record(); err == nil {
+			rep.warn(CodeIO, "the restore journal could not be removed (%v); it records %s, and `ao backup recover` will clean up", derr, settled)
+			return false
+		}
+		rep.warn(CodeIO, "the restore journal could be neither removed nor updated (%v); %s is kept, and `ao backup recover` must run before AO starts", derr, workDir)
+		return true
+	}
 	rollback := func(code Code, cause error) error {
 		progress("rolling back")
+		// Rolling back moves the restored database out from under its name. A
+		// process that opened it since the swap would then attach its -wal/-shm,
+		// by name, to the previous database: leave the journal demanding recover,
+		// which checks again, rather than corrupt the state being put back.
+		if herr := refuseOpenHolders(opts.hooks, "the restored database", restoredDatabaseFiles(dataDir, workDir)); herr != nil {
+			j.Phase = PhaseRollbackFailed
+			_ = record()
+			return &Error{Code: CodeRollbackFailed, Class: ClassRollbackFailed,
+				Msg: fmt.Sprintf("restore failed (%s: %v) and cannot be rolled back safely while the restored database is open; do not start AO. Close that process, then run `ao backup recover`", code, cause),
+				Err: herr}
+		}
 		j.Phase = PhaseRollingBack
-		_ = writeJournal(dataDir, j)
+		_ = record()
 		rbErr := rollbackEntries(dataDir, workDir, j.Promote, j.PreExisting, opts.hooks)
 		if rbErr == nil {
 			rbErr = checkRolledBack(dataDir, j, pre)
 		}
 		if rbErr != nil {
 			j.Phase = PhaseRollbackFailed
-			_ = writeJournal(dataDir, j)
+			_ = record()
 			where := "none was needed"
 			if rep.RollbackBackupPath != "" {
 				where = rep.RollbackBackupPath
@@ -454,13 +480,11 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 				Msg: fmt.Sprintf("restore failed (%s: %v) AND putting the previous state back failed; do not start AO. Run `ao backup recover`; the pre-restore backup is %s", code, cause, where),
 				Err: rbErr}
 		}
-		j.Phase = PhaseRolledBack
-		_ = writeJournal(dataDir, j)
-		_ = os.RemoveAll(workDir)
-		if rerr := removeJournal(dataDir); rerr != nil {
-			rep.warn(CodeIO, "the previous state is back but the journal could not be removed (%v); run `ao backup recover`", rerr)
+		msg := "restore failed after the swap began; the previous state was put back"
+		if rep.RecoverRequired = settle(PhaseRolledBack); rep.RecoverRequired {
+			msg += ", but its journal could not be cleared: run `ao backup recover` before starting AO"
 		}
-		return &Error{Code: code, Class: ClassRolledBack, Msg: "restore failed after the swap began; the previous state was put back", Err: cause}
+		return &Error{Code: code, Class: ClassRolledBack, Msg: msg, Err: cause}
 	}
 
 	if err := opts.hooks.phase(PhaseSwapping); err != nil {
@@ -484,24 +508,18 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 
 	j.Phase = PhaseComplete
 	if err := record(); err != nil {
-		// The journal still says "swapped", which recover would roll back.
-		// Removing it makes the verified restore the recorded state; if even
-		// that fails, roll back now so this report matches what recover would do.
-		if rerr := dropJournal(); rerr != nil {
-			return rep, rollback(CodeIO, fmt.Errorf("record the completed restore: %w; remove the journal: %w", err, rerr))
-		}
-		rep.warn(CodeIO, "the completed restore could not be recorded in the journal (%v), so the journal was removed instead", err)
-		if rerr := os.RemoveAll(workDir); rerr != nil {
-			rep.warn(CodeIO, "could not remove %s (%v); it is safe to delete by hand", workDir, rerr)
-		}
+		// RESTORED is reported only once the journal durably says complete. A
+		// journal still reading "swapped" -- or a completion record that may not
+		// have reached the disk -- describes a restore recover would undo, so undo
+		// it now: the report and recover can then never disagree. Re-run it.
+		return rep, rollback(CodeIO, fmt.Errorf("record the completed restore: %w", err))
+	}
+	if err := dropJournal(); err != nil {
+		rep.warn(CodeIO, "the restore is complete and recorded, but its journal could not be removed (%v); `ao backup recover` will clean up", err)
 		return rep, nil
 	}
 	if err := os.RemoveAll(workDir); err != nil {
-		rep.warn(CodeIO, "could not remove %s (%v); `ao backup recover` will", workDir, err)
-		return rep, nil
-	}
-	if err := removeJournal(dataDir); err != nil {
-		rep.warn(CodeIO, "could not remove the restore journal (%v); `ao backup recover` will", err)
+		rep.warn(CodeIO, "could not remove %s (%v); no journal refers to it and it is safe to delete by hand", workDir, err)
 	}
 	return rep, nil
 }
@@ -764,6 +782,14 @@ func rollbackEntries(dataDir, workDir string, promote, preExisting []string, h *
 // same names, and -- when this process saw them -- the same files.
 func checkRolledBack(dataDir string, j *journal, pre map[string]os.FileInfo) error {
 	for _, e := range managedEntries {
+		if slices.Contains(sqliteSidecars, e) {
+			// Not state: SQLite deletes an empty -wal/-shm whenever anything opens
+			// and closes the database (an operator's read between a failed restore
+			// and recover does), and rollbackEntries already failed if one could
+			// not be moved back. ao.db's stamp below proves no frame was lost: a
+			// WAL with frames is only deleted after checkpointing them into ao.db.
+			continue
+		}
 		fi, ok, err := present(filepath.Join(dataDir, filepath.FromSlash(e)))
 		if err != nil {
 			return err
@@ -936,30 +962,37 @@ func Recover(ctx context.Context, opts RecoverOptions) (*RecoverReport, error) {
 		return rep, err
 	}
 	rep.RestoreID, rep.Phase, rep.RollbackBackupPath = j.RestoreID, j.Phase, j.RollbackBackupPath
-	if err := ProbeExclusive(filepath.Join(dataDir, DatabaseAsset)); err != nil {
+	// No SQLite probe here: opening a database to probe it checkpoints its WAL
+	// and deletes its -wal/-shm, changing the very pre-swap files a rollback must
+	// prove are back (and making a recover after a finished rollback fail for
+	// ever). The operating system's list of open files is the proof that does
+	// not mutate; daemon.lock is already held.
+	if err := refuseOpenHolders(opts.hooks, "the database", dbFamily(dataDir)); err != nil {
 		rep.Result = RecoverFailed
-		return rep, failedf(CodeIO, err, "probe database")
+		return rep, err
 	}
 	workDir := filepath.Join(dataDir, j.WorkDir)
 	cleanup := func(result, detail string) (*RecoverReport, error) {
-		if err := os.RemoveAll(workDir); err != nil {
-			rep.Result = RecoverFailed
-			return rep, failedf(CodeIO, err, "remove %s", workDir)
-		}
-		if err := removeJournal(dataDir); err != nil {
+		// The journal goes first; the work dir only once no journal names it.
+		if err := opts.hooks.dropJournal(dataDir); err != nil {
 			rep.Result = RecoverFailed
 			return rep, failedf(CodeIO, err, "remove restore journal")
+		}
+		if err := os.RemoveAll(workDir); err != nil {
+			detail += fmt.Sprintf("; %s could not be removed (%v) and, with no journal naming it, is safe to delete by hand", workDir, err)
 		}
 		rep.Result, rep.Detail = result, detail
 		return rep, nil
 	}
 
 	switch {
+	case j.unsettled(dataDir):
+		// The data dir may mix two states: rolled back below.
 	case j.Phase == PhaseComplete:
 		return cleanup(RecoverCompleted, "the restore had completed; its leftovers were removed")
 	case j.Phase == PhaseRolledBack:
 		return cleanup(RecoverRolledBack, "the restore had already been rolled back; its leftovers were removed")
-	case !j.Phase.critical():
+	default:
 		return cleanup(RecoverNoSwap, "the restore stopped before its swap; the data dir was never changed")
 	}
 
@@ -969,26 +1002,29 @@ func Recover(ctx context.Context, opts RecoverOptions) (*RecoverReport, error) {
 			Msg: fmt.Sprintf("restore %s was interrupted in phase %s but its work dir %s is missing; recover cannot tell which files are which. Restore the pre-restore backup %s by hand",
 				j.RestoreID, j.Phase, workDir, j.RollbackBackupPath)}
 	}
+	if err := refuseOpenHolders(opts.hooks, "the restored database", restoredDatabaseFiles(dataDir, workDir)); err != nil {
+		rep.Result = RecoverFailed
+		return rep, err
+	}
 	if opts.Progress != nil {
 		opts.Progress("rolling back")
 	}
+	// Best effort: the journal on disk already demands this rollback, and
+	// will keep demanding it until cleanup removes the journal.
 	j.Phase = PhaseRollingBack
-	if err := writeJournal(dataDir, j); err != nil {
-		rep.Result = RecoverFailed
-		return rep, failedf(CodeIO, err, "write restore journal")
-	}
+	_ = opts.hooks.recordJournal(dataDir, j)
 	err = rollbackEntries(dataDir, workDir, j.Promote, j.PreExisting, opts.hooks)
 	if err == nil {
 		err = checkRolledBack(dataDir, j, nil)
 	}
 	if err != nil {
 		j.Phase = PhaseRollbackFailed
-		_ = writeJournal(dataDir, j)
+		_ = opts.hooks.recordJournal(dataDir, j)
 		rep.Result = RecoverFailed
 		return rep, &Error{Code: CodeRollbackFailed, Class: ClassRollbackFailed,
 			Msg: fmt.Sprintf("could not put the pre-swap state back; do not start AO. The pre-restore backup is %s", j.RollbackBackupPath), Err: err}
 	}
 	j.Phase = PhaseRolledBack
-	_ = writeJournal(dataDir, j)
+	_ = opts.hooks.recordJournal(dataDir, j)
 	return cleanup(RecoverRolledBack, "the interrupted restore was rolled back to the pre-swap state")
 }

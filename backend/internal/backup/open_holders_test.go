@@ -196,6 +196,49 @@ func TestRestoreRollsBackWhenAProcessOpenedTheDatabaseInsideTheWindow(t *testing
 	}
 }
 
+// A process that opens the RESTORED database after the swap, while the
+// restore then fails and must roll back: moving that file away would hand the
+// process's sidecars to the previous database. The rollback refuses, boot stays
+// refused, recover refuses while the process lives and rolls back once it exits.
+func TestRollbackRefusesWhileTheRestoredDatabaseIsOpen(t *testing.T) {
+	f := newFixture(t)
+	dbPath := filepath.Join(f.dataDir, DatabaseAsset)
+	var sh *sqliteShell
+	rep, err := f.restore(t, func(o *RestoreOptions) {
+		o.hooks = &testHooks{
+			atPhase: func(p Phase) error {
+				if p == PhaseSwapped {
+					sh = startSQLiteShell(t)
+					sh.run(t, ".open "+dbPath)
+				}
+				return nil
+			},
+			finalVerify: func() error { return errors.New("injected verify failure") },
+		}
+	})
+	if classOf(err) != ClassRollbackFailed || rep.Result != ResultRollbackFailed || !hasCode(err, CodeDBInUse) {
+		t.Fatalf("err=%v rep=%+v", err, rep)
+	}
+	if CheckStartup(f.dataDir) == nil {
+		t.Fatal("boot allowed over a restore that could not roll back")
+	}
+	if rr, err := Recover(context.Background(), RecoverOptions{DataDir: f.dataDir, CheckDaemon: noDaemon}); codeOf(err) != CodeDBInUse || rr.Result != RecoverFailed {
+		t.Fatalf("recover while the restored database is open: %+v %v", rr, err)
+	}
+	sh.quit()
+	rr, err := Recover(context.Background(), RecoverOptions{DataDir: f.dataDir, CheckDaemon: noDaemon})
+	if err != nil || rr.Result != RecoverRolledBack {
+		t.Fatalf("recover once the process exited: %+v %v", rr, err)
+	}
+	if semanticState(t, f.dataDir) != f.stateB {
+		t.Fatal("not the previous state")
+	}
+	if integrity, _ := integrityOf(t, f.dataDir); integrity != "ok" {
+		t.Fatalf("integrity after recover: %q", integrity)
+	}
+	assertNoRestoreLeftovers(t, f.dataDir)
+}
+
 // Not being able to see open descriptors refuses: before the swap nothing is
 // touched, after it the restore rolls back.
 func TestRestoreFailsClosedWhenOpenFilesCannotBeListed(t *testing.T) {

@@ -3,9 +3,11 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -161,6 +163,29 @@ func TestCrashHelperProcess(t *testing.T) {
 			}
 			return os.Rename(oldpath, newpath)
 		}
+	case strings.HasPrefix(mode, "after-rename:"):
+		// Dies right AFTER the n-th rename of the swap itself.
+		want, _ := strconv.Atoi(strings.TrimPrefix(mode, "after-rename:"))
+		h.rename = func(oldpath, newpath string) error {
+			err := os.Rename(oldpath, newpath)
+			if err == nil && (strings.Contains(oldpath, restoreWorkPrefix) || strings.Contains(newpath, restoreWorkPrefix)) && int(n.Add(1)) == want {
+				die()
+			}
+			return err
+		}
+	case mode == "after-rollback":
+		// Verification fails, the rollback puts everything back, and the process
+		// dies before the journal is cleared.
+		h.finalVerify = func() error { return errors.New("injected verify failure") }
+		h.journalRemove = func(func() error) error { die(); return nil }
+	case mode == "before-complete":
+		// Dies after the final verification passed, before "complete" is written.
+		h.journalWrite = func(p Phase, write func() error) error {
+			if p == PhaseComplete {
+				die()
+			}
+			return write()
+		}
 	case mode == "create-after-snapshot":
 		_, _ = Create(context.Background(), CreateOptions{DataDir: dataDir, Root: root, Tool: ToolInfo{Name: "ao-test"},
 			hooks: &testHooks{afterSnapshot: func(string) error { die(); return nil }}})
@@ -197,6 +222,10 @@ func TestCrashDuringRestoreIsAlwaysResolvable(t *testing.T) {
 		{"mid-aside", true, RecoverRolledBack},
 		{"mid-promote", true, RecoverRolledBack},
 		{"phase:" + string(PhaseSwapped), true, RecoverRolledBack},
+		// Review finding: recover's SQLite probe used to delete the pre-existing
+		// empty -shm the finished rollback had put back, so this recover failed
+		// for ever ("ao.db-shm present=false").
+		{"after-rollback", true, RecoverRolledBack},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			f := newFixture(t)
@@ -237,6 +266,56 @@ func TestCrashDuringRestoreIsAlwaysResolvable(t *testing.T) {
 			}
 			if got := semanticState(t, f.dataDir); got != f.stateA {
 				t.Fatal("the retried restore did not return state A")
+			}
+		})
+	}
+}
+
+// Independent review §5/§7/§37 — a real process death right after EVERY single
+// rename of the swap (sidecar, database, identity and catalog set aside; each
+// promotion), and after the final verification but before "complete": the boot
+// gate refuses, the first recover returns exactly the pre-restore data dir, and
+// the second and third find nothing to do and move nothing.
+func TestCrashAfterEveryRenameIsRecoveredIdempotently(t *testing.T) {
+	modes := []string{"before-complete"}
+	for i := 1; i <= 7; i++ {
+		modes = append(modes, fmt.Sprintf("after-rename:%d", i))
+	}
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t)
+			before := stripSidecars(managedDigest(t, f.dataDir))
+			crashChild(t, mode, f.dataDir, f.root, f.backupA.Path)
+
+			j, err := readJournal(f.dataDir)
+			if err != nil || j == nil || !j.unsettled(f.dataDir) {
+				t.Fatalf("journal after the crash: %+v %v", j, err)
+			}
+			if CheckStartup(f.dataDir) == nil {
+				t.Fatal("the daemon would boot over a crashed swap")
+			}
+			for i := 1; i <= 3; i++ {
+				rr, err := Recover(context.Background(), RecoverOptions{DataDir: f.dataDir, CheckDaemon: noDaemon})
+				want := RecoverNothing
+				if i == 1 {
+					want = RecoverRolledBack
+				}
+				if err != nil || rr.Result != want {
+					t.Fatalf("recover #%d: %+v %v", i, rr, err)
+				}
+				if got := stripSidecars(managedDigest(t, f.dataDir)); got != before {
+					t.Fatalf("after recover #%d the data dir is not the pre-restore one:\n%s\n---\n%s", i, before, got)
+				}
+			}
+			if semanticState(t, f.dataDir) != f.stateB {
+				t.Fatal("not the pre-restore state")
+			}
+			assertNoRestoreLeftovers(t, f.dataDir)
+			if err := CheckStartup(f.dataDir); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.restore(t, nil); err != nil || semanticState(t, f.dataDir) != f.stateA {
+				t.Fatalf("restore after recover: %v", err)
 			}
 		})
 	}

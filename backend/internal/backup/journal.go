@@ -41,6 +41,23 @@ func (p Phase) critical() bool {
 	return false
 }
 
+// unsettled reports whether the data dir may hold a mix of two states: the
+// phase is critical, or it reads "complete" although a rollback has started
+// since (a rollback creates failed/ before it moves anything). The second is a
+// completion record that reached the disk while its write reported failure,
+// which the rollback that followed could not overwrite.
+func (j *journal) unsettled(dataDir string) bool {
+	if j.Phase.critical() {
+		return true
+	}
+	if j.Phase == PhaseComplete {
+		if _, err := os.Lstat(filepath.Join(dataDir, j.WorkDir, "failed")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (p Phase) known() bool {
 	switch p {
 	case PhasePreparing, PhaseRollbackReady, PhaseStaged, PhaseSwapping, PhaseSwapped,
@@ -170,7 +187,7 @@ func CheckStartup(dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("a restore journal exists in %s but cannot be trusted (%w); run `ao backup recover` before starting AO", dataDir, err)
 	}
-	if j != nil && j.Phase.critical() {
+	if j != nil && j.unsettled(dataDir) {
 		return fmt.Errorf("restore %s was interrupted in phase %s and the data dir %s may hold a mix of two states; run `ao backup recover` before starting AO",
 			j.RestoreID, j.Phase, dataDir)
 	}
