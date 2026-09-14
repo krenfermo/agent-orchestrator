@@ -11,7 +11,6 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
-	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 const probeTimeout = 2 * time.Second
@@ -41,7 +40,13 @@ type daemonStatus struct {
 	Health    string      `json:"health,omitempty"`
 	Ready     string      `json:"ready,omitempty"`
 	Error     string      `json:"error,omitempty"`
-	owned     bool
+	// P9 identity of the daemon this status describes, when its run-file names it.
+	InstanceID     string `json:"instanceId,omitempty"`
+	InstallationID string `json:"installationId,omitempty"`
+	// Candidates lists every run-file location that was found for this
+	// installation, when more than one was, so a person sees both conventions.
+	Candidates []runFileCandidate `json:"candidates,omitempty"`
+	owned      bool
 }
 
 type probeResult struct {
@@ -50,6 +55,9 @@ type probeResult struct {
 	PID              int    `json:"pid"`
 	ExecutablePath   string `json:"executablePath,omitempty"`
 	WorkingDirectory string `json:"workingDirectory,omitempty"`
+	InstanceID       string `json:"instanceId,omitempty"`
+	InstallationID   string `json:"installationId,omitempty"`
+	DataDir          string `json:"dataDir,omitempty"`
 }
 
 func newStatusCommand(ctx *commandContext) *cobra.Command {
@@ -78,65 +86,8 @@ func (c *commandContext) inspectDaemon(ctx context.Context) (daemonStatus, error
 	if err != nil {
 		return daemonStatus{}, err
 	}
-	st := daemonStatus{State: stateStopped, RunFile: cfg.RunFilePath, DataDir: cfg.DataDir}
-
-	info, err := runfile.Read(cfg.RunFilePath)
-	if err != nil {
-		return daemonStatus{}, err
-	}
-	if info == nil {
-		return st, nil
-	}
-
-	st.PID = info.PID
-	st.Port = info.Port
-	startedAt := info.StartedAt
-	st.StartedAt = &startedAt
-	st.Uptime = formatUptime(c.deps.Now().Sub(info.StartedAt))
-
-	if !c.deps.ProcessAlive(info.PID) {
-		st.State = stateStale
-		st.Error = "run-file points to a dead process"
-		return st, nil
-	}
-
-	health, err := c.readProbe(ctx, info.Port, "healthz")
-	if err != nil {
-		st.State = stateUnhealthy
-		st.Error = err.Error()
-		return st, nil
-	}
-	if err := verifyProbeOwner(health, info.PID, "healthz"); err != nil {
-		st.State = stateStale
-		st.Error = err.Error()
-		return st, nil
-	}
-	st.owned = true
-	st.Health = health.Status
-	if health.Status != "ok" {
-		st.State = stateUnhealthy
-		return st, nil
-	}
-
-	ready, err := c.readProbe(ctx, info.Port, "readyz")
-	if err != nil {
-		st.State = stateNotReady
-		st.Error = err.Error()
-		return st, nil
-	}
-	if err := verifyProbeOwner(ready, info.PID, "readyz"); err != nil {
-		st.State = stateStale
-		st.owned = false
-		st.Error = err.Error()
-		return st, nil
-	}
-	st.Ready = ready.Status
-	if ready.Status == string(stateReady) {
-		st.State = stateReady
-		return st, nil
-	}
-	st.State = stateNotReady
-	return st, nil
+	st, _, err := c.discoverDaemon(ctx, cfg)
+	return st, err
 }
 
 func (c *commandContext) readProbe(ctx context.Context, port int, path string) (probeResult, error) {
@@ -216,8 +167,22 @@ func writeStatus(cmd *cobra.Command, st daemonStatus) error {
 			return err
 		}
 	}
+	if st.InstanceID != "" {
+		if _, err := fmt.Fprintf(out, "  instance: %s\n", st.InstanceID); err != nil {
+			return err
+		}
+	}
 	if st.Error != "" {
 		if _, err := fmt.Fprintf(out, "  error: %s\n", st.Error); err != nil {
+			return err
+		}
+	}
+	for _, cand := range st.Candidates {
+		line := fmt.Sprintf("  candidate: %s (%s", cand.RunFile, cand.State)
+		if cand.PID != 0 {
+			line += fmt.Sprintf(", pid %d", cand.PID)
+		}
+		if _, err := fmt.Fprintln(out, line+")"); err != nil {
 			return err
 		}
 	}

@@ -39,6 +39,38 @@ type Info struct {
 	// address selected by the backend for this daemon launch. It is a locator,
 	// not an authentication secret; the runtime token stays out of this file.
 	BrowserRuntimeAddress string `json:"browserRuntimeAddress,omitempty"`
+
+	// P9 — identity, so a reader can PROVE which daemon a run-file describes
+	// instead of trusting a PID the operating system may have reused.
+	//
+	// FormatVersion is CurrentFormatVersion for a file carrying these fields; 0
+	// is a pre-P9 file, which readers accept with PID + probe verification only.
+	FormatVersion int `json:"formatVersion,omitempty"`
+	// InstanceID is the daemon PROCESS lifetime identity (a fresh id per boot).
+	InstanceID string `json:"instanceId,omitempty"`
+	// InstallationID is the AO installation (data dir) identity.
+	InstallationID string `json:"installationId,omitempty"`
+	// DataDir is the data dir this daemon serves. Two daemons on two data dirs
+	// are two installations, whatever file path a caller happened to look at.
+	DataDir string `json:"dataDir,omitempty"`
+}
+
+// CurrentFormatVersion is the run-file format that carries daemon identity.
+const CurrentFormatVersion = 2
+
+// SameDaemon reports whether other describes exactly the daemon incarnation
+// this Info describes: same PID, same start instant, and -- when both carry one --
+// the same instance identity. It is the comparison every destructive run-file
+// operation must make, so a file rewritten by a successor is never removed on
+// the strength of a stale read.
+func (i Info) SameDaemon(other Info) bool {
+	if i.PID != other.PID || !i.StartedAt.Equal(other.StartedAt) {
+		return false
+	}
+	if i.InstanceID != "" || other.InstanceID != "" {
+		return i.InstanceID == other.InstanceID
+	}
+	return true
 }
 
 // Write atomically writes running.json at path, creating parent directories
@@ -115,6 +147,20 @@ func RemoveIfOwned(path string, ownerPID int) error {
 		return nil
 	}
 	return Remove(path)
+}
+
+// RemoveIfMatches deletes the run-file at path only if it still describes
+// exactly the daemon in want (see SameDaemon). It reports whether it removed
+// anything. A missing file, or one a successor has rewritten, is left alone.
+func RemoveIfMatches(path string, want Info) (bool, error) {
+	info, err := Read(path)
+	if err != nil {
+		return false, err
+	}
+	if info == nil || !info.SameDaemon(want) {
+		return false, nil
+	}
+	return true, Remove(path)
 }
 
 // CheckStale inspects an existing run-file before the new daemon binds. It

@@ -47,7 +47,14 @@ func TestDecideWorkerAdoptionTable(t *testing.T) {
 		{"I6: another installation", with(func(f *workerAdoptionFacts) { f.Runtime = obsOf(domain.WorkerRuntimeInstallationMismatch) }), WorkerRecoveryFailClosed, WorkerReasonInstallationMismatch},
 		{"I17: legacy provenance", with(func(f *workerAdoptionFacts) { f.Runtime = obsOf(domain.WorkerRuntimeProvenanceMissing) }), WorkerRecoveryFailClosed, WorkerReasonLegacyProvenanceMissing},
 		{"conpty: unsupported fails closed", with(func(f *workerAdoptionFacts) { f.Runtime = obsOf(domain.WorkerRuntimeUnsupported) }), WorkerRecoveryFailClosed, WorkerReasonRuntimeUnsupported},
-		{"unavailable probe waits, concludes nothing", with(func(f *workerAdoptionFacts) { f.Runtime = obsOf(domain.WorkerRuntimeUnavailable) }), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},
+		{"unavailable probe waits, concludes nothing", with(func(f *workerAdoptionFacts) {
+			f.Runtime = obsOf(domain.WorkerRuntimeUnavailable)
+			f.Now = claimed.Add(time.Minute)
+		}), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},
+		{"a runtime unreadable past the grace fails closed, never adopts", with(func(f *workerAdoptionFacts) {
+			f.Runtime = obsOf(domain.WorkerRuntimeUnavailable)
+			f.Now = claimed.Add(workerRuntimeUnreadableGrace + time.Second)
+		}), WorkerRecoveryFailClosed, WorkerReasonRuntimeUnavailable},
 		{"out-of-vocabulary proof waits", with(func(f *workerAdoptionFacts) { f.Runtime = obsOf("bogus") }), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},
 		{"I14: recorded launch disagrees", with(func(f *workerAdoptionFacts) { f.RecordedLaunchID = "launch-1" }), WorkerRecoveryFailClosed, WorkerReasonLaunchMismatch},
 		{"I13: no recorded launch, session inside this claim", with(func(f *workerAdoptionFacts) { f.RecordedLaunchID = "" }), WorkerRecoveryAdopt, WorkerReasonMatchingRuntime},

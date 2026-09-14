@@ -187,3 +187,55 @@ func TestCheckStaleNoFile(t *testing.T) {
 		t.Errorf("CheckStale with no file = %+v, want nil", live)
 	}
 }
+
+// P9: a run-file is removed only while it still names the exact daemon the
+// caller inspected. A successor that rewrote it -- same PID reused, new start, new
+// instance -- keeps its handshake.
+func TestRemoveIfMatchesOnlyRemovesTheInspectedIncarnation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "running.json")
+	started := time.Date(2026, 9, 13, 20, 0, 0, 0, time.UTC)
+	inspected := Info{PID: 4242, Port: 3002, StartedAt: started, FormatVersion: CurrentFormatVersion,
+		InstanceID: "aod-first", InstallationID: "aoi-x", DataDir: "/d"}
+
+	for name, successor := range map[string]Info{
+		"reused pid, new start":    {PID: 4242, Port: 3002, StartedAt: started.Add(time.Minute), InstanceID: "aod-first"},
+		"same start, new instance": {PID: 4242, Port: 3002, StartedAt: started, InstanceID: "aod-second"},
+		"legacy file, other pid":   {PID: 9999, Port: 3002, StartedAt: started},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := Write(path, successor); err != nil {
+				t.Fatal(err)
+			}
+			removed, err := RemoveIfMatches(path, inspected)
+			if err != nil || removed {
+				t.Fatalf("removed=%v err=%v: a successor's run-file was deleted", removed, err)
+			}
+			if got, _ := Read(path); got == nil {
+				t.Fatal("the successor's run-file is gone")
+			}
+		})
+	}
+	if err := Write(path, inspected); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := RemoveIfMatches(path, inspected)
+	if err != nil || !removed {
+		t.Fatalf("removed=%v err=%v, want the inspected incarnation's file removed", removed, err)
+	}
+	if removed, err := RemoveIfMatches(path, inspected); err != nil || removed {
+		t.Fatalf("second remove = %v/%v, want an idempotent no-op", removed, err)
+	}
+}
+
+func TestRunFileRoundTripsIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "running.json")
+	want := Info{PID: 1, Port: 2, StartedAt: time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC),
+		FormatVersion: CurrentFormatVersion, InstanceID: "aod-1", InstallationID: "aoi-1", DataDir: "/data"}
+	if err := Write(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil || got == nil || !got.SameDaemon(want) || got.InstallationID != want.InstallationID || got.DataDir != want.DataDir || got.FormatVersion != CurrentFormatVersion {
+		t.Fatalf("round trip = %+v, %v", got, err)
+	}
+}

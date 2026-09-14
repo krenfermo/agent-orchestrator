@@ -44,7 +44,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
 	"github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
-	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runtimegc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/secretbox"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
@@ -150,10 +149,15 @@ func RunWithConfig(cfg config.Config) error {
 	// PID for unrelated processes. So a "live" PID is verified against an actual
 	// /healthz probe; a run-file left by a crashed/hard-killed/reused-PID
 	// predecessor is treated as stale and overwritten when the new server starts.
-	if live, err := runfile.CheckStale(cfg.RunFilePath); err != nil {
+	//
+	// P9: both run-file conventions for this data dir are checked, so a daemon
+	// started as `ao server --data-dir X` (X/running.json) is not missed by a
+	// start that reads the default path -- the two-daemons-on-one-DB shape.
+	if live, path, err := liveDaemonForDataDir(&http.Client{Timeout: staleProbeTimeout}, config.LoopbackHost, cfg.RunFilePath, cfg.DataDir); err != nil {
 		return fmt.Errorf("inspect run-file: %w", err)
-	} else if live != nil && runFileOwnerServing(&http.Client{Timeout: staleProbeTimeout}, config.LoopbackHost, live) {
-		return fmt.Errorf("daemon already running (pid %d, port %d); refusing to start", live.PID, live.Port)
+	} else if live != nil {
+		return fmt.Errorf("daemon already running for data dir %s (pid %d, port %d, run-file %s); refusing to start",
+			cfg.DataDir, live.PID, live.Port, path)
 	}
 
 	// Open the durable store and bring up the CDC substrate: DB triggers capture

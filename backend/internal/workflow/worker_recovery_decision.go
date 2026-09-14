@@ -94,7 +94,18 @@ type workerAdoptionFacts struct {
 	// session with no recorded launch: a session created before the claim that
 	// is now in force belongs to an earlier generation.
 	ClaimedAt time.Time
+	// Now is the decision instant. It bounds how long an UNREADABLE runtime is
+	// waited out before the wait itself becomes the stop (see
+	// workerRuntimeUnreadableGrace).
+	Now time.Time
 }
+
+// workerRuntimeUnreadableGrace is how long recovery waits out a runtime it
+// cannot read at all before failing closed. A single failed tmux read must not
+// park a live worker; a runtime that stays unreadable must not become a run that
+// silently waits forever. Past the grace AO still adopts nothing and launches
+// nothing -- it names the stop.
+const workerRuntimeUnreadableGrace = 15 * time.Minute
 
 // generationFenceTolerance absorbs the clock distance between the claim write
 // and the session row creation inside ONE dispatch (two components stamping
@@ -135,10 +146,15 @@ func decideWorkerAdoption(f workerAdoptionFacts) WorkerRecoveryDecision {
 		case domain.WorkerRuntimeUnsupported:
 			return failClosed(WorkerReasonRuntimeUnsupported, obs.Detail)
 		default: // unavailable, or anything outside the vocabulary
-			// A failed read concludes nothing: not adopted, not stopped. The next
-			// pass asks again.
-			return WorkerRecoveryDecision{Action: WorkerRecoveryWait, Reason: WorkerReasonRuntimeUnavailable,
-				Detail: orValue(obs.Detail, "the runtime could not be read")}
+			// A failed read concludes nothing: not adopted, not relaunched. The
+			// next pass asks again -- for a bounded time, after which the wait
+			// is the stop.
+			detail := orValue(obs.Detail, "the runtime could not be read")
+			if !f.Now.IsZero() && !f.ClaimedAt.IsZero() && f.Now.Sub(f.ClaimedAt) > workerRuntimeUnreadableGrace {
+				return failClosed(WorkerReasonRuntimeUnavailable, fmt.Sprintf(
+					"the runtime has stayed unreadable for more than %s: %s", workerRuntimeUnreadableGrace, detail))
+			}
+			return WorkerRecoveryDecision{Action: WorkerRecoveryWait, Reason: WorkerReasonRuntimeUnavailable, Detail: detail}
 		}
 	}
 
@@ -208,6 +224,7 @@ func (c *Coordinator) workerAdoptionFactsFor(
 		SessionBranch:    rec.Metadata.Branch,
 		SessionCreatedAt: rec.CreatedAt,
 		RecordedLaunchID: c.recordedLaunchIDForStep(ctx, run.ID, step.ID),
+		Now:              c.clock(),
 	}
 	f.RecordedWorktree, f.RecordedBranch = c.recordedWorkspaceForStep(ctx, step.ID)
 	if entry.DispatchedAt != nil {

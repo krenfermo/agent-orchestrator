@@ -613,7 +613,29 @@ func (c *Coordinator) reconcileWorkStepDispatch(
 		result.Action = DispatchReconcileProtected
 		result.Detail = fmt.Sprintf("a live worker owns this dispatch key (%s); reconciliation leaves it alone",
 			owned.describe())
-		if status.Phase == WorkerDispatchUnconfirmed || status.Phase == WorkerDispatchIntended {
+		// P9 (C4): a crash between binding the session and the RUNNING transition
+		// leaves a durably CONFIRMED launch, its session on the step, and a live
+		// worker -- with the step still `ready`, where nothing else ever moves
+		// it (dispatch returns early on a step that holds a session). The
+		// transition is finished here, and only through the same CAS a fresh
+		// launch takes: ready -> running while the step holds THIS session.
+		if status.Phase == WorkerDispatchConfirmed && step.State == domain.WorkflowStepReady &&
+			step.SessionID != nil && *step.SessionID == string(owned.SessionID) {
+			started, serr := c.store.StartWorkflowStepForSession(ctx, step.ID, string(owned.SessionID), c.clock())
+			if serr != nil {
+				return result, run, serr
+			}
+			if started {
+				result.Detail = fmt.Sprintf("the confirmed launch's RUNNING transition was finished for live session %s", owned.SessionID)
+			}
+		}
+		// P9 (I18): a step that ALREADY holds this very session was adopted or
+		// confirmed before; re-entering adoption would write a second
+		// confirmation for one launch. That is decided from the step's own
+		// binding, never from the order of dispatch records sharing a clock
+		// reading.
+		alreadyBound := step.SessionID != nil && *step.SessionID == string(owned.SessionID)
+		if !alreadyBound && (status.Phase == WorkerDispatchUnconfirmed || status.Phase == WorkerDispatchIntended) {
 			// A launch AO never managed to confirm, whose worker is demonstrably
 			// alive. That is case (c), and the answer is to make the
 			// confirmation durable NOW rather than to leave the step outside
@@ -744,6 +766,16 @@ func (c *Coordinator) reconcileWorkStepDispatch(
 			owned.describe())
 	}
 
+	// P9: a runtime that could not be READ is waited out for a bounded time
+	// before it is allowed to become a stop. One failed tmux read must not park
+	// a live worker; the recorded launch evidence dates how long AO has been
+	// unable to tell.
+	if owned.Unprovable() && owned.Runtime != nil && owned.Runtime.Proof == domain.WorkerRuntimeUnavailable &&
+		!status.Record.CreatedAt.IsZero() && c.clock().Sub(status.Record.CreatedAt) <= workerRuntimeUnreadableGrace {
+		result.Detail = fmt.Sprintf("the runtime behind this dispatch could not be read; nothing is concluded yet (%s)",
+			owned.describe())
+		return result, run, nil
+	}
 	// The rule that outranks every case above: AO could not prove which of them
 	// it is looking at. Stop with the evidence rather than act on a guess.
 	if owned.Unprovable() {
@@ -1037,7 +1069,8 @@ func (c *Coordinator) stopReconciledDispatch(
 	result DispatchReconciliation,
 ) (DispatchReconciliation, domain.WorkflowRun, error) {
 	reason := ReasonWorkerDispatchAmbiguous
-	if owned.runtimeOwnershipUnproven() {
+	if owned.runtimeOwnershipUnproven() ||
+		(owned.Runtime != nil && owned.Runtime.Proof == domain.WorkerRuntimeUnavailable && owned.Unprovable()) {
 		// P9: "AO cannot prove this runtime is its own" is a different stop from
 		// "AO cannot prove what happened to this launch", with a different remedy.
 		reason = ReasonWorkerOwnershipUnproven
