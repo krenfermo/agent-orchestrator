@@ -44,6 +44,9 @@ const (
 	CodeInvalidBackupRoot       Code = "invalid_backup_root"
 	CodeInvalidArgument         Code = "invalid_argument"
 	CodeNoRollbackPossible      Code = "no_rollback_possible"
+	// CodeDestinationDamaged: the current database cannot produce a VALID
+	// pre-restore backup; --preserve-broken-state keeps a forensic copy instead.
+	CodeDestinationDamaged Code = "destination_damaged"
 
 	// Verification findings.
 

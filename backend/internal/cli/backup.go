@@ -455,6 +455,7 @@ type restoreOptions struct {
 	root                   string
 	identity               string
 	allowSecretKeyMismatch bool
+	preserveBrokenState    bool
 	yes                    bool
 	json                   bool
 }
@@ -486,6 +487,8 @@ func newRestoreCommand(ctx *commandContext, use string) *cobra.Command {
 	cmd.Flags().StringVar(&opts.root, "root", "", "Where the pre-restore backup goes (default $AO_BACKUP_DIR, else <data dir parent>/backups)")
 	cmd.Flags().StringVar(&opts.identity, "identity", "", "On an installation identity mismatch: backup (adopt the backup's) or destination (keep this one's)")
 	cmd.Flags().BoolVar(&opts.allowSecretKeyMismatch, "allow-secret-key-mismatch", false, "Restore even though secret.key differs (encrypted settings must be re-entered)")
+	cmd.Flags().BoolVar(&opts.preserveBrokenState, "preserve-broken-state", false,
+		"Restore over a database too damaged for a VALID pre-restore backup, keeping its files as a byte-for-byte forensic copy instead")
 	cmd.Flags().BoolVarP(&opts.yes, "yes", "y", false, "Do not ask for confirmation")
 	cmd.Flags().BoolVar(&opts.json, "json", false, "Output the report as JSON")
 	return cmd
@@ -524,7 +527,7 @@ func (c *commandContext) runRestore(cmd *cobra.Command, source string, opts rest
 	defer stop()
 	rep, rerr := backup.Restore(runCtx, backup.RestoreOptions{
 		DataDir: cfg.DataDir, Source: source, Root: c.backupRoot(cfg, opts.root),
-		Identity: policy, AllowSecretKeyMismatch: opts.allowSecretKeyMismatch,
+		Identity: policy, AllowSecretKeyMismatch: opts.allowSecretKeyMismatch, PreserveBrokenState: opts.preserveBrokenState,
 		CheckDaemon: c.daemonStoppedCheck(cfg), Tool: backupTool(), Progress: progressTo(cmd.ErrOrStderr()),
 	})
 	if opts.json {
@@ -551,6 +554,9 @@ func writeRestoreSummary(w io.Writer, rep *backup.RestoreReport) error {
 	}
 	if rep.RollbackBackupPath != "" {
 		fmt.Fprintf(&b, "  pre-restore:   %s\n", rep.RollbackBackupPath)
+		if rep.RollbackKind == backup.RollbackForensicCopy {
+			b.WriteString("                 (a byte-for-byte forensic copy of the damaged state, NOT a restorable backup)\n")
+		}
 	}
 	if rep.IdentityAction != "" {
 		fmt.Fprintf(&b, "  identity:      %s\n", rep.IdentityAction)

@@ -192,7 +192,7 @@ func TestCrashHelperProcess(t *testing.T) {
 		t.Fatal("create did not crash")
 	}
 	_, err := Restore(context.Background(), RestoreOptions{DataDir: dataDir, Source: source, Root: root, CheckDaemon: noDaemon,
-		Tool: ToolInfo{Name: "ao-test"}, hooks: h})
+		Tool: ToolInfo{Name: "ao-test"}, PreserveBrokenState: os.Getenv("AO_P10_CRASH_PRESERVE") == "1", hooks: h})
 	t.Fatalf("restore did not crash: %v", err)
 }
 

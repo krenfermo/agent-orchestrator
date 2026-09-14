@@ -263,6 +263,30 @@ func TestRestoreCLI_StaleRunFileAllowsRestoreAndIsKept(t *testing.T) {
 	}
 }
 
+// Independent review §22 at the CLI boundary: a damaged database refuses with
+// destination_damaged (exit 3), and --preserve-broken-state restores over it,
+// reporting the forensic copy.
+func TestRestoreCLI_DamagedDestinationNeedsPreserveBrokenState(t *testing.T) {
+	cfg := newBackupCLIEnv(t)
+	res := cliCreateBackup(t)
+	if err := os.WriteFile(filepath.Join(cfg.dataDir, backup.DatabaseAsset), []byte(strings.Repeat("garbage!", 4096)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restoreRefusal(t, cfg, Deps{}, res.Path, backup.CodeDestinationDamaged)
+
+	out, _, err := executeCLI(t, Deps{}, "restore", res.Path, "--yes", "--json", "--preserve-broken-state")
+	if err != nil {
+		t.Fatalf("restore --preserve-broken-state: %v\n%s", err, out)
+	}
+	var rep backup.RestoreReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil || rep.Result != backup.ResultRestored || rep.RollbackKind != backup.RollbackForensicCopy {
+		t.Fatalf("report %+v (%v)", rep, err)
+	}
+	if _, err := os.Stat(filepath.Join(rep.RollbackBackupPath, backup.DatabaseAsset)); err != nil {
+		t.Fatalf("no forensic copy of the damaged database: %v", err)
+	}
+}
+
 func TestRestoreCLI_NeedsConfirmationOutsideATerminal(t *testing.T) {
 	cfg := newBackupCLIEnv(t)
 	res := cliCreateBackup(t)

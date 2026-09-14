@@ -49,6 +49,10 @@ type RestoreOptions struct {
 	Root                   string
 	Identity               IdentityPolicy
 	AllowSecretKeyMismatch bool
+	// PreserveBrokenState allows restoring over a database too damaged to
+	// produce a VALID pre-restore backup: its files are kept as a byte-for-byte
+	// forensic copy instead. Space, I/O and cancellation failures still refuse.
+	PreserveBrokenState bool
 	// CheckDaemon must prove that no AO daemon serves DataDir -- live,
 	// unhealthy or unverified -- without signalling anything. It is required:
 	// a restore that cannot ask fails closed.
@@ -61,13 +65,16 @@ type RestoreOptions struct {
 
 // RestoreReport describes what a restore did.
 type RestoreReport struct {
-	Result             string        `json:"result"`
-	RestoreID          string        `json:"restoreId,omitempty"`
-	Source             string        `json:"source"`
-	SourceBackupID     string        `json:"sourceBackupId,omitempty"`
-	DataDir            string        `json:"dataDir"`
-	RollbackBackupID   string        `json:"rollbackBackupId,omitempty"`
-	RollbackBackupPath string        `json:"rollbackBackupPath,omitempty"`
+	Result             string `json:"result"`
+	RestoreID          string `json:"restoreId,omitempty"`
+	Source             string `json:"source"`
+	SourceBackupID     string `json:"sourceBackupId,omitempty"`
+	DataDir            string `json:"dataDir"`
+	RollbackBackupID   string `json:"rollbackBackupId,omitempty"`
+	RollbackBackupPath string `json:"rollbackBackupPath,omitempty"`
+	// RollbackKind says what RollbackBackupPath is: a verified_backup, or a
+	// forensic_copy of a damaged state that is NOT restorable.
+	RollbackKind       string        `json:"rollbackKind,omitempty"`
 	GooseVersion       int64         `json:"gooseVersion,omitempty"`
 	BinaryHead         int64         `json:"binaryHead,omitempty"`
 	Compatibility      Compatibility `json:"compatibility,omitempty"`
@@ -248,8 +255,13 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		}
 	}
 	dbPath := filepath.Join(dataDir, DatabaseAsset)
-	if err := ProbeExclusive(dbPath); err != nil {
+	damage, err := probeQuiet(dbPath, opts.hooks)
+	if err != nil {
 		return rep, failedf(CodeIO, err, "probe destination database")
+	}
+	if damage != nil && !opts.PreserveBrokenState {
+		return rep, &Error{Code: CodeDestinationDamaged, Class: ClassRefused, Err: damage,
+			Msg: "the destination database is damaged, so no VALID pre-restore backup can be taken; nothing was changed. To restore over it, pass --preserve-broken-state: its files are then kept as a byte-for-byte forensic copy"}
 	}
 	if err := refuseOpenHolders(opts.hooks, "the destination database", dbFamily(dataDir)); err != nil {
 		return rep, err
@@ -351,28 +363,55 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	}
 
 	if _, ok, _ := present(dbPath); ok {
-		progress("creating pre-restore backup")
-		create := Create
-		if opts.hooks != nil && opts.hooks.createRollback != nil {
-			create = opts.hooks.createRollback
+		var cerr error
+		if damage == nil {
+			progress("creating pre-restore backup")
+			create := Create
+			if opts.hooks != nil && opts.hooks.createRollback != nil {
+				create = opts.hooks.createRollback
+			}
+			var cres *CreateResult
+			cres, cerr = create(ctx, CreateOptions{DataDir: dataDir, Root: root, Kind: KindPreRestore,
+				Note: "before restoring " + m.BackupID, Tool: opts.Tool, Progress: opts.Progress, hooks: opts.hooks})
+			if cerr == nil {
+				vr, verr := Verify(ctx, cres.Path, VerifyOptions{Quick: true, hooks: opts.hooks})
+				if verr != nil || vr.Status != StatusValid {
+					reason := "verification did not run"
+					if vr != nil {
+						reason = firstReason(vr.Reasons)
+					}
+					return rep, abandon(&Error{Code: CodeRollbackBackupFailed, Class: ClassFailed,
+						Msg: "the pre-restore backup did not verify (" + reason + "); nothing in the data dir was replaced", Err: verr})
+				}
+				rep.RollbackBackupID, rep.RollbackBackupPath, rep.RollbackKind = cres.BackupID, cres.Path, RollbackVerifiedBackup
+			}
 		}
-		cres, cerr := create(ctx, CreateOptions{DataDir: dataDir, Root: root, Kind: KindPreRestore,
-			Note: "before restoring " + m.BackupID, Tool: opts.Tool, Progress: opts.Progress, hooks: opts.hooks})
-		if cerr != nil {
+		switch {
+		case damage == nil && cerr == nil:
+		case damage != nil || destinationDamaged(cerr):
+			// The current state cannot be backed up because it is broken -- the
+			// very reason to restore. Without explicit consent, refuse; with it,
+			// keep every byte of it before anything is replaced.
+			if damage == nil {
+				damage = cerr
+			}
+			if !opts.PreserveBrokenState {
+				return rep, abandon(&Error{Code: CodeDestinationDamaged, Class: ClassRefused, Err: damage,
+					Msg: "the current database cannot produce a VALID pre-restore backup; nothing in the data dir was replaced. To restore over it, pass --preserve-broken-state: its files are then kept as a byte-for-byte forensic copy"})
+			}
+			progress("preserving the damaged state as a forensic copy")
+			fpath, ferr := forensicCopy(ctx, dataDir, root, restoreID)
+			if ferr != nil {
+				return rep, abandon(&Error{Code: CodeRollbackBackupFailed, Class: ClassFailed,
+					Msg: "could not preserve the damaged state; nothing in the data dir was replaced", Err: ferr})
+			}
+			rep.RollbackBackupID, rep.RollbackBackupPath, rep.RollbackKind = filepath.Base(fpath), fpath, RollbackForensicCopy
+			rep.warn(CodeDestinationDamaged, "the current database could not be backed up (%v); its files were kept byte for byte in %s, which is evidence and NOT a restorable backup", damage, fpath)
+		default:
 			return rep, abandon(&Error{Code: CodeRollbackBackupFailed, Class: ClassFailed,
 				Msg: "could not create the pre-restore backup; nothing in the data dir was replaced", Err: cerr})
 		}
-		vr, verr := Verify(ctx, cres.Path, VerifyOptions{Quick: true, hooks: opts.hooks})
-		if verr != nil || vr.Status != StatusValid {
-			reason := "verification did not run"
-			if vr != nil {
-				reason = firstReason(vr.Reasons)
-			}
-			return rep, abandon(&Error{Code: CodeRollbackBackupFailed, Class: ClassFailed,
-				Msg: "the pre-restore backup did not verify (" + reason + "); nothing in the data dir was replaced", Err: verr})
-		}
-		rep.RollbackBackupID, rep.RollbackBackupPath = cres.BackupID, cres.Path
-		j.RollbackBackupID, j.RollbackBackupPath = cres.BackupID, cres.Path
+		j.RollbackBackupID, j.RollbackBackupPath = rep.RollbackBackupID, rep.RollbackBackupPath
 	} else {
 		rep.warn(CodeAssetMissing, "the data dir had no database, so there was nothing to back up before restoring")
 	}
@@ -400,7 +439,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		return rep, abandon(ctx.Err())
 	}
 	// Second probe: the pre-restore backup took minutes on a large database.
-	if err := ProbeExclusive(dbPath); err != nil {
+	if _, err := probeQuiet(dbPath, opts.hooks); err != nil {
 		return rep, abandon(failedf(CodeIO, err, "probe destination database"))
 	}
 	if err := refuseOpenHolders(opts.hooks, "the destination database", dbFamily(dataDir)); err != nil {
