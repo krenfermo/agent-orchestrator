@@ -471,3 +471,32 @@ FK y goose intactos. Ningún evento del run tuvo resultado distinto de `ok`/`pas
   `prune` (§10). Disco libre al cierre: 57 GB.
 
 La etapa 1 queda cerrada. **24H PASS**; 48H y 72H siguen pendientes y son independientes (§7).
+
+## 18. Etapa 2 (48h) — lanzamiento
+
+**Run `run-48h-20260915T231824Z-50fdac`**, T0 `2026-09-15T23:19:27Z`, fin previsto
+`2026-09-17T23:19:27Z`. Misma configuración congelada que la etapa 1, sin cambios de código de AO
+ni de criterios: binario `ao-9c80b9b2c` (`fd03cc8c…`, `vcs.revision=9c80b9b2c…`,
+`vcs.modified=false`), ECC `9c80b9b2c63aa0e28acf96ac90a82b62430a8b8e`, data dir `~/.ao/data`,
+puerto 3002, run-file `~/.ao/dev/running.json`, socket `ao-c5b10da60941`, fuente y fixtures
+congelados con sus SHA del manifest, heartbeat 300 s, restore scratch con
+`--allow-secret-key-mismatch` en el puerto 3019.
+
+Comprobaciones previas al T0 (todas OK): etapa 1 finalizada (`stopped.json`, `monitor_uninstalled`,
+plist retirado) y su evidencia íntegra (33/33 hashes); sin daemon competidor, sin servidor tmux,
+sin `running.json` residual; harness idéntico al blob del commit y worktree limpio; base real
+`integrity_check` ok, FK 0, **goose 170**; 57 GB libres.
+
+Baseline T0: `745865c8…`, 936 574 976 B, goose 170, FK 0, integridad completa (8.88 s).
+Backup T0 (offline, `VALID compatible`): `aob-20260915T231849.806651000Z-4d21afff`.
+Daemon bajo prueba: instancia `aod-41a6a369-897b-4852-8322-32fe8cfd134c`, instalación
+`aoi-93bd35a0-d14c-42b8-9dd7-b76335a2f78d`, identidad sin problemas.
+
+Eventos automáticos (§7, congelados): checkpoints T+0/12/24/36/48 más `bk-active` en T+19.05;
+backups online en T+19.05, T+24 y T+48; reinicios graceful en T+7, T+19 y T+31; fixtures en
+T+3, 11, 21, 33 y 43. Manuales: dos noches de sleep ≥20 min, Electron cerrar/reabrir
+(T+14h..T+30h), `daemon-crash --confirm --restart` (T+26h..T+40h) y `finalize` (≥T+48h).
+
+El plan congelado **no exige reboot en la etapa de 48h** (§14: reboot "—" en 48h, "≥1" en 72h,
+contado en todo P11). No se añade ni se elimina: si ocurre un reboot en esta etapa, el monitor lo
+registra y cuenta para el requisito de P11; si no, queda para la etapa de 72h.
