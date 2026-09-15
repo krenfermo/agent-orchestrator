@@ -424,3 +424,50 @@ borró; la evidencia del run se conserva.
 Pendiente para el operador (no automatizado): el backup semilla del self-test
 `~/.ao/backups/aob-20260914T220848.585478000Z-39edd901` (850 MB, `VALID`, base real a goose 170)
 queda en la raíz de backups; P11 no hace `prune`.
+
+## 17. Etapa 1 (24h) — resultado, cierre y auditoría de evidencia
+
+**Run `run-24h-20260914T225838Z-9c8855` — VERDICT PASS, GO.**
+T0 `2026-09-14T22:59:11Z`, parada de etapa `2026-09-15T23:06:20Z`, duración **24.12 h** sobre la
+base real (`~/.ao/data`, 936 MB) con el binario congelado `ao-9c80b9b2c`
+(`fd03cc8c…`), puerto 3002, run-file `~/.ao/dev/running.json`.
+Informe: `runs/run-24h-20260914T225838Z-9c8855/final-report.json`.
+
+| Criterio (§14, 24h) | Resultado | Evidencia |
+| --- | --- | --- |
+| duración válida | PASS | 24.12 h; `clock_jump` 0, `observed_clock_gap` 0 |
+| sin incidente crítico; `high` con disposición | PASS | `incidents/` vacío; 0 eventos con resultado distinto de ok/pass/VALID |
+| reinicios graceful ≥1 | PASS | `rs-1` T+5.09 h: instancia nueva `aod-…f9ff45fb59ef`, misma instalación, `quick_check`, goose, conteos terminales no decrecientes |
+| crash controlado ≥1 | PASS | T+15.18 h: identidad probada (comando, instalación, data dir, `/healthz`), SIGKILL a pid 58345, `stale`, instancia nueva `aod-…450d6de503e6`, checkpoint `post-crash` sano |
+| fixtures P9/P10 ≥1 cada uno | PASS | 3 rondas × 4 fixtures = 12 ejecuciones, 0 FAIL, 0 SKIP |
+| checkpoints sin hallazgos | PASS | 8 checkpoints, `findings: []` en todos; duplicados, inmutabilidad terminal, huérfanos e identidad = 0 |
+| sleep/wake ≥1 | PASS | 1 ciclo probado por kernel: 1861 s dormido, hueco 2170 s, `unknownSec` 0, checkpoint `post-wake-1` sano |
+| backups online VALID ≥1 | PASS | 3 creados (t0 offline, `cp-t12` y `cp-t24` **online**), 4 verificaciones `VALID compatible`, 0 inválidos |
+| restore scratch del último backup | PASS | 15.0 s sobre `aob-20260915T225946…-138f9405`, scratch borrado, informe conservado |
+| base final | PASS | `integrity_check` ok (4.87 s), FK 0, goose **170**, sin `-wal`/`-shm`/journal de restore |
+| memoria | PASS | pendiente **0.13 MB/h** sobre 20 h post warm-up; primera mediana 55.56 MB, última 51.02 MB (3 instancias) |
+
+Observación (no es un hallazgo): la base pasó de 908 447 744 B (`7ee966e6…`) en T0 a
+936 574 976 B (`745865c8…`) al final — escritura propia del daemon durante 24 h, con integridad,
+FK y goose intactos. Ningún evento del run tuvo resultado distinto de `ok`/`pass`/`VALID`;
+`monitor_restart` = 0 (el monitor launchd observó las 24 h sin interrupción: 274 heartbeats).
+
+### 17.1 Auditoría de evidencia (verificada al cierre)
+
+- **Integridad de la evidencia**: las 33 entradas de `hashes.jsonl` re-verificadas archivo a
+  archivo → 33/33 SHA-256 coinciden, 0 faltantes.
+- **Harness**: `runs/<run>/harness/p11.py` y la copia instalada = `69ef0331…` = blob
+  `scripts/p11/p11.py` del commit `a09adfde6`. El worktree `feat/p11-reliability-soak` está limpio.
+- **Binario bajo prueba**: `go version -m` sobre `~/.ao/soak/p11/bin/ao-9c80b9b2c` →
+  `vcs.revision=9c80b9b2c63aa0e28acf96ac90a82b62430a8b8e`, `vcs.modified=false`, `-trimpath=true`;
+  SHA-256 `fd03cc8c…` = manifest = `binarySha256` del informe final.
+- **Fuente congelada**: `src/9c80b9b2c/backend` = 2580 blobs, todos idénticos a
+  `git ls-tree -r 9c80b9b2c backend`; 0 archivos extra, 0 diferencias.
+- **Fixtures**: los 4 binarios mantienen el SHA-256 congelado en el manifest.
+- **Cierre operativo**: `stopped.json` presente, `monitor_uninstalled` rc 0, el plist
+  `~/Library/LaunchAgents/com.aoagents.p11-soak.plist` ya no existe, no hay daemon vivo, ni
+  servidor tmux, ni `running.json` residual.
+- **Retención**: se conservan los 3 backups de la etapa más el semilla del self-test; P11 no hace
+  `prune` (§10). Disco libre al cierre: 57 GB.
+
+La etapa 1 queda cerrada. **24H PASS**; 48H y 72H siguen pendientes y son independientes (§7).
