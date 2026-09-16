@@ -98,9 +98,13 @@ function commandExecutable(command: string): string | null {
 	const quote = text[0];
 	if (quote === "'" || quote === '"') {
 		const end = text.indexOf(quote, 1);
-		return end > 1 ? text.slice(1, end) : null;
+		// `"/opt/ao"x daemon` runs /opt/aox: anything glued to the closing quote is unparseable.
+		if (end <= 1 || (end + 1 < text.length && !/\s/.test(text[end + 1]))) return null;
+		return text.slice(1, end);
 	}
 	const word = text.split(/\s+/)[0];
+	// An unquoted Windows path keeps its backslashes; elsewhere they are shell escapes.
+	if (/^[A-Za-z]:\\/.test(word)) return /['"$`]/.test(word) ? null : word;
 	return /['"\\$`]/.test(word) ? null : word;
 }
 

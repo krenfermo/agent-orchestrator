@@ -9,6 +9,16 @@ import net from "node:net";
 const BACKOFF_INIT_MS = 200;
 const BACKOFF_MAX_MS = 2_000;
 
+/**
+ * Whether the daemon behind the supervisor socket is still the one this link
+ * was made for (P9): "proven" connect; "unproven" (not answering right now)
+ * wait and ask again without connecting; "foreign" (another daemon, another
+ * incarnation, or gone) end the link for good. The socket path alone proves
+ * nothing -- any daemon that binds it later would otherwise be linked and would
+ * stop itself when this app quits.
+ */
+export type SupervisorLinkVerdict = "proven" | "unproven" | "foreign";
+
 export interface SupervisorLinkHandle {
 	readonly connected: boolean;
 	dispose(): void;
@@ -25,8 +35,12 @@ export interface SupervisorLinkHandle {
  * we reconnect with bounded exponential backoff so the link re-establishes
  * automatically. dispose() cancels any pending retry and destroys the socket.
  */
-export function connectSupervisor(addr: string, opts?: { log?: (msg: string) => void }): SupervisorLinkHandle {
+export function connectSupervisor(
+	addr: string,
+	opts?: { log?: (msg: string) => void; verify?: () => Promise<SupervisorLinkVerdict> },
+): SupervisorLinkHandle {
 	const log = opts?.log ?? (() => undefined);
+	const verify = opts?.verify;
 
 	let disposed = false;
 	let connected = false;
@@ -62,6 +76,31 @@ export function connectSupervisor(addr: string, opts?: { log?: (msg: string) => 
 	}
 
 	function connect() {
+		if (disposed) return;
+		if (!verify) {
+			open();
+			return;
+		}
+		// Every (re)connect is gated: a drop is re-linked only to the same daemon.
+		verify()
+			.catch((): SupervisorLinkVerdict => "unproven")
+			.then((verdict) => {
+				if (disposed) return;
+				if (verdict === "proven") {
+					open();
+				} else if (verdict === "foreign") {
+					log("supervisor-link: the daemon behind the socket is not the one this link was made for; link ended");
+					disposed = true;
+					connected = false;
+					clearRetry();
+					destroySocket();
+				} else {
+					scheduleReconnect();
+				}
+			});
+	}
+
+	function open() {
 		if (disposed) return;
 
 		destroySocket();

@@ -132,3 +132,15 @@ describe("configuredDaemonIdentityError on Windows paths", () => {
 		).toBeNull();
 	});
 });
+
+describe("configuredDaemonIdentityError command parsing", () => {
+	const same = (a: string, b: string) => a === b;
+	it("accepts an unquoted Windows path and rejects text glued to a closing quote", () => {
+		expect(configuredDaemonIdentityError({ executablePath: "C:\\ao\\ao.exe" }, "C:\\ao\\ao.exe daemon", same)).toBeNull();
+		expect(configuredDaemonIdentityError({ executablePath: "/opt/ao" }, '"/opt/ao"x daemon', same)).not.toBeNull();
+	});
+	it("refuses wrappers it cannot prove (env prefix, bare names)", () => {
+		expect(configuredDaemonIdentityError({ executablePath: "/bin/ao" }, "env X=1 /bin/ao daemon", same)).not.toBeNull();
+		expect(configuredDaemonIdentityError({ executablePath: "/bin/ao" }, "ao daemon", same)).not.toBeNull();
+	});
+});
