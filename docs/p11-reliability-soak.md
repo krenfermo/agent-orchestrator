@@ -607,3 +607,59 @@ la única diferencia posible es `vcs.revision`/`vcs.time`. Dos avisos para conge
 un `go build` desde un **worktree** estampa la revisión del checkout principal (Go sólo reconoce
 `.git` como directorio), y recompilar hoy `9c80b9b2c` con la misma información de build no reproduce
 byte a byte el congelado `fd03cc8c…` (una sección difiere en 96 bytes; causa no determinada).
+
+## 20. Nueva candidata: límite P9 de Electron, endpoint supervisor por instancia y política de binario único
+
+### 20.1 Hallazgos previos a la integración
+- **P9 en Electron (demostrado en datos scratch, ECC `9c80b9b2c`)**: la app enviaba `/shutdown` a un
+  daemon de otro data dir/instalación que sólo respondía en su puerto, y el enlace supervisor se
+  reconectaba por ruta a cualquier daemon. Corregido en `fix/p11-electron-p9-shutdown-ownership`:
+  un único punto de `/shutdown` que prueba P9 §15 (definición de `ao stop` + identidad completa);
+  adjuntar, enlazar y handshake exigen la misma prueba; tripwire de fuente. Probes tras el fix:
+  foreign 10/10, port-only 5/5, checkout A/B 5/5 con **0 shutdowns**.
+- **Endpoint supervisor** (daemon Go): el nombre dependía sólo del directorio del run-file
+  (`supervise.sock`; pipe `ao-supervise[-<dir>]`), así que dos daemons con run-files en el mismo
+  directorio lo compartían y en Windows dos instalaciones podían colisionar. Corregido en
+  `fix/supervisor-endpoint-identity`: `supervise-<sha256(instanceId)[:16]>.sock` junto al run-file
+  (límite 103 bytes; si no cabe, sin listener) y `\\.\pipe\ao-supervise-<token>`; dirección publicada
+  como `supervisorAddress` (opcional, `formatVersion` sin cambios) por la misma escritura atómica;
+  Electron enlaza sólo a esa dirección de un run-file probado; limpieza stale sólo del predecesor
+  del mismo run-file con lock tomado, PID muerto, nombre de su instancia, socket y conexión
+  rechazada dos veces.
+
+### 20.2 Compatibilidad y regla para `electron-event`
+- Electron nuevo + daemon anterior (incluido `fd03cc8c…`): sin `supervisorAddress` **no hay enlace**
+  (fail closed); el daemon lanzado por la app sigue parándose al salir por `killDaemon`
+  (validación mixta 2/2). Un daemon *adjuntado* con `owner=app` no se auto-detiene en ese caso.
+- Electron anterior + daemon nuevo: no encuentra `supervise.sock`, no enlaza.
+- `p11 electron-event` rechaza en el preflight un daemon cuyo run-file no publique
+  `supervisorAddress`: la etapa debe usar el binario de la nueva candidata.
+- Residual aceptado: tras un crash seguido de `ao stop` (que retira el run-file) queda un socket de
+  0 bytes sin limpiar; no se añade otra ruta de borrado.
+
+### 20.3 Política P11 para la nueva candidata
+El 24H anterior es **PASS histórico de `fd03cc8c…`** y el 48H anterior es **FAIL/NO-GO** (descubrió el
+incidente de Electron); ninguno se borra ni se reclasifica, y **ninguno cuenta** para la nueva
+candidata, cuyo daemon es funcionalmente distinto. Tras integrar todo se construye **un único**
+binario desde un clon limpio y ese mismo archivo, sin reconstruir, se usa en 24H → 48H → 72H.
+Cualquier cambio funcional del daemon antes de terminar las tres etapas rompe la continuidad y se
+evalúa explícitamente.
+
+### 20.4 Construcción reproducible del binario congelado
+```bash
+SHA=<commit ECC integrado>; SHORT=$(printf %.9s "$SHA")
+B=~/.ao/soak/p11/build/$SHORT
+git clone --no-local --no-hardlinks <repo> "$B/repo" && git -C "$B/repo" checkout --detach "$SHA"
+git -C "$B/repo" status --porcelain            # debe estar vacío
+go version                                      # registrar (go1.26.6 en fd03cc8c)
+(cd "$B/repo/backend" && CGO_ENABLED=1 go build -trimpath -o "$B/ao-$SHORT.1" ./cmd/ao \
+                     && CGO_ENABLED=1 go build -trimpath -o "$B/ao-$SHORT.2" ./cmd/ao)
+cmp "$B/ao-$SHORT.1" "$B/ao-$SHORT.2"           # dos builds idénticos
+go version -m "$B/ao-$SHORT.1" | grep -E 'vcs.revision|vcs.modified|trimpath|CGO_ENABLED'
+                                                 # vcs.revision=$SHA, vcs.modified=false
+install -m 0700 "$B/ao-$SHORT.1" ~/.ao/soak/p11/bin/ao-$SHORT && shasum -a 256 ~/.ao/soak/p11/bin/ao-$SHORT
+git -C "$B/repo" archive "$SHA" backend | (mkdir -p ~/.ao/soak/p11/src/$SHORT && tar -x -C ~/.ao/soak/p11/src/$SHORT)
+# fixtures desde la fuente congelada, como en §4 (go test -c -trimpath de los 4 paquetes)
+```
+Nunca desde un worktree: Go sólo reconoce `.git` como directorio y estampa la revisión del checkout
+principal. El checkout de Electron para `electron-event` es otro clon limpio en el mismo `SHA`.
