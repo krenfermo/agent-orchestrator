@@ -146,10 +146,7 @@ func RunWithConfig(cfg config.Config) error {
 	// The incarnation that last wrote this run-file. Holding the run-file lock
 	// proves it is no longer running, which is what lets the supervisor listener
 	// clean up that one predecessor's endpoint (and nothing else).
-	var priorSupervisor *supervisor.Prior
-	if prior, perr := runfile.Read(cfg.RunFilePath); perr == nil && prior != nil && prior.InstanceID != "" && !processalive.Alive(prior.PID) {
-		priorSupervisor = &supervisor.Prior{InstanceID: prior.InstanceID, Address: prior.SupervisorAddress}
-	}
+	priorSupervisor := priorSupervisorEndpoint(cfg.RunFilePath, processalive.Alive)
 
 	// P10: a restore interrupted while the data dir may hold a mix of two states
 	// must be resolved with `ao backup recover` before anything opens the store.
@@ -1313,4 +1310,20 @@ func (f federatedSessionIssuer) CreateFederatedUser(ctx context.Context, in ssos
 
 func (f federatedSessionIssuer) CreateSessionAs(ctx context.Context, userID domain.UserID, method domain.AuthMethod, issuer, subject string) (string, domain.AuthSession, error) {
 	return f.mgr.CreateSessionAs(ctx, userID, method, issuer, subject)
+}
+
+// priorSupervisorEndpoint is the supervisor endpoint of the incarnation that last
+// wrote runFilePath, marked Exited only when that process is not alive. Called
+// with the run-file lock held, so no live daemon can be writing this run-file.
+// An unreadable or identity-less run-file yields no prior: nothing is cleaned up.
+func priorSupervisorEndpoint(runFilePath string, alive func(int) bool) *supervisor.Prior {
+	prior, err := runfile.Read(runFilePath)
+	if err != nil || prior == nil || prior.InstanceID == "" || prior.SupervisorAddress == "" {
+		return nil
+	}
+	return &supervisor.Prior{
+		InstanceID: prior.InstanceID,
+		Address:    prior.SupervisorAddress,
+		Exited:     prior.PID > 0 && !alive(prior.PID),
+	}
 }

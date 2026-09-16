@@ -20,8 +20,10 @@ const maxUnixSocketPathBytes = 103
 // run-file: <dir(runFilePath)>/supervise-<token(instanceID)>.sock.
 //
 // It never removes a socket it has not proven stale. The only candidate is the
-// predecessor recorded in this run-file (prior), and only when (1) the caller
-// holds the run-file lock, so that incarnation has exited; (2) the recorded
+// predecessor recorded in this run-file (prior), and only when (1) prior.Exited:
+// the caller holds the run-file lock and that process is not alive -- this is
+// the protection; the connection probe below would arm a live supervisor, so it
+// never runs without it; (2) the recorded
 // address is exactly the name that instance would have used, in this directory;
 // (3) the file is a socket, not a symlink or regular file; and (4) nothing
 // accepts connections on it, twice. The legacy shared supervise.sock is never
@@ -48,7 +50,7 @@ func Listen(runFilePath, instanceID string, prior *Prior) (net.Listener, string,
 }
 
 func removeProvenStalePrior(dir string, prior *Prior) {
-	if prior == nil || prior.Address == "" {
+	if prior == nil || !prior.Exited || prior.Address == "" {
 		return
 	}
 	name, err := SocketName(prior.InstanceID)

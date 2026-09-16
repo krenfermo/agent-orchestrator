@@ -19,17 +19,17 @@ import (
 // while leaving 64 bits between two random instance ids.
 const endpointTokenHexLen = 16
 
-// ErrNoInstanceIdentity: an endpoint without an instance identity cannot be
-// proven to belong to anyone, so it is never created.
+// ErrNoInstanceIdentity is returned when no instance identity is available: an
+// endpoint without one cannot be proven to belong to anyone, so it is never created.
 var ErrNoInstanceIdentity = errors.New("supervisor: no daemon instance identity for the endpoint")
 
 // EndpointToken is the short, stable token derived from a daemon instance id.
 func EndpointToken(instanceID string) (string, error) {
-	id := strings.TrimSpace(instanceID)
-	if id == "" {
+	// No normalization: two spellings of an id must never share an endpoint.
+	if instanceID == "" || strings.TrimSpace(instanceID) != instanceID {
 		return "", ErrNoInstanceIdentity
 	}
-	sum := sha256.Sum256([]byte(id))
+	sum := sha256.Sum256([]byte(instanceID))
 	return hex.EncodeToString(sum[:])[:endpointTokenHexLen], nil
 }
 
@@ -51,10 +51,13 @@ func PipeName(instanceID string) (string, error) {
 	return `\\.\pipe\ao-supervise-` + token, nil
 }
 
-// Prior is the incarnation that last wrote this daemon's run-file, read while
-// the new daemon holds the run-file's exclusive lock -- so that incarnation is
-// no longer running. Its endpoint is the only one a starting daemon may clean up.
+// Prior is the incarnation that last wrote this daemon's run-file. Its endpoint
+// is the only one a starting daemon may clean up, and only when Exited is true:
+// the caller holds the run-file's exclusive lock AND the recorded process is not
+// alive. Without that, the endpoint is never even probed -- a probe is itself a
+// supervisor client and would arm a live daemon's watchdog.
 type Prior struct {
 	InstanceID string
 	Address    string
+	Exited     bool
 }

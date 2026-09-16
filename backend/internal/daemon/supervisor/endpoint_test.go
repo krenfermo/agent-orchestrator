@@ -28,7 +28,7 @@ func TestEndpointToken_isStableShortAndPerInstance(t *testing.T) {
 }
 
 func TestEndpointToken_failsClosedWithoutIdentity(t *testing.T) {
-	for _, id := range []string{"", "   "} {
+	for _, id := range []string{"", "   ", " aod-1", "aod-1\n"} {
 		if _, err := EndpointToken(id); err == nil {
 			t.Fatalf("EndpointToken(%q) succeeded; an endpoint without an instance identity must not exist", id)
 		}

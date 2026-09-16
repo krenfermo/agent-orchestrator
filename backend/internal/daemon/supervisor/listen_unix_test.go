@@ -130,17 +130,27 @@ func TestListen_newDaemonNeverTouchesALiveEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lnA.Close()
-	// B even claims A as its predecessor: a live listener is never "stale".
-	lnB, _, err := Listen(filepath.Join(dir, "running.json"), instB, &Prior{InstanceID: instA, Address: addrA})
+	// B even names A as its predecessor, without proof it exited: A is not probed.
+	dialed := make(chan struct{}, 1)
+	go func() {
+		if conn, err := lnA.Accept(); err == nil {
+			_ = conn.Close()
+			dialed <- struct{}{}
+		}
+	}()
+	lnB, _, err := Listen(filepath.Join(dir, "running.json"), instB, &Prior{InstanceID: instA, Address: addrA, Exited: false})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer lnB.Close()
-	conn, err := net.Dial("unix", addrA)
-	if err != nil {
-		t.Fatalf("A's endpoint was disturbed by B's start: %v", err)
+	select {
+	case <-dialed:
+		t.Fatal("B's start connected to A's live supervisor (that would arm A's watchdog)")
+	default:
 	}
-	_ = conn.Close()
+	if _, err := os.Lstat(addrA); err != nil {
+		t.Fatalf("A's endpoint was removed by B's start: %v", err)
+	}
 }
 
 func TestListen_removesOnlyAProvenStalePredecessorSocket(t *testing.T) {
@@ -149,7 +159,7 @@ func TestListen_removesOnlyAProvenStalePredecessorSocket(t *testing.T) {
 	staleA := filepath.Join(dir, mustSocketName(t, instA))
 	staleSocket(t, staleA)
 
-	ln, _, err := Listen(filepath.Join(dir, "running.json"), instB, &Prior{InstanceID: instA, Address: staleA})
+	ln, _, err := Listen(filepath.Join(dir, "running.json"), instB, &Prior{InstanceID: instA, Address: staleA, Exited: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,10 +186,14 @@ func TestListen_keepsAnythingNotProvenStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 4. The right name and a real stale socket, but no proof the predecessor exited.
+	unproven := filepath.Join(dir, mustSocketName(t, third))
 	for _, prior := range []*Prior{
-		{InstanceID: instA, Address: notItsName},
-		{InstanceID: "", Address: legacy},
-		{InstanceID: instA, Address: regular},
+		{InstanceID: instA, Address: notItsName, Exited: true},
+		{InstanceID: "", Address: legacy, Exited: true},
+		{InstanceID: instA, Address: regular, Exited: true},
+		{InstanceID: third, Address: unproven, Exited: false},
+		{InstanceID: instA, Address: "", Exited: true}, // predecessor from a daemon that published no endpoint
 		nil,
 	} {
 		ln, _, err := Listen(filepath.Join(dir, "running.json"), instB, prior)
