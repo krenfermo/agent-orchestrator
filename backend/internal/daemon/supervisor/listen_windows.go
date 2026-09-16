@@ -4,34 +4,21 @@ package supervisor
 
 import (
 	"net"
-	"path/filepath"
-	"regexp"
 
 	"github.com/Microsoft/go-winio"
 )
 
-var unsafePipeChars = regexp.MustCompile(`[^a-zA-Z0-9\-]`)
-
-// pipeNameFromRunFile derives a per-instance named-pipe path from the
-// run-file's parent directory, mirroring the Unix supervise.sock placement.
-// ~/.ao/running.json  → \\.\pipe\ao-supervise          (default, backward-compatible)
-// ~/.ao/dev/running.json → \\.\pipe\ao-supervise-dev   (dev isolation)
-func pipeNameFromRunFile(runFilePath string) string {
-	if runFilePath == "" {
-		return `\\.\pipe\ao-supervise`
+// Listen creates this daemon instance's supervisor named pipe,
+// \\.\pipe\ao-supervise-<token(instanceID)>. A named pipe disappears with its
+// last server handle, so there is nothing stale to clean up; runFilePath and
+// prior are accepted for signature parity with Unix. A pipe name that already
+// exists fails the listen (fail closed) -- it is never shared.
+func Listen(runFilePath, instanceID string, prior *Prior) (net.Listener, string, error) {
+	_, _ = runFilePath, prior
+	name, err := PipeName(instanceID)
+	if err != nil {
+		return nil, "", err
 	}
-	dir := filepath.Base(filepath.Dir(runFilePath))
-	if dir == ".ao" || dir == "." || dir == "" {
-		return `\\.\pipe\ao-supervise`
-	}
-	return `\\.\pipe\ao-supervise-` + unsafePipeChars.ReplaceAllString(dir, "-")
-}
-
-// Listen creates a Windows named pipe listener for the supervisor watchdog.
-// The pipe name is derived from runFilePath so dev and installed-app instances
-// use separate pipes and cannot collide.
-func Listen(runFilePath string) (net.Listener, string, error) {
-	name := pipeNameFromRunFile(runFilePath)
 	ln, err := winio.ListenPipe(name, nil)
 	if err != nil {
 		return nil, "", err

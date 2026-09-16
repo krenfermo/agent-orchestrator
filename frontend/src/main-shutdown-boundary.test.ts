@@ -53,19 +53,25 @@ describe("desktop app daemon-termination boundary (P9 §15)", () => {
 		expect(fetchAt).toBeGreaterThan(refuseAt);
 	});
 
-	it("links the supervisor socket from one gated helper only, always with a proven identity", () => {
-		const socketHits = ALL.filter(({ line }) => /supervise\.sock|ao-supervise|connectSupervisor\(/.test(line)).map(
-			(h) => h.file,
+	it("never derives a supervisor endpoint: it comes only from a proven run-file", () => {
+		const derived = ALL.filter(({ line }) => /supervise\.sock|ao-supervise|supervise-/.test(line)).map(
+			(h) => `${h.file}: ${h.line}`,
 		);
-		expect(new Set(socketHits)).toEqual(new Set(["src/main.ts", "src/main/supervisor-link.ts"]));
+		expect(derived).toEqual([]);
+	});
+
+	it("links the supervisor from one gated helper only, always from a proof", () => {
+		const connects = ALL.filter(({ line }) => /connectSupervisor\(/.test(line)).map((h) => h.file);
+		expect(new Set(connects)).toEqual(new Set(["src/main.ts", "src/main/supervisor-link.ts"]));
 		expect(main.match(/connectSupervisor\(/g)).toHaveLength(1);
 		const helper = main.slice(main.indexOf("function establishSupervisorLink"));
-		expect(helper.slice(0, helper.indexOf("\n}\n"))).toContain("verify,");
+		const body = helper.slice(0, helper.indexOf("\n}\n"));
+		expect(body).toContain("const target = supervisorLinkTarget(proof);");
+		expect(body).toContain("connectSupervisor(target.supervisorAddress, {");
+		expect(body).toContain("verify,");
 		const calls = main.match(/(?<!function )establishSupervisorLink\([^)]*\)/g) ?? [];
 		expect(calls.length).toBeGreaterThan(0);
-		for (const call of calls) {
-			expect(call).toBe("establishSupervisorLink(launch, { pid: proof.pid, port: proof.port, instanceId: proof.instanceId })");
-		}
+		for (const call of calls) expect(call).toBe("establishSupervisorLink(launch, proof)");
 	});
 
 	it("signals only processes this app spawned", () => {

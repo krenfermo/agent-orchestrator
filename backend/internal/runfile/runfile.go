@@ -39,6 +39,12 @@ type Info struct {
 	// address selected by the backend for this daemon launch. It is a locator,
 	// not an authentication secret; the runtime token stays out of this file.
 	BrowserRuntimeAddress string `json:"browserRuntimeAddress,omitempty"`
+	// SupervisorAddress is the exact Unix socket or Windows named-pipe address of
+	// THIS instance's supervisor watchdog, named after InstanceID and published by
+	// the same atomic write. Clients link only to the address of a run-file whose
+	// identity they proved; they never derive it. Empty when the daemon has no
+	// supervisor listener (or predates it): then nobody links.
+	SupervisorAddress string `json:"supervisorAddress,omitempty"`
 
 	// P9 — identity, so a reader can PROVE which daemon a run-file describes
 	// instead of trusting a PID the operating system may have reused.

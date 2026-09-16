@@ -7,6 +7,9 @@ import {
 	browserDaemonOwnershipDecision,
 	decidePortHolderTakeover,
 	proveDaemonOwnedForShutdown,
+	supervisorLinkTarget,
+	supervisorLinkVerdict,
+	type ShutdownProof,
 	type ShutdownProofFacts,
 } from "./daemon-takeover";
 
@@ -244,5 +247,89 @@ describe("P9 shutdown boundary: checkouts and legitimate replacement", () => {
 
 	it("10. the launch's own previous daemon (same checkout/binary) is still replaced", () => {
 		expect(proveDaemonOwnedForShutdown(base).verdict).toBe("verified");
+	});
+});
+
+describe("supervisor endpoint: only the proven run-file's own address (P9)", () => {
+	const DATA = "/Users/x/.ao/dev/data";
+	const addrA = "/Users/x/.ao/dev/supervise-aaaaaaaaaaaaaaaa.sock";
+	const addrB = "/Users/x/.ao/dev/supervise-bbbbbbbbbbbbbbbb.sock";
+	const proofOf = (over: Partial<RunFileInfo> & { probeInstance?: string } = {}): ShutdownProof => {
+		const rf: RunFileInfo = {
+			pid: 10,
+			port: 3002,
+			startedAtMs: 1,
+			instanceId: "aod-a",
+			installationId: "aoi-1",
+			dataDir: DATA,
+			supervisorAddress: addrA,
+			...over,
+		};
+		return proveDaemonOwnedForShutdown({
+			port: 3002,
+			runFile: rf,
+			runFilePidState: "alive",
+			probe: {
+				status: "ok",
+				service: DAEMON_SERVICE_NAME,
+				pid: rf.pid,
+				instanceId: over.probeInstance ?? rf.instanceId,
+				installationId: "aoi-1",
+				dataDir: DATA,
+			},
+			expectedDataDir: DATA,
+			launchIdentityError: null,
+			sameDataDir: (a, b) => a === b,
+		});
+	};
+
+	it("links to the address the proven run-file publishes", () => {
+		expect(supervisorLinkTarget(proofOf())).toEqual({ pid: 10, port: 3002, instanceId: "aod-a", supervisorAddress: addrA });
+	});
+
+	it("a run-file without supervisorAddress (older daemon) yields no link", () => {
+		expect(supervisorLinkTarget(proofOf({ supervisorAddress: undefined }))).toBeNull();
+	});
+
+	it("an address published by a run-file whose identity does not match yields no link", () => {
+		expect(supervisorLinkTarget(proofOf({ probeInstance: "aod-other" }))).toBeNull();
+		expect(supervisorLinkTarget(proofOf({ dataDir: "/other" }))).toBeNull();
+	});
+
+	it("A dies and B starts on the same run-file: A's link never reconnects to B", () => {
+		const linkedA = supervisorLinkTarget(proofOf())!;
+		const nowB = proofOf({ pid: 11, instanceId: "aod-b", supervisorAddress: addrB });
+		expect(supervisorLinkVerdict(nowB, linkedA)).toBe("foreign");
+		// Even if B somehow published A's old address, a different instance is foreign.
+		expect(supervisorLinkVerdict(proofOf({ pid: 11, instanceId: "aod-b" }), linkedA)).toBe("foreign");
+		// Same instance but a different endpoint is not the link either.
+		expect(supervisorLinkVerdict(proofOf({ supervisorAddress: addrB }), linkedA)).toBe("foreign");
+	});
+
+	it("legitimate restart: the old link ends; a new one exists only from the new proof", () => {
+		const linkedA = supervisorLinkTarget(proofOf())!;
+		const restarted = proofOf({ pid: 12, instanceId: "aod-a2", supervisorAddress: addrB });
+		expect(supervisorLinkVerdict(restarted, linkedA)).toBe("foreign");
+		expect(supervisorLinkTarget(restarted)).toEqual({
+			pid: 12,
+			port: 3002,
+			instanceId: "aod-a2",
+			supervisorAddress: addrB,
+		});
+	});
+
+	it("the same instance and endpoint re-links; a transient non-answer waits", () => {
+		const linkedA = supervisorLinkTarget(proofOf())!;
+		expect(supervisorLinkVerdict(proofOf(), linkedA)).toBe("proven");
+		const transient = proveDaemonOwnedForShutdown({
+			port: 3002,
+			runFile: { pid: 10, port: 3002, startedAtMs: 1, instanceId: "aod-a", installationId: "aoi-1", dataDir: DATA, supervisorAddress: addrA },
+			runFilePidState: "alive",
+			probe: null,
+			expectedDataDir: DATA,
+			launchIdentityError: null,
+			sameDataDir: (a, b) => a === b,
+		});
+		expect(supervisorLinkVerdict(transient, linkedA)).toBe("unproven");
 	});
 });
