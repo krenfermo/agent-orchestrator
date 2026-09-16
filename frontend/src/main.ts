@@ -43,7 +43,12 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { type DaemonLaunchSpec, bundledDaemonIdentityError, resolveDaemonLaunch } from "./shared/daemon-launch";
+import {
+	type DaemonLaunchSpec,
+	bundledDaemonIdentityError,
+	configuredDaemonIdentityError,
+	resolveDaemonLaunch,
+} from "./shared/daemon-launch";
 import { createListenPortScanner, defaultRunFilePath, parseRunFile } from "./shared/daemon-discovery";
 import type { DaemonStatus } from "./shared/daemon-status";
 import { attachAppShortcuts } from "./main/app-shortcuts";
@@ -66,7 +71,13 @@ import {
 	resolveDaemonFromPort,
 	resolveDaemonFromRunFile,
 } from "./shared/daemon-attach";
-import { browserDaemonOwnershipDecision, decidePortHolderTakeover } from "./shared/daemon-takeover";
+import {
+	type ShutdownProof,
+	browserDaemonOwnershipDecision,
+	isTransientOwnershipVerdict,
+	decidePortHolderTakeover,
+	proveDaemonOwnedForShutdown,
+} from "./shared/daemon-takeover";
 import {
 	PREVIOUS_DAEMON_EXIT_POLL_MS,
 	PREVIOUS_DAEMON_EXIT_TIMEOUT_MS,
@@ -75,6 +86,7 @@ import {
 } from "./shared/daemon-replace";
 import { readProcessState } from "./main/process-state";
 import { readDaemonLogSince } from "./main/daemon-log";
+import { sameCanonicalPath } from "./main/canonical-path";
 import { buildDaemonEnv, resolveShellEnv, type ShellRunner } from "./shared/shell-env";
 import {
 	handleCloudDeepLink,
@@ -89,7 +101,7 @@ import { createBrowserViewHost, type BrowserViewHost } from "./main/browser-view
 import { createWindowComposition, type WindowComposition } from "./main/window-composition";
 import { AgentBrowserRuntime } from "./main/agent-browser-runtime";
 import { sameBrowserRuntimeIdentity, type BrowserRuntimeIdentity } from "./main/browser-runtime-identity";
-import { connectSupervisor, type SupervisorLinkHandle } from "./main/supervisor-link";
+import { connectSupervisor, type SupervisorLinkHandle, type SupervisorLinkVerdict } from "./main/supervisor-link";
 import { connectBrowserRuntime, type BrowserRuntimeLinkHandle } from "./main/browser-runtime-link";
 import { keepDaemonAlive, shouldLinkOnAttach } from "./main/daemon-owner";
 import { readMigrationState, updateMigration, writeAppStateMarker, type MigrationState } from "./main/app-state";
@@ -784,10 +796,6 @@ function pathKey(value: string): string {
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-function samePath(a: string, b: string): boolean {
-	return pathKey(a) === pathKey(b);
-}
-
 function pathInside(child: string, parent: string): boolean {
 	const childKey = pathKey(child);
 	const parentKey = pathKey(parent);
@@ -820,9 +828,9 @@ async function readDaemonProbe(port: number, endpoint: "healthz" | "readyz"): Pr
 
 function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe): string | null {
 	if (launch.source === "dev") {
-		const cwdMatches = probe.workingDirectory ? samePath(probe.workingDirectory, launch.cwd) : false;
+		const cwdMatches = probe.workingDirectory ? sameCanonicalPath(probe.workingDirectory, launch.cwd) : false;
 		const startupCwdMatches = probe.startupWorkingDirectory
-			? samePath(probe.startupWorkingDirectory, launch.cwd)
+			? sameCanonicalPath(probe.startupWorkingDirectory, launch.cwd)
 			: false;
 		const executableMatches = probe.executablePath ? pathInside(probe.executablePath, launch.cwd) : false;
 		if (!probe.workingDirectory && !probe.startupWorkingDirectory && !probe.executablePath) {
@@ -837,9 +845,10 @@ function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe): stri
 	}
 
 	if (launch.source === "bundled") {
-		return bundledDaemonIdentityError(probe, launch.command, process.env.APPIMAGE, samePath);
+		return bundledDaemonIdentityError(probe, launch.command, process.env.APPIMAGE, sameCanonicalPath);
 	}
-	return null;
+	// AO_DAEMON_COMMAND is configuration, not an ownership exception (P9).
+	return configuredDaemonIdentityError(probe, launch.command, sameCanonicalPath);
 }
 
 /**
@@ -911,7 +920,17 @@ function establishBrowserRuntimeLink(): void {
 	browserRuntimeLinkIdentity = identity;
 }
 
-function establishSupervisorLink(): void {
+// Holds the link only to the daemon incarnation proven here (P9): every
+// (re)connect re-proves it, so a drop is never re-linked to whatever daemon
+// binds the same socket path next.
+function establishSupervisorLink(launch: DaemonLaunchSpec, expected: { pid: number; port: number; instanceId: string }): void {
+	const verify = async (): Promise<SupervisorLinkVerdict> => {
+		const proof = await proveDaemonOwnership(launch, expected.port);
+		if (proof.verdict === "verified") {
+			return proof.pid === expected.pid && proof.instanceId === expected.instanceId ? "proven" : "foreign";
+		}
+		return isTransientOwnershipVerdict(proof.verdict) ? "unproven" : "foreign";
+	};
 	const rfp = runFilePath();
 	const addr =
 		process.platform === "win32"
@@ -923,6 +942,7 @@ function establishSupervisorLink(): void {
 		supervisorLink?.dispose();
 		supervisorLink = connectSupervisor(addr, {
 			log: (msg) => console.log(`AO: ${msg}`),
+			verify,
 		});
 	} else {
 		console.warn("AO: supervisor link skipped; run-file path unavailable");
@@ -954,21 +974,87 @@ async function inspectExistingDaemon(
 
 const SHUTDOWN_REQUEST_TIMEOUT_MS = 10_000;
 
-// Asks a proven daemon to stop and returns its PID once that process has
-// exited. /healthz going quiet is not enough: the daemon closes its listener
-// before it releases <data>/daemon.lock, and a replacement spawned into that
-// gap refuses to start (P11 Stage 2, 2026-09-16). See shared/daemon-replace.ts.
-async function gracefullyReplaceDaemonForBrowser(port: number | undefined, pid: number | undefined): Promise<number> {
+/** Electron refused to stop a daemon whose ownership P9 does not prove. Nothing was sent. */
+class DaemonOwnershipRefusal extends Error {
+	constructor(readonly proof: Exclude<ShutdownProof, { verdict: "verified" }>) {
+		super(proof.reason);
+	}
+}
+
+// The data dir this launch's own daemon serves: the env the spawn would get,
+// resolved against the daemon's working directory as the daemon resolves it.
+function expectedDaemonDataDir(launch: DaemonLaunchSpec): string | null {
+	const dir = defaultDataDir(process.platform, daemonEnv(), os.homedir());
+	return dir ? path.resolve(launch.cwd, dir) : null;
+}
+
+// P9 §15, proven immediately before acting (shutdown, attach, link) so no caller's earlier
+// decision can stand in for it: the run-file of this launch names the daemon,
+// the process is alive, and /healthz answers as that PID, instance,
+// installation and data dir, and as this launch's checkout/bundle/configured
+// binary. See proveDaemonOwnedForShutdown.
+async function proveDaemonOwnership(launch: DaemonLaunchSpec, port: number): Promise<ShutdownProof> {
+	let runFile: ReturnType<typeof parseRunFile> = null;
+	const rfp = runFilePath();
+	if (rfp) {
+		try {
+			runFile = parseRunFile(await readFile(rfp, "utf8"));
+		} catch {
+			runFile = null;
+		}
+	}
+	const probe = await readDaemonProbe(port, "healthz");
+	return proveDaemonOwnedForShutdown({
+		port,
+		runFile,
+		runFilePidState: runFile?.pid ? await readProcessState(runFile.pid) : "gone",
+		probe,
+		expectedDataDir: expectedDaemonDataDir(launch),
+		launchIdentityError: probe ? daemonIdentityError(launch, probe) : null,
+		sameDataDir: sameCanonicalPath,
+	});
+}
+
+// The ONLY place the desktop app sends /shutdown. Asks a daemon P9 proves is
+// this launch's to stop, and returns its PID once that process has exited.
+// /healthz going quiet is not enough: the daemon closes its listener before it
+// releases <data>/daemon.lock, and a replacement spawned into that gap refuses
+// to start (P11 Stage 2, 2026-09-16). See shared/daemon-replace.ts.
+async function gracefullyReplaceDaemonForBrowser(
+	launch: DaemonLaunchSpec,
+	port: number | undefined,
+	pid: number | undefined,
+): Promise<number> {
 	if (!port) throw new Error("the running daemon did not report a port");
 	if (!pid) throw new Error("the running daemon did not report a PID, so its exit cannot be confirmed");
+	const proof = await proveDaemonOwnership(launch, port);
+	if (proof.verdict !== "verified") throw new DaemonOwnershipRefusal(proof);
+	if (proof.pid !== pid) {
+		throw new DaemonOwnershipRefusal({
+			verdict: "running_unverified",
+			reason: `the verified daemon is pid ${proof.pid}, not the pid ${pid} this start inspected`,
+		});
+	}
 	const response = await fetch(`http://127.0.0.1:${port}/shutdown`, {
 		method: "POST",
 		signal: AbortSignal.timeout(SHUTDOWN_REQUEST_TIMEOUT_MS),
 	});
 	if (!response.ok) throw new Error(`daemon shutdown returned HTTP ${response.status}`);
+	// The listener belonged to the verified PID a moment ago; the daemon names
+	// itself in the answer. A different PID here means the port changed hands in
+	// between: report it and do not spawn over it.
+	const answeredPid = await response
+		.json()
+		.then((body: { pid?: unknown }) => (typeof body?.pid === "number" ? body.pid : null))
+		.catch(() => null);
+	if (answeredPid !== proof.pid) {
+		throw new Error(
+			`the /shutdown answer came from pid ${answeredPid ?? "unknown"}, not the verified daemon ${proof.pid}; AO will not start another daemon over it`,
+		);
+	}
 
 	const result = await awaitPreviousDaemonExit({
-		pid,
+		pid: proof.pid,
 		port,
 		probe: (p) => readDaemonProbe(p, "healthz"),
 		processState: (p) => readProcessState(p),
@@ -978,7 +1064,49 @@ async function gracefullyReplaceDaemonForBrowser(port: number | undefined, pid: 
 		pollMs: PREVIOUS_DAEMON_EXIT_POLL_MS,
 	});
 	if (!result.ok) throw new Error(result.reason);
-	return pid;
+	return proof.pid;
+}
+
+// Link the daemon this launch just spawned, once P9 proves the daemon on the
+// bound port is it (the run-file is written just before the listener serves,
+// so allow a short settle). Never links anything else.
+async function linkSpawnedDaemon(launch: DaemonLaunchSpec, port: number, child: ChildProcess): Promise<void> {
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const proof = await proveDaemonOwnership(launch, port);
+		// A Restart/stop meanwhile: this proof may describe the dying daemon; never link it
+		// over (and dispose) the link of the daemon that replaced it.
+		if (daemonProcess !== child || daemonStoppingProcess === child) return;
+		if (proof.verdict === "verified") {
+			establishSupervisorLink(launch, { pid: proof.pid, port: proof.port, instanceId: proof.instanceId });
+			return;
+		}
+		if (proof.verdict !== "no_provenance" && !isTransientOwnershipVerdict(proof.verdict)) {
+			console.warn(`AO: supervisor link refused: ${proof.verdict}: ${proof.reason}`);
+			return;
+		}
+		await new Promise<void>((resolve) => setTimeout(resolve, 250));
+	}
+	console.warn("AO: supervisor link skipped: the spawned daemon was not proven within 5 seconds");
+}
+
+// Status for a replacement that did not happen. A P9 refusal names the other
+// daemon and leaves resolving it to the person; nothing retries it on its own.
+function replacementFailureStatus(prefix: string, err: unknown): DaemonStatus {
+	if (err instanceof DaemonOwnershipRefusal && (err.proof.verdict === "stale" || isTransientOwnershipVerdict(err.proof.verdict))) {
+		return {
+			state: "error",
+			message: `AO could not verify the AO daemon on this app's port right now (${err.proof.verdict}: ${err.proof.reason}), so it did not stop it. Use Restart to check again.`,
+			code: "not_ready",
+		};
+	}
+	if (err instanceof DaemonOwnershipRefusal) {
+		return {
+			state: "error",
+			message: `Another AO daemon holds this app's port and AO cannot prove it belongs to this app (${err.proof.verdict}: ${err.proof.reason}). AO did not stop it. Stop it yourself -- for example \`ao stop\` for its data dir, or quit the other checkout's app -- then use Restart.`,
+			code: "identity_mismatch",
+		};
+	}
+	return { state: "error", message: `${prefix}: ${(err as Error).message}`, code: "not_ready" };
 }
 
 async function refreshDaemonStatus(): Promise<DaemonStatus> {
@@ -1000,6 +1128,21 @@ async function refreshDaemonStatus(): Promise<DaemonStatus> {
 			// A failed replacement is not retried by polling; only an explicit start.
 			if (replacementHold) return daemonStatus;
 			return startDaemon();
+		}
+		// Polling must not undo an attach refusal: adopt the status only for a proven daemon.
+		const proof = existing.status.port ? await proveDaemonOwnership(launch, existing.status.port) : null;
+		if (!proof || proof.verdict !== "verified" || proof.pid !== existing.status.pid) {
+			setDaemonStatus(
+				replacementFailureStatus(
+					"Could not attach to the AO daemon",
+					new DaemonOwnershipRefusal(
+						proof && proof.verdict !== "verified"
+							? proof
+							: { verdict: "running_unverified", reason: "the daemon to attach to is not the verified one" },
+					),
+				),
+			);
+			return daemonStatus;
 		}
 		setDaemonStatus(existing.status);
 	} else if (
@@ -1102,25 +1245,37 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 		if (ownership.action === "replace") {
 			if (replacementHold) return refuseHeld();
 			try {
-				replacedPid = await gracefullyReplaceDaemonForBrowser(existing.status.port, existing.status.pid);
+				replacedPid = await gracefullyReplaceDaemonForBrowser(launch, existing.status.port, existing.status.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
 				// Whatever answers next is not stopped by a status poll (see replacementHold).
 				replacementHold = (err as Error).message;
-				setDaemonStatus({
-					state: "error",
-					message: `Could not take ownership of the browser runtime: ${(err as Error).message}`,
-					code: "not_ready",
-				});
+				setDaemonStatus(replacementFailureStatus("Could not take ownership of the browser runtime", err));
 				return daemonStatus;
 			}
 		} else {
+			// Attaching (and linking, which makes quitting this app stop the daemon)
+			// is taking ownership too: only a P9-proven daemon of this launch.
+			const proof = existing.status.port ? await proveDaemonOwnership(launch, existing.status.port) : null;
+			if (!proof || proof.verdict !== "verified" || proof.pid !== existing.status.pid) {
+				setDaemonStatus(
+					replacementFailureStatus(
+						"Could not attach to the AO daemon",
+						new DaemonOwnershipRefusal(
+							proof && proof.verdict !== "verified"
+								? proof
+								: { verdict: "running_unverified", reason: "the daemon to attach to is not the verified one" },
+						),
+					),
+				);
+				return daemonStatus;
+			}
 			setDaemonStatus(existing.status);
 			// Re-link the supervisor only when attaching to an app-owned daemon (one we
 			// previously spawned). Headless `ao start` daemons (owner unset) stay unlinked
 			// so they remain persistent after app quit.
 			if (shouldLinkOnAttach(existing.owner)) {
-				establishSupervisorLink();
+				establishSupervisorLink(launch, { pid: proof.pid, port: proof.port, instanceId: proof.instanceId });
 			}
 			return daemonStatus;
 		}
@@ -1170,21 +1325,35 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 		if (ownership.action === "replace") {
 			if (replacementHold) return refuseHeld();
 			try {
-				replacedPid = await gracefullyReplaceDaemonForBrowser(directDaemon.port, directDaemon.pid);
+				replacedPid = await gracefullyReplaceDaemonForBrowser(launch, directDaemon.port, directDaemon.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
 				// Whatever answers next is not stopped by a status poll (see replacementHold).
 				replacementHold = (err as Error).message;
-				setDaemonStatus({
-					state: "error",
-					message: `Could not take ownership of the browser runtime: ${(err as Error).message}`,
-					code: "not_ready",
-				});
+				setDaemonStatus(replacementFailureStatus("Could not take ownership of the browser runtime", err));
 				return daemonStatus;
 			}
 		} else {
+			// The port answered, but the owner/appRunId came from the run-file: attach
+			// only when P9 proves they describe the same daemon of this launch.
+			const proof = directDaemon.port ? await proveDaemonOwnership(launch, directDaemon.port) : null;
+			if (!proof || proof.verdict !== "verified" || proof.pid !== directDaemon.pid) {
+				setDaemonStatus(
+					replacementFailureStatus(
+						"Could not attach to the AO daemon",
+						new DaemonOwnershipRefusal(
+							proof && proof.verdict !== "verified"
+								? proof
+								: { verdict: "running_unverified", reason: "the daemon answering the port is not the verified one" },
+						),
+					),
+				);
+				return daemonStatus;
+			}
 			setDaemonStatus(directDaemon);
-			if (shouldLinkOnAttach(portAttachOwner)) establishSupervisorLink();
+			if (shouldLinkOnAttach(portAttachOwner)) {
+				establishSupervisorLink(launch, { pid: proof.pid, port: proof.port, instanceId: proof.instanceId });
+			}
 			return daemonStatus;
 		}
 	}
@@ -1230,15 +1399,10 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 	if (takeover.action === "graceful_shutdown" && orphanProbe) {
 		if (replacementHold) return refuseHeld();
 		try {
-			// decidePortHolderTakeover proved probe.pid === runFilePid.
-			replacedPid = await gracefullyReplaceDaemonForBrowser(resolvedDaemonPort(), orphanProbe.pid);
+			replacedPid = await gracefullyReplaceDaemonForBrowser(launch, resolvedDaemonPort(), orphanProbe.pid);
 		} catch (err) {
 			replacementHold = (err as Error).message;
-			setDaemonStatus({
-				state: "error",
-				message: `The previous AO daemon did not shut down: ${(err as Error).message}`,
-				code: "not_ready",
-			});
+			setDaemonStatus(replacementFailureStatus("The previous AO daemon did not shut down", err));
 			return daemonStatus;
 		}
 		// The run-file is removed only while it still names the daemon that just
@@ -1246,7 +1410,10 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 		if (runFilePath_ && runFilePid && ["gone", "zombie"].includes(await readProcessState(runFilePid))) {
 			try {
 				const current = parseRunFile(await readFile(runFilePath_, "utf8"));
-				if (current?.pid === runFilePid) await rm(runFilePath_, { force: true });
+				// Same incarnation, not merely the same (possibly reused) PID.
+				if (current?.pid === runFilePid && current?.instanceId === runFileInfo?.instanceId) {
+					await rm(runFilePath_, { force: true });
+				}
 			} catch {
 				// already gone
 			}
@@ -1372,6 +1539,7 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 	// confirmed sources race — the "daemon listening" slog line (stderr, but both
 	// streams are scanned) and the running.json handshake — first one wins.
 	const spawnedAtMs = Date.now();
+	let handshakeProving = false;
 	let portConfirmed = false;
 	let runFileTimer: ReturnType<typeof setInterval> | undefined;
 	let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1406,9 +1574,7 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 		// orphan-cleanup below re-reads process.env because this `keep` is scoped
 		// to the spawn function — AO_KEEP_DAEMON is set once at startup and never
 		// mutated, so both reads agree.)
-		if (!keep) {
-			establishSupervisorLink();
-		}
+		if (!keep) void linkSpawnedDaemon(launch, port, child);
 	};
 
 	// One scanner per stream: each keeps its own partial-line buffer.
@@ -1443,8 +1609,17 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 					const info = parseRunFile(contents);
 					// Ignore a stale handshake left by a previous daemon: only trust a
 					// file written at/after this spawn.
-					if (info && info.startedAtMs >= spawnedAtMs - RUN_FILE_FRESHNESS_SKEW_MS) {
-						reportBoundPort(info.port);
+					if (info && info.startedAtMs >= spawnedAtMs - RUN_FILE_FRESHNESS_SKEW_MS && !handshakeProving) {
+						// A fresh run-file is not proof it is this child's: another launch may
+						// have written it (two checkouts share ~/.ao/dev/running.json).
+						handshakeProving = true;
+						void proveDaemonOwnership(launch, info.port)
+							.then((proof) => {
+								if (proof.verdict === "verified" && proof.pid === info.pid) reportBoundPort(info.port);
+							})
+							.finally(() => {
+								handshakeProving = false;
+							});
 					}
 				})
 				.catch(() => undefined); // absent until the daemon binds; keep polling
@@ -1494,6 +1669,9 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 		stopDiscovery();
 		if (daemonProcess !== child) return;
 		daemonProcess = null;
+		// This child's daemon is gone; its link must not outlive it.
+		supervisorLink?.dispose();
+		supervisorLink = null;
 		// An explicit stopDaemon() already set a clean `{ state: "stopped" }`.
 		// daemon-telemetry reports any status carrying a `code` as
 		// ao.renderer.daemon_failure, so don't stamp `code: "exited"` on a stop

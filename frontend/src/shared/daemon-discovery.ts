@@ -81,6 +81,8 @@ export type RunFileInfo = {
 	instanceId?: string;
 	/** P9 (run-file v2): the data dir the daemon that wrote this file serves. */
 	dataDir?: string;
+	/** P9 (run-file v2): the AO installation (data dir identity) of the daemon that wrote this file. */
+	installationId?: string;
 };
 
 /** Parse running.json contents. Returns null for malformed JSON or an invalid port. */
@@ -92,7 +94,7 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		return null;
 	}
 	if (typeof raw !== "object" || raw === null) return null;
-	const { pid, port, startedAt, owner, appRunId, browserRuntimeAddress, instanceId, dataDir } = raw as {
+	const { pid, port, startedAt, owner, appRunId, browserRuntimeAddress, instanceId, installationId, dataDir } = raw as {
 		pid?: unknown;
 		port?: unknown;
 		startedAt?: unknown;
@@ -100,6 +102,7 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		appRunId?: unknown;
 		browserRuntimeAddress?: unknown;
 		instanceId?: unknown;
+		installationId?: unknown;
 		dataDir?: unknown;
 	};
 	if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) return null;
@@ -112,6 +115,7 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		appRunId: typeof appRunId === "string" ? appRunId : undefined,
 		browserRuntimeAddress: typeof browserRuntimeAddress === "string" ? browserRuntimeAddress : undefined,
 		instanceId: typeof instanceId === "string" && instanceId !== "" ? instanceId : undefined,
+		installationId: typeof installationId === "string" && installationId !== "" ? installationId : undefined,
 		dataDir: typeof dataDir === "string" && dataDir !== "" ? dataDir : undefined,
 	};
 }
