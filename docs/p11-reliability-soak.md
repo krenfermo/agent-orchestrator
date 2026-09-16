@@ -591,3 +591,19 @@ el camino de reemplazo que falló; ese camino (AO-1/2/3) queda validado por V1 y
 `daemon-replace.e2e.test.ts`, no por el soak. Los umbrales y `evaluate()` no cambian; la
 deduplicación por instancia hace que cada reinicio no planificado abra su propio incidente `high`
 (antes, uno por run): cambia la entrada del criterio, no el criterio.
+
+### 19.5 Validación final y binario
+Sobre el código final (AO `c90945b6e`, harness `a1b58ee10`, SHA `eedca131…`), repetido tras las dos
+rondas de revisión: e2e con binario real 10/10 (petición en curso) y 10/10 (base real); **V1 10/10**;
+**V2 `electron-event --cycles 10` 10/10** con `electron_close_reopen` pass. Vitest completo 261
+archivos / 3097 tests; typecheck limpio; harness 63 tests. Tercera pasada de la revisión
+independiente: **sin BLOCKER ni MAJOR**; dos NIT abiertos (un reemplazo antiguo que falla tras un
+Restart explícito puede re-armar el bloqueo: visible y recuperable con otro Restart; un
+`electron-event` nuevo no respeta un bloqueo previo: sólo sobre-bloquea).
+
+Impacto en backend: **ninguno**. `git diff 9c80b9b2c..c90945b6e -- backend` vacío; compilados con
+`-trimpath -buildvcs=false`, ECC y fix producen el mismo binario byte a byte (`c8fe372b…`). Con VCS,
+la única diferencia posible es `vcs.revision`/`vcs.time`. Dos avisos para congelar un binario nuevo:
+un `go build` desde un **worktree** estampa la revisión del checkout principal (Go sólo reconoce
+`.git` como directorio), y recompilar hoy `9c80b9b2c` con la misma información de build no reproduce
+byte a byte el congelado `fd03cc8c…` (una sección difiere en 96 bytes; causa no determinada).
