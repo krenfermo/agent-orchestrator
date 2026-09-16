@@ -433,11 +433,24 @@ class ElectronEventTest(HeartbeatHarness):
         self.saved_ev["electron_processes"] = p11.electron_processes
         self.app_running = []
         p11.electron_processes = lambda checkout: list(self.app_running)
+        self.saved_ev["read_run_file"] = p11.read_run_file
+        p11.read_run_file = lambda man: {"pid": 10, "port": 3002, "supervisorAddress": "/r/supervise-0123456789abcdef.sock"}
 
     def tearDown(self):
         for k, v in self.saved_ev.items():
             setattr(p11, k, v)
         super().tearDown()
+
+    def test_refuses_a_daemon_binary_without_a_published_supervisor_endpoint(self):
+        saved = p11.read_run_file
+        p11.read_run_file = lambda man: {"pid": 10, "port": 3002}
+        try:
+            with self.assertRaises(SystemExit):
+                p11.electron_event(self.run, "/checkout")
+        finally:
+            p11.read_run_file = saved
+        self.assertEqual(self.calls, [])
+        self.assertIn("supervisorAddress", self.run.events("electron_event_refused")[-1]["reason"])
 
     def test_refuses_without_touching_the_daemon_when_preflight_fails(self):
         p11.electron_preflight = lambda man, checkout: ["checkout HEAD abc is not the frozen eccSha x"]

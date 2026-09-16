@@ -1632,6 +1632,10 @@ def electron_event(run, checkout, cycles=2, hold_sec=20, interactive=False, minu
         problems.append("the soak daemon is %s, not ready" % st.get("state"))
     elif daemon_identity(man, st)["problems"]:
         problems.append("the soak daemon identity is not proven: %s" % daemon_identity(man, st)["problems"])
+    elif not (read_run_file(man) or {}).get("supervisorAddress"):
+        # The app links (and its daemon self-stops on quit) only through the endpoint the proven
+        # run-file publishes; a daemon binary that predates supervisorAddress cannot be validated here.
+        problems.append("the soak daemon's run-file publishes no supervisorAddress (binary predates the per-instance supervisor endpoint)")
     needed = electron_event_minutes(man, cycles, hold_sec)
     if minutes is not None and minutes < needed:
         problems.append("--minutes %d is shorter than the event needs (%d)" % (minutes, needed))
