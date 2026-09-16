@@ -38,7 +38,7 @@ import {
 import { coerceUiSettings, readUiSettings, writeUiSettings, type UiSettings } from "./main/ui-settings";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, statSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -67,6 +67,14 @@ import {
 	resolveDaemonFromRunFile,
 } from "./shared/daemon-attach";
 import { browserDaemonOwnershipDecision, decidePortHolderTakeover } from "./shared/daemon-takeover";
+import {
+	PREVIOUS_DAEMON_EXIT_POLL_MS,
+	PREVIOUS_DAEMON_EXIT_TIMEOUT_MS,
+	awaitPreviousDaemonExit,
+	decideReplacementRetry,
+} from "./shared/daemon-replace";
+import { readProcessState } from "./main/process-state";
+import { readDaemonLogSince } from "./main/daemon-log";
 import { buildDaemonEnv, resolveShellEnv, type ShellRunner } from "./shared/shell-env";
 import {
 	handleCloudDeepLink,
@@ -148,6 +156,22 @@ let daemonStartPromise: Promise<DaemonStatus> | null = null;
 let daemonStartEpoch = 0;
 let daemonStatus: DaemonStatus = { state: "stopped" };
 let daemonOutput = "";
+// Set when a daemon replacement is being retried or has failed: until an explicit
+// daemon:start / daemon:restart, nothing automatic (status polling, boot) may stop
+// another daemon again. Without it the renderer's 1 s status poll would /shutdown
+// whatever daemon appears next -- the soak harness restoring its own, or `ao start`.
+let replacementHold: string | null = null;
+let replacementRetryTimer: ReturnType<typeof setTimeout> | null = null;
+// Bumped whenever the hold is cleared: a replacement decision still awaiting
+// its probes must not re-arm a hold (or a retry) that an explicit start cleared.
+let replacementHoldGeneration = 0;
+
+function clearReplacementHold(): void {
+	replacementHoldGeneration += 1;
+	replacementHold = null;
+	if (replacementRetryTimer) clearTimeout(replacementRetryTimer);
+	replacementRetryTimer = null;
+}
 let browserViewHost: BrowserViewHost | null = null;
 let windowComposition: WindowComposition | null = null;
 const browserCleanupPromises = new Set<Promise<void>>();
@@ -928,17 +952,33 @@ async function inspectExistingDaemon(
 	return { status, owner: info?.owner, appRunId: info?.appRunId };
 }
 
-async function gracefullyReplaceDaemonForBrowser(status: DaemonStatus): Promise<void> {
-	if (!status.port) throw new Error("the running daemon did not report a port");
-	const response = await fetch(`http://127.0.0.1:${status.port}/shutdown`, { method: "POST" });
+const SHUTDOWN_REQUEST_TIMEOUT_MS = 10_000;
+
+// Asks a proven daemon to stop and returns its PID once that process has
+// exited. /healthz going quiet is not enough: the daemon closes its listener
+// before it releases <data>/daemon.lock, and a replacement spawned into that
+// gap refuses to start (P11 Stage 2, 2026-09-16). See shared/daemon-replace.ts.
+async function gracefullyReplaceDaemonForBrowser(port: number | undefined, pid: number | undefined): Promise<number> {
+	if (!port) throw new Error("the running daemon did not report a port");
+	if (!pid) throw new Error("the running daemon did not report a PID, so its exit cannot be confirmed");
+	const response = await fetch(`http://127.0.0.1:${port}/shutdown`, {
+		method: "POST",
+		signal: AbortSignal.timeout(SHUTDOWN_REQUEST_TIMEOUT_MS),
+	});
 	if (!response.ok) throw new Error(`daemon shutdown returned HTTP ${response.status}`);
 
-	const deadline = Date.now() + 8_000;
-	while (Date.now() < deadline) {
-		if (!(await readDaemonProbe(status.port, "healthz"))) return;
-		await new Promise<void>((resolve) => setTimeout(resolve, 200));
-	}
-	throw new Error("the previous daemon did not stop within 8 seconds");
+	const result = await awaitPreviousDaemonExit({
+		pid,
+		port,
+		probe: (p) => readDaemonProbe(p, "healthz"),
+		processState: (p) => readProcessState(p),
+		now: Date.now,
+		sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+		timeoutMs: PREVIOUS_DAEMON_EXIT_TIMEOUT_MS,
+		pollMs: PREVIOUS_DAEMON_EXIT_POLL_MS,
+	});
+	if (!result.ok) throw new Error(result.reason);
+	return pid;
 }
 
 async function refreshDaemonStatus(): Promise<DaemonStatus> {
@@ -957,6 +997,8 @@ async function refreshDaemonStatus(): Promise<DaemonStatus> {
 	const existing = await inspectExistingDaemon(launch);
 	if (existing) {
 		if (browserDaemonOwnershipDecision(appRunId, existing).action === "replace") {
+			// A failed replacement is not retried by polling; only an explicit start.
+			if (replacementHold) return daemonStatus;
 			return startDaemon();
 		}
 		setDaemonStatus(existing.status);
@@ -973,12 +1015,16 @@ async function refreshDaemonStatus(): Promise<DaemonStatus> {
 	return daemonStatus;
 }
 
-async function startDaemon(): Promise<DaemonStatus> {
+// A replacement that refused to start over a still-held ownership lock right
+// after this app stopped the daemon it replaced (see decideReplacementRetry).
+type ReplacementRetry = { replacedPid: number; attempt: number; keepAlive: boolean | undefined };
+
+async function startDaemon(retry?: ReplacementRetry): Promise<DaemonStatus> {
 	if (daemonStartPromise) {
 		return daemonStartPromise;
 	}
 	const startEpoch = daemonStartEpoch;
-	const promise = startDaemonInner(startEpoch).finally(() => {
+	const promise = startDaemonInner(startEpoch, retry).finally(() => {
 		if (daemonStartPromise === promise) {
 			daemonStartPromise = null;
 		}
@@ -994,7 +1040,7 @@ function resolvedDaemonPort(): number {
 	return isDev && !process.env.AO_PORT ? DEV_DAEMON_PORT : expectedDaemonPort(process.env);
 }
 
-async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
+async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): Promise<DaemonStatus> {
 	if (daemonProcess) {
 		return daemonStatus;
 	}
@@ -1021,18 +1067,46 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		return daemonStatus;
 	}
 
-	let replacementKeepAlive: boolean | undefined;
+	let replacementKeepAlive: boolean | undefined = retry?.keepAlive;
+	// The PID of the daemon this start stopped, once its exit is proven. Only a
+	// start that replaced a daemon may retry a lock refusal.
+	let replacedPid: number | null = retry?.replacedPid ?? null;
+	// A retry only re-spawns into a data dir it just proved free. Anything that
+	// has claimed the port or run-file meanwhile is ambiguous: fail closed, never
+	// replace a second time.
+	const refuseRetry = (holder: string): DaemonStatus => {
+		setDaemonStatus({
+			state: "error",
+			message: `AO daemon did not start: ${holder} appeared while retrying the replacement; AO will not replace it again.`,
+			details: daemonOutput.trim() || undefined,
+			code: "not_ready",
+		});
+		return daemonStatus;
+	};
 	const existing = await inspectExistingDaemon(launch);
 	if (startEpoch !== daemonStartEpoch) {
 		return daemonStatus;
 	}
+	if (existing && retry) return refuseRetry(`an AO daemon (pid ${existing.status.pid ?? "unknown"})`);
+	const refuseHeld = (): DaemonStatus => {
+		setDaemonStatus({
+			state: "error",
+			message: `AO will not stop another daemon after a failed replacement (${replacementHold}). Use Restart to try again.`,
+			details: daemonOutput.trim() || undefined,
+			code: "not_ready",
+		});
+		return daemonStatus;
+	};
 	if (existing) {
 		const ownership = browserDaemonOwnershipDecision(appRunId, existing);
 		if (ownership.action === "replace") {
+			if (replacementHold) return refuseHeld();
 			try {
-				await gracefullyReplaceDaemonForBrowser(existing.status);
+				replacedPid = await gracefullyReplaceDaemonForBrowser(existing.status.port, existing.status.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
+				// Whatever answers next is not stopped by a status poll (see replacementHold).
+				replacementHold = (err as Error).message;
 				setDaemonStatus({
 					state: "error",
 					message: `Could not take ownership of the browser runtime: ${(err as Error).message}`,
@@ -1068,6 +1142,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	if (startEpoch !== daemonStartEpoch) {
 		return daemonStatus;
 	}
+	if (directDaemon && retry) return refuseRetry(`an AO daemon (pid ${directDaemon.pid ?? "unknown"})`);
 	if (directDaemon) {
 		let portAttachOwner: string | undefined;
 		let portAttachAppRunId: string | undefined;
@@ -1093,10 +1168,13 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 			appRunId: portAttachAppRunId,
 		});
 		if (ownership.action === "replace") {
+			if (replacementHold) return refuseHeld();
 			try {
-				await gracefullyReplaceDaemonForBrowser(directDaemon);
+				replacedPid = await gracefullyReplaceDaemonForBrowser(directDaemon.port, directDaemon.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
+				// Whatever answers next is not stopped by a status poll (see replacementHold).
+				replacementHold = (err as Error).message;
 				setDaemonStatus({
 					state: "error",
 					message: `Could not take ownership of the browser runtime: ${(err as Error).message}`,
@@ -1129,13 +1207,18 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		}
 	}
 	const runFilePid = runFileInfo?.pid || null;
+	// A zombie holds no port, lock or run-file; anything that cannot be proven counts as alive.
+	const runFilePidState = runFilePid ? await readProcessState(runFilePid) : "gone";
 	const takeover = decidePortHolderTakeover({
 		probe: orphanProbe,
 		runFilePid,
 		runFileInstanceId: runFileInfo?.instanceId,
-		runFilePidAlive: runFilePid ? processAlive(runFilePid) : false,
+		runFilePidAlive: runFilePidState === "alive" || runFilePidState === "unknown",
 		identityError: orphanProbe ? daemonIdentityError(launch, orphanProbe) : null,
 	});
+	if (retry && takeover.action !== "spawn") {
+		return refuseRetry(orphanProbe ? `an AO daemon (pid ${orphanProbe.pid})` : `a live run-file process (pid ${runFilePid})`);
+	}
 	if (takeover.action === "refuse") {
 		setDaemonStatus({
 			state: "error",
@@ -1145,9 +1228,12 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		return daemonStatus;
 	}
 	if (takeover.action === "graceful_shutdown" && orphanProbe) {
+		if (replacementHold) return refuseHeld();
 		try {
-			await gracefullyReplaceDaemonForBrowser({ ...daemonStatus, port: resolvedDaemonPort() });
+			// decidePortHolderTakeover proved probe.pid === runFilePid.
+			replacedPid = await gracefullyReplaceDaemonForBrowser(resolvedDaemonPort(), orphanProbe.pid);
 		} catch (err) {
+			replacementHold = (err as Error).message;
 			setDaemonStatus({
 				state: "error",
 				message: `The previous AO daemon did not shut down: ${(err as Error).message}`,
@@ -1157,7 +1243,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		}
 		// The run-file is removed only while it still names the daemon that just
 		// stopped, and only once that process is gone.
-		if (runFilePath_ && runFilePid && !processAlive(runFilePid)) {
+		if (runFilePath_ && runFilePid && ["gone", "zombie"].includes(await readProcessState(runFilePid))) {
 			try {
 				const current = parseRunFile(await readFile(runFilePath_, "utf8"));
 				if (current?.pid === runFilePid) await rm(runFilePath_, { force: true });
@@ -1176,7 +1262,8 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		return daemonStatus;
 	}
 
-	daemonOutput = "";
+	// A retry keeps the previous attempt's output: it is the evidence if all fail.
+	if (!retry) daemonOutput = "";
 	setDaemonStatus({ state: "starting" });
 	if (launch.source === "bundled") {
 		try {
@@ -1211,12 +1298,20 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	// child so the parent does not wait on it. Port discovery then relies on the
 	// running.json handshake (the log pipe scan is skipped).
 	const keep = replacementKeepAlive ?? keepDaemonAlive(process.env);
+	// This child's own output, for deciding whether ITS failure is a lock refusal.
+	// daemonOutput also carries earlier attempts' output, for display only.
+	let childOutput = "";
 	let keepDaemonLogFd: number | undefined;
 	let stdio: "pipe" | "ignore" | ["pipe", number | "ignore", number | "ignore"] = "pipe";
+	const keepLogPath = path.join(os.homedir(), ".ao", "daemon.log");
+	// Where this child's keep-alive log output starts: its only diagnostic, since
+	// there are no pipes to capture. Read back if it fails to start.
+	let keepLogOffset = 0;
 	if (keep) {
-		const logPath = path.join(os.homedir(), ".ao", "daemon.log");
+		const logPath = keepLogPath;
 		try {
 			keepDaemonLogFd = openSync(logPath, "a");
+			keepLogOffset = statSync(logPath).size;
 			stdio = ["pipe", keepDaemonLogFd, keepDaemonLogFd];
 		} catch {
 			// Log redirect failed (e.g. ~/.ao not creatable, permission denied):
@@ -1292,6 +1387,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		if (portConfirmed || daemonProcess !== child || daemonStoppingProcess === child) return;
 		portConfirmed = true;
 		stopDiscovery();
+		clearReplacementHold();
 		setDaemonStatus({ state: "ready", port });
 
 		// Establish the OS-native liveness link on the spawn path (we own this
@@ -1324,6 +1420,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 
 		child.stdout?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString("utf8");
+			childOutput = (childOutput + text).slice(-MAX_DAEMON_OUTPUT_CHARS);
 			appendDaemonOutput(text);
 			console.log(text.trimEnd());
 			scanStdout(text);
@@ -1331,6 +1428,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 
 		child.stderr?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString("utf8");
+			childOutput = (childOutput + text).slice(-MAX_DAEMON_OUTPUT_CHARS);
 			appendDaemonOutput(text);
 			console.error(text.trimEnd());
 			scanStderr(text);
@@ -1411,18 +1509,81 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 			setDaemonStatus({ state: "stopped" });
 			return;
 		}
-		setDaemonStatus({
+		if (keep) {
+			childOutput = readDaemonLogSince(keepLogPath, keepLogOffset);
+			appendDaemonOutput(childOutput);
+		}
+		const exitedStatus: DaemonStatus = {
 			state: "stopped",
 			message: signal ? `Daemon exited with ${signal}` : `Daemon exited with code ${code ?? "unknown"}`,
 			details: daemonOutput.trim() || undefined,
 			code: "exited",
 			exitCode: code,
 			signal,
-		});
+		};
+		if (portConfirmed || replacedPid === null) {
+			setDaemonStatus(exitedStatus);
+			return;
+		}
+		// It never came up, and this start had replaced a daemon: decide whether
+		// the one justified retry applies. Keep "starting" visible meanwhile.
+		const holdGeneration = replacementHoldGeneration;
+		void (async () => {
+			const port = resolvedDaemonPort();
+			const portProbe = await readDaemonProbe(port, "healthz");
+			let liveRunFilePid: number | null = null;
+			const rfp = runFilePath();
+			if (rfp) {
+				try {
+					const info = parseRunFile(await readFile(rfp, "utf8"));
+					// Unknown counts as live: never retry over a run-file that might be claimed.
+					if (info?.pid && !["gone", "zombie"].includes(await readProcessState(info.pid))) liveRunFilePid = info.pid;
+				} catch {
+					// no run-file: nothing claims the data dir through it
+				}
+			}
+			const attempt = retry?.attempt ?? 0;
+			const decision = decideReplacementRetry({
+				replacedPid,
+				attempt,
+				exitCode: code,
+				signal,
+				output: childOutput,
+				portProbe,
+				liveRunFilePid,
+			});
+			if (startEpoch !== daemonStartEpoch || daemonProcess || holdGeneration !== replacementHoldGeneration) return;
+			if (decision.action === "fail") {
+				replacementHold = decision.reason;
+				setDaemonStatus({
+					...exitedStatus,
+					message: `${exitedStatus.message}: ${decision.reason}`,
+				});
+				return;
+			}
+			console.warn(
+				`AO: replacement daemon refused to start over a held lock; retry ${attempt + 1} in ${decision.delayMs}ms`,
+			);
+			replacementHold = "a replacement is being retried";
+			setDaemonStatus({ state: "starting" });
+			replacementRetryTimer = setTimeout(() => {
+				replacementRetryTimer = null;
+				if (startEpoch !== daemonStartEpoch || daemonProcess || holdGeneration !== replacementHoldGeneration) return;
+				void startDaemon({ replacedPid, attempt: attempt + 1, keepAlive: keep }).catch((error: unknown) => {
+					setDaemonStatus({
+						state: "error",
+						message: `Could not start the AO daemon: ${error instanceof Error ? error.message : String(error)}`,
+						details: daemonOutput.trim() || undefined,
+						code: "spawn_failed",
+					});
+				});
+			}, decision.delayMs);
+		})();
 	});
 
 	return daemonStatus;
 }
+
 
 // Signal the daemon's whole process group so the kill reaches the real daemon
 // behind the /bin/sh wrapper (and any PTY children it forked), not just the
@@ -1439,6 +1600,8 @@ function killDaemon(child: ChildProcess): void {
 
 function stopDaemon(): DaemonStatus {
 	daemonStartEpoch += 1;
+	if (replacementRetryTimer) clearTimeout(replacementRetryTimer);
+	replacementRetryTimer = null;
 	daemonStartPromise = null;
 	// An explicit stop (or a newer restart request) cancels any deferred restart
 	// left waiting for a previously slow child to exit.
@@ -1526,9 +1689,14 @@ ipcMain.handle("daemon:getEnvInfo", () => ({
 }));
 
 ipcMain.handle("daemon:getStatus", () => refreshDaemonStatus());
-ipcMain.handle("daemon:start", () => startDaemon());
+ipcMain.handle("daemon:start", () => {
+	// An explicit start is the only thing that may try a replacement again.
+	clearReplacementHold();
+	return startDaemon();
+});
 ipcMain.handle("daemon:stop", () => stopDaemon());
 ipcMain.handle("daemon:restart", async () => {
+	clearReplacementHold();
 	try {
 		return await restartDaemon();
 	} catch (error) {

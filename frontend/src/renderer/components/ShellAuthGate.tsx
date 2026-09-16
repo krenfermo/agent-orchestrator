@@ -1,8 +1,10 @@
-import { type ReactNode, useEffect } from "react";
+import { type ReactNode, useEffect, useState } from "react";
+import type { DaemonStatus } from "../../shared/daemon-status";
 import { refreshDaemonStatus } from "../lib/daemon-status";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { authPermitsProtectedData, useAuthStore } from "../stores/auth-store";
 import { useTenantStore } from "../stores/tenant-store";
+import { DaemonFailureBanner } from "./DaemonFailureBanner";
 import { DaemonStartupLoader } from "./DaemonStartupLoader";
 import { LoginScreen } from "./LoginScreen";
 import { SignupScreen } from "./SignupScreen";
@@ -39,6 +41,10 @@ export function ShellAuthGate({ children }: { children: ReactNode }) {
 	// needs. Both are unanswerable until the daemon is up, and both are
 	// permanent-looking if the single attempt lands before it is.
 	const unresolved = status === "loading" || (status === "unauthenticated" && providersStatus === "idle");
+	// The shell's own DaemonFailureBanner is below this gate, so a daemon that
+	// never starts would otherwise leave only the startup screen spinning forever
+	// (P11 Stage 2, 2026-09-16). Surface the supervisor's failure here.
+	const [daemonFailure, setDaemonFailure] = useState<DaemonStatus | null>(null);
 
 	useEffect(() => {
 		// Preview/e2e renders mock data with no daemon behind it; there is no
@@ -49,8 +55,9 @@ export function ShellAuthGate({ children }: { children: ReactNode }) {
 		const attempt = async () => {
 			// Pick up the daemon's port first: auth-store's calls are no-ops until
 			// api-client has a URL to send them to.
-			await refreshDaemonStatus().catch(() => undefined);
+			const daemon = await refreshDaemonStatus().catch(() => undefined);
 			if (cancelled) return;
+			if (daemon) setDaemonFailure(daemon.code && daemon.state !== "ready" ? daemon : null);
 			await useAuthStore.getState().refreshForDaemonReady();
 			if (cancelled) return;
 			timer = window.setTimeout(() => void attempt(), AUTH_RETRY_MS);
@@ -82,6 +89,7 @@ export function ShellAuthGate({ children }: { children: ReactNode }) {
 		return (
 			<div className="h-screen w-screen bg-background" data-testid="shell-auth-pending">
 				<DaemonStartupLoader />
+				{daemonFailure ? <DaemonFailureBanner status={daemonFailure} /> : null}
 			</div>
 		);
 	}

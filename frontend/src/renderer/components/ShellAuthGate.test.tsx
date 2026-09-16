@@ -18,12 +18,15 @@ vi.mock("../lib/api-client", async () => {
 // does api-client has no URL to send anything to. `daemonReady` is that fact,
 // and refreshDaemonStatus is how the gate observes it — exactly as in the app.
 let daemonReady = false;
+// A daemon that could not start: what the Electron supervisor reports.
+let daemonFailure: DaemonStatus | null = null;
 
 vi.mock("../lib/daemon-status", async () => {
 	const { setApiBaseUrl } = await vi.importActual<typeof import("../lib/api-client")>("../lib/api-client");
 	return {
 		refreshDaemonStatus: async (): Promise<DaemonStatus> => {
 			setApiBaseUrl(daemonReady ? "http://127.0.0.1:3002" : null);
+			if (daemonFailure) return daemonFailure;
 			return daemonReady ? { state: "ready", port: 3002 } : { state: "starting" };
 		},
 	};
@@ -77,6 +80,7 @@ beforeEach(() => {
 	apiGET.mockReset();
 	apiPOST.mockReset();
 	daemonReady = false;
+	daemonFailure = null;
 	setApiBaseUrl(null);
 	useAuthStore.setState({
 		user: null,
@@ -98,6 +102,39 @@ afterEach(() => {
 });
 
 describe("ShellAuthGate", () => {
+	it("shows why the daemon could not start instead of spinning on the startup screen forever", async () => {
+		// P11 Stage 2 (2026-09-16): the replacement daemon refused to start and the
+		// window stayed on "Preparing your board" with no error anywhere.
+		daemonFailure = {
+			state: "stopped",
+			code: "exited",
+			exitCode: 1,
+			message: "Daemon exited with code 1",
+			details: "another AO daemon holds data dir /Users/x/.ao/data; refusing to start",
+		};
+
+		renderGate();
+
+		const alert = await screen.findByRole("alert");
+		expect(alert).toHaveTextContent("Daemon exited with code 1");
+		expect(screen.getByRole("button", { name: "Restart daemon" })).toBeInTheDocument();
+		expect(screen.queryByTestId("app-shell")).toBeNull();
+		expect(apiGET).not.toHaveBeenCalledWith("/api/v1/projects");
+	});
+
+	it("drops the failure once the daemon recovers", async () => {
+		daemonFailure = { state: "error", code: "not_ready", message: "the previous AO daemon did not exit" };
+		renderGate();
+		await screen.findByRole("alert");
+
+		daemonFailure = null;
+		daemonReady = true;
+		signedOutDaemon();
+
+		expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
 	it("renders the sign-in screen, never the shell, when the daemon refuses the current principal", async () => {
 		daemonReady = true;
 		signedOutDaemon();
