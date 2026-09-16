@@ -144,6 +144,8 @@ export type ShutdownProof =
 			instanceId: string;
 			installationId: string;
 			dataDir: string;
+			/** The proven run-file's own supervisor endpoint, when it publishes one. */
+			supervisorAddress?: string;
 	  }
 	| {
 			verdict:
@@ -224,5 +226,36 @@ export function proveDaemonOwnedForShutdown(f: ShutdownProofFacts): ShutdownProo
 		instanceId: p.instanceId,
 		installationId: p.installationId,
 		dataDir: p.dataDir,
+		supervisorAddress: rf.supervisorAddress,
 	};
+}
+
+/** The daemon incarnation (and its endpoint) a supervisor link was made for. */
+export type SupervisorLinkTarget = { pid: number; port: number; instanceId: string; supervisorAddress: string };
+
+/**
+ * Where a supervisor link may go, from a P9 proof: only the endpoint the proven
+ * run-file itself publishes. No address (a daemon that predates it), or no
+ * proof, means no link -- the endpoint is never derived or guessed.
+ */
+export function supervisorLinkTarget(proof: ShutdownProof): SupervisorLinkTarget | null {
+	if (proof.verdict !== "verified" || !proof.supervisorAddress) return null;
+	return { pid: proof.pid, port: proof.port, instanceId: proof.instanceId, supervisorAddress: proof.supervisorAddress };
+}
+
+/**
+ * Before every (re)connect of an existing link: "proven" only when a fresh proof
+ * describes the SAME incarnation publishing the SAME endpoint; a proof that says
+ * nothing right now waits; anything else (another instance, another endpoint,
+ * no endpoint, gone) ends the link. So a link made for instance A can never end
+ * up connected to instance B.
+ */
+export function supervisorLinkVerdict(proof: ShutdownProof, linked: SupervisorLinkTarget): "proven" | "unproven" | "foreign" {
+	if (proof.verdict !== "verified") return isTransientOwnershipVerdict(proof.verdict) ? "unproven" : "foreign";
+	const same =
+		proof.pid === linked.pid &&
+		proof.port === linked.port &&
+		proof.instanceId === linked.instanceId &&
+		proof.supervisorAddress === linked.supervisorAddress;
+	return same ? "proven" : "foreign";
 }

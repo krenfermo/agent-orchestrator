@@ -3,6 +3,7 @@ package runfile
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -237,5 +238,42 @@ func TestRunFileRoundTripsIdentity(t *testing.T) {
 	got, err := Read(path)
 	if err != nil || got == nil || !got.SameDaemon(want) || got.InstallationID != want.InstallationID || got.DataDir != want.DataDir || got.FormatVersion != CurrentFormatVersion {
 		t.Fatalf("round trip = %+v, %v", got, err)
+	}
+}
+
+// The supervisor address is additive: written when set, absent (and parsed as
+// empty) in files from daemons that predate it.
+func TestSupervisorAddressIsOptionalAndRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "running.json")
+	want := Info{PID: 7, Port: 3002, StartedAt: time.Now().UTC().Truncate(time.Second), FormatVersion: CurrentFormatVersion,
+		InstanceID: "aod-1", InstallationID: "aoi-1", DataDir: "/d", SupervisorAddress: "/d/supervise-0123456789abcdef.sock"}
+	if err := Write(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil || got == nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.SupervisorAddress != want.SupervisorAddress {
+		t.Fatalf("supervisorAddress = %q, want %q", got.SupervisorAddress, want.SupervisorAddress)
+	}
+
+	old := filepath.Join(dir, "old.json")
+	if err := os.WriteFile(old, []byte(`{"pid":7,"port":3002,"startedAt":"2026-09-14T00:00:00Z","formatVersion":2,"instanceId":"aod-1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Read(old)
+	if err != nil || legacy == nil || legacy.SupervisorAddress != "" || legacy.InstanceID != "aod-1" {
+		t.Fatalf("pre-supervisorAddress run-file: %+v, %v", legacy, err)
+	}
+
+	noSup := Info{PID: 7, Port: 3002, StartedAt: want.StartedAt}
+	if err := Write(path, noSup); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "supervisorAddress") {
+		t.Fatalf("empty supervisorAddress was written: %s", raw)
 	}
 }

@@ -45,8 +45,10 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
 	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
+	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
 	"github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runtimegc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/secretbox"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
@@ -141,6 +143,10 @@ func RunWithConfig(cfg config.Config) error {
 		return fmt.Errorf("lock run-file: %w", lerr)
 	}
 	defer func() { _ = runFileLock.Release() }()
+	// The incarnation that last wrote this run-file. Holding the run-file lock
+	// proves it is no longer running, which is what lets the supervisor listener
+	// clean up that one predecessor's endpoint (and nothing else).
+	priorSupervisor := priorSupervisorEndpoint(cfg.RunFilePath, processalive.Alive)
 
 	// P10: a restore interrupted while the data dir may hold a mix of two states
 	// must be resolved with `ao backup recover` before anything opens the store.
@@ -1143,12 +1149,14 @@ func RunWithConfig(cfg config.Config) error {
 	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.
 	const supervisorGrace = 5 * time.Second
 
-	if ln, addr, err := supervisor.Listen(cfg.RunFilePath); err != nil {
+	if ln, addr, err := supervisor.Listen(cfg.RunFilePath, cfg.DaemonInstanceID, priorSupervisor); err != nil {
 		// Non-fatal: without the link the daemon still works (e.g. headless "ao start"),
 		// it just will not auto-stop when a frontend dies. Do not block startup on it.
 		log.Warn("supervisor: listener unavailable; frontend-death auto-stop disabled", "err", err)
 	} else {
 		log.Info("supervisor: listening", "addr", addr)
+		// Published by the run-file's single atomic write in srv.Run.
+		srv.SetSupervisorAddress(addr)
 		sup := supervisor.New(supervisorGrace, srv.RequestShutdown, log)
 		go func() {
 			if err := sup.Serve(ctx, ln); err != nil {
@@ -1302,4 +1310,20 @@ func (f federatedSessionIssuer) CreateFederatedUser(ctx context.Context, in ssos
 
 func (f federatedSessionIssuer) CreateSessionAs(ctx context.Context, userID domain.UserID, method domain.AuthMethod, issuer, subject string) (string, domain.AuthSession, error) {
 	return f.mgr.CreateSessionAs(ctx, userID, method, issuer, subject)
+}
+
+// priorSupervisorEndpoint is the supervisor endpoint of the incarnation that last
+// wrote runFilePath, marked Exited only when that process is not alive. Called
+// with the run-file lock held, so no live daemon can be writing this run-file.
+// An unreadable or identity-less run-file yields no prior: nothing is cleaned up.
+func priorSupervisorEndpoint(runFilePath string, alive func(int) bool) *supervisor.Prior {
+	prior, err := runfile.Read(runFilePath)
+	if err != nil || prior == nil || prior.InstanceID == "" || prior.SupervisorAddress == "" {
+		return nil
+	}
+	return &supervisor.Prior{
+		InstanceID: prior.InstanceID,
+		Address:    prior.SupervisorAddress,
+		Exited:     prior.PID > 0 && !alive(prior.PID),
+	}
 }

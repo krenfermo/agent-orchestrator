@@ -148,6 +148,7 @@ func TestServerLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	srv.SetSupervisorAddress("/run/dir/supervise-0123456789abcdef.sock")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -168,6 +169,9 @@ func TestServerLifecycle(t *testing.T) {
 	}
 	if info.Port == 0 {
 		t.Error("run-file recorded port 0; want the actual bound port")
+	}
+	if info.SupervisorAddress != "/run/dir/supervise-0123456789abcdef.sock" {
+		t.Errorf("run-file supervisorAddress = %q; want the address set before Run", info.SupervisorAddress)
 	}
 
 	cancel()

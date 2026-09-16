@@ -75,6 +75,8 @@ import {
 	type ShutdownProof,
 	browserDaemonOwnershipDecision,
 	isTransientOwnershipVerdict,
+	supervisorLinkTarget,
+	supervisorLinkVerdict,
 	decidePortHolderTakeover,
 	proveDaemonOwnedForShutdown,
 } from "./shared/daemon-takeover";
@@ -205,9 +207,8 @@ let isFlashing = false;
 const isDev = !app.isPackaged;
 
 // Dev mode uses a separate port and state subdirectory so it never collides with
-// a concurrently running installed-app daemon. The subdir also isolates supervise.sock
-// on Unix (backend derives it as dir(RunFilePath)/supervise.sock) and the named pipe
-// on Windows (supervisorPipeFromRunFile derives it from the same dir basename).
+// a concurrently running installed-app daemon. (The supervisor endpoint is per daemon
+// instance and published in the run-file; it is never derived from these paths.)
 const DEV_DAEMON_PORT = 3002;
 const DEV_STATE_SUBDIR = "dev"; // ~/.ao/dev/
 
@@ -862,12 +863,6 @@ function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe): stri
  * headless `ao start` daemons stay unlinked so they remain persistent after
  * app quit.
  */
-function supervisorPipeFromRunFile(rfp: string | null): string {
-	if (!rfp) return "\\\\.\\pipe\\ao-supervise";
-	const dir = path.basename(path.dirname(rfp));
-	if (dir === ".ao" || dir === "." || dir === "") return "\\\\.\\pipe\\ao-supervise";
-	return "\\\\.\\pipe\\ao-supervise-" + dir.replace(/[^a-zA-Z0-9-]/g, "-");
-}
 
 function disposeBrowserRuntimeLink(): void {
 	browserRuntimeLink?.dispose();
@@ -920,33 +915,27 @@ function establishBrowserRuntimeLink(): void {
 	browserRuntimeLinkIdentity = identity;
 }
 
-// Holds the link only to the daemon incarnation proven here (P9): every
-// (re)connect re-proves it, so a drop is never re-linked to whatever daemon
-// binds the same socket path next.
-function establishSupervisorLink(launch: DaemonLaunchSpec, expected: { pid: number; port: number; instanceId: string }): void {
-	const verify = async (): Promise<SupervisorLinkVerdict> => {
-		const proof = await proveDaemonOwnership(launch, expected.port);
-		if (proof.verdict === "verified") {
-			return proof.pid === expected.pid && proof.instanceId === expected.instanceId ? "proven" : "foreign";
-		}
-		return isTransientOwnershipVerdict(proof.verdict) ? "unproven" : "foreign";
-	};
-	const rfp = runFilePath();
-	const addr =
-		process.platform === "win32"
-			? supervisorPipeFromRunFile(rfp)
-			: rfp
-				? path.join(path.dirname(rfp), "supervise.sock")
-				: null;
-	if (addr) {
-		supervisorLink?.dispose();
-		supervisorLink = connectSupervisor(addr, {
-			log: (msg) => console.log(`AO: ${msg}`),
-			verify,
-		});
-	} else {
-		console.warn("AO: supervisor link skipped; run-file path unavailable");
+// Holds the link only to the daemon incarnation proven here (P9), at the
+// endpoint that proven run-file publishes (named after the instance by the
+// daemon; never derived here). Every (re)connect re-proves the same instance
+// AND endpoint, so a link made for instance A never ends up connected to B.
+function establishSupervisorLink(launch: DaemonLaunchSpec, proof: ShutdownProof): void {
+	const target = supervisorLinkTarget(proof);
+	if (!target) {
+		console.warn(
+			proof.verdict === "verified"
+				? "AO: supervisor link skipped; the daemon does not publish a supervisor endpoint"
+				: `AO: supervisor link refused: ${proof.verdict}`,
+		);
+		return;
 	}
+	const verify = async (): Promise<SupervisorLinkVerdict> =>
+		supervisorLinkVerdict(await proveDaemonOwnership(launch, target.port), target);
+	supervisorLink?.dispose();
+	supervisorLink = connectSupervisor(target.supervisorAddress, {
+		log: (msg) => console.log(`AO: ${msg}`),
+		verify,
+	});
 }
 
 async function inspectExistingDaemon(
@@ -1077,7 +1066,7 @@ async function linkSpawnedDaemon(launch: DaemonLaunchSpec, port: number, child: 
 		// over (and dispose) the link of the daemon that replaced it.
 		if (daemonProcess !== child || daemonStoppingProcess === child) return;
 		if (proof.verdict === "verified") {
-			establishSupervisorLink(launch, { pid: proof.pid, port: proof.port, instanceId: proof.instanceId });
+			establishSupervisorLink(launch, proof);
 			return;
 		}
 		if (proof.verdict !== "no_provenance" && !isTransientOwnershipVerdict(proof.verdict)) {
@@ -1275,7 +1264,7 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 			// previously spawned). Headless `ao start` daemons (owner unset) stay unlinked
 			// so they remain persistent after app quit.
 			if (shouldLinkOnAttach(existing.owner)) {
-				establishSupervisorLink(launch, { pid: proof.pid, port: proof.port, instanceId: proof.instanceId });
+				establishSupervisorLink(launch, proof);
 			}
 			return daemonStatus;
 		}
@@ -1352,7 +1341,7 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 			}
 			setDaemonStatus(directDaemon);
 			if (shouldLinkOnAttach(portAttachOwner)) {
-				establishSupervisorLink(launch, { pid: proof.pid, port: proof.port, instanceId: proof.instanceId });
+				establishSupervisorLink(launch, proof);
 			}
 			return daemonStatus;
 		}
