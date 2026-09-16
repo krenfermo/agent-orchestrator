@@ -426,7 +426,7 @@ class ElectronEventTest(HeartbeatHarness):
         self.run.man.update({"loginShell": "/bin/sh", "pathFloor": "/usr/bin:/bin"})
         p11.electron_preflight = lambda man, checkout: []
         p11.daemon_stop = lambda run, reason: self.calls.append("stop") or self.daemon.update(state="stopped") or {"result": "pass"}
-        p11.daemon_start = lambda run, reason: self.calls.append("start") or {"instanceId": "aod-9"}
+        p11.daemon_start = lambda run, reason="operator": self.calls.append("start") or {"instanceId": "aod-9"}
         p11.quick_db = lambda man: {"ok": True}
         p11.checkpoint = lambda run, label, **kw: self.calls.append("checkpoint:" + label) or {"result": "ok"}
         p11.ao_cmd = lambda man, args, **kw: self.calls.append("ao " + args[0]) or (0, "", "", 0)
@@ -492,6 +492,25 @@ class ElectronEventTest(HeartbeatHarness):
         self.assertNotIn("ao stop", self.calls)
         self.assertEqual(len(self.run.events("electron_event_blocked")), 1)
         self.assertIsNotNone(p11.event_in_progress(self.run.state()))  # still owned: nothing scheduled acts
+
+    def test_a_blocked_event_lets_the_operator_recover_and_then_closes(self):
+        def cycle(run, checkout, n, hold, interactive):
+            self.app_running = [4242]
+            return False, {"cycle": n, "checks": {"appQuit": False}}
+        p11.electron_cycle = cycle
+        p11.electron_event(self.run, "/checkout", cycles=1)
+        parser = p11.build_parser()
+        with self.assertRaises(SystemExit):  # other operator commands still wait
+            args = parser.parse_args(["--run", self.run.id, "daemon-restart"])
+            args.fn(args)
+        with self.assertRaises(SystemExit):  # the app is still up: no restore yet
+            args = parser.parse_args(["--run", self.run.id, "daemon-start"])
+            args.fn(args)
+        self.app_running = []
+        args = parser.parse_args(["--run", self.run.id, "daemon-start"])
+        args.fn(args)
+        self.assertIsNone(p11.event_in_progress(self.run.state()))
+        self.assertEqual(len(self.run.events("electron_event_recovered")), 1)
 
     def test_post_checkpoint_runs_before_the_event_releases_the_daemon(self):
         p11.electron_cycle = lambda run, checkout, n, hold, interactive: (True, {"cycle": n, "checks": {"x": True}})

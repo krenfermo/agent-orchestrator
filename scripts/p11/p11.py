@@ -1647,6 +1647,8 @@ def electron_event(run, checkout, cycles=2, hold_sec=20, interactive=False, minu
         # restored daemon over again. Leave maintenance and the event open for the operator instead.
         app_left = electron_processes(checkout)
         if app_left:
+            # Still owned (nothing scheduled acts), but only the operator's recovery is allowed now.
+            run.update_state(lambda s: s["eventInProgress"].update({"kind": "electron-blocked"}))
             run.event("electron_event_blocked", "attention",
                       "the desktop app is still running; the soak daemon was NOT restarted. Quit it, then run "
                       "`p11 daemon-start` and `p11 checkpoint --label post-electron`", pids=app_left)
@@ -2175,9 +2177,13 @@ def cmd_status(args):
     return 0
 
 
+# After electron_event_blocked the operator quits the app and restores the soak daemon by hand.
+BLOCKED_EVENT_RECOVERY = ("daemon-start", "checkpoint")
+
+
 def refuse_during_event(run, what):
     ev = event_in_progress(run.state())
-    if ev:
+    if ev and not (ev.get("kind") == "electron-blocked" and what in BLOCKED_EVENT_RECOVERY):
         die("refusing %s: a %s event owns the daemon until %s" % (what, ev.get("kind"), iso(ev.get("expires"))))
 
 
@@ -2244,7 +2250,13 @@ def cmd_daemon(args):
     run = current_run(args)
     refuse_during_event(run, "daemon-" + args.daemon_cmd)
     if args.daemon_cmd == "start":
+        ev = event_in_progress(run.state())
+        if ev and ev.get("kind") == "electron-blocked" and electron_processes(run.man.get("electronCheckout", "")):
+            die("refusing daemon-start: the desktop app is still running; quit it first")
         print(json.dumps(daemon_start(run), indent=2))
+        if ev and ev.get("kind") == "electron-blocked":
+            end_event(run)
+            run.event("electron_event_recovered", "ok", "soak daemon restored by the operator after a blocked electron-event")
     elif args.daemon_cmd == "stop":
         res = daemon_stop(run)
         print(json.dumps(res, indent=2))
