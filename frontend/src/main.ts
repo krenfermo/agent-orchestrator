@@ -162,8 +162,12 @@ let daemonOutput = "";
 // whatever daemon appears next -- the soak harness restoring its own, or `ao start`.
 let replacementHold: string | null = null;
 let replacementRetryTimer: ReturnType<typeof setTimeout> | null = null;
+// Bumped whenever the hold is cleared: a replacement decision still awaiting
+// its probes must not re-arm a hold (or a retry) that an explicit start cleared.
+let replacementHoldGeneration = 0;
 
 function clearReplacementHold(): void {
+	replacementHoldGeneration += 1;
 	replacementHold = null;
 	if (replacementRetryTimer) clearTimeout(replacementRetryTimer);
 	replacementRetryTimer = null;
@@ -1101,6 +1105,8 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 				replacedPid = await gracefullyReplaceDaemonForBrowser(existing.status.port, existing.status.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
+				// Whatever answers next is not stopped by a status poll (see replacementHold).
+				replacementHold = (err as Error).message;
 				setDaemonStatus({
 					state: "error",
 					message: `Could not take ownership of the browser runtime: ${(err as Error).message}`,
@@ -1167,6 +1173,8 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 				replacedPid = await gracefullyReplaceDaemonForBrowser(directDaemon.port, directDaemon.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
+				// Whatever answers next is not stopped by a status poll (see replacementHold).
+				replacementHold = (err as Error).message;
 				setDaemonStatus({
 					state: "error",
 					message: `Could not take ownership of the browser runtime: ${(err as Error).message}`,
@@ -1225,6 +1233,7 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 			// decidePortHolderTakeover proved probe.pid === runFilePid.
 			replacedPid = await gracefullyReplaceDaemonForBrowser(resolvedDaemonPort(), orphanProbe.pid);
 		} catch (err) {
+			replacementHold = (err as Error).message;
 			setDaemonStatus({
 				state: "error",
 				message: `The previous AO daemon did not shut down: ${(err as Error).message}`,
@@ -1518,6 +1527,7 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 		}
 		// It never came up, and this start had replaced a daemon: decide whether
 		// the one justified retry applies. Keep "starting" visible meanwhile.
+		const holdGeneration = replacementHoldGeneration;
 		void (async () => {
 			const port = resolvedDaemonPort();
 			const portProbe = await readDaemonProbe(port, "healthz");
@@ -1542,7 +1552,7 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 				portProbe,
 				liveRunFilePid,
 			});
-			if (startEpoch !== daemonStartEpoch || daemonProcess) return;
+			if (startEpoch !== daemonStartEpoch || daemonProcess || holdGeneration !== replacementHoldGeneration) return;
 			if (decision.action === "fail") {
 				replacementHold = decision.reason;
 				setDaemonStatus({
@@ -1558,7 +1568,7 @@ async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): P
 			setDaemonStatus({ state: "starting" });
 			replacementRetryTimer = setTimeout(() => {
 				replacementRetryTimer = null;
-				if (startEpoch !== daemonStartEpoch || daemonProcess) return;
+				if (startEpoch !== daemonStartEpoch || daemonProcess || holdGeneration !== replacementHoldGeneration) return;
 				void startDaemon({ replacedPid, attempt: attempt + 1, keepAlive: keep }).catch((error: unknown) => {
 					setDaemonStatus({
 						state: "error",
