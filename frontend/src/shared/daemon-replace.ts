@@ -126,6 +126,12 @@ export type ReplacementRetryDecision = { action: "retry"; delayMs: number } | { 
  * proved the daemon we replaced had exited, and nothing else has since claimed
  * the port or the run-file. Every other case -- a crash, a signal, an
  * unrecognized message, a competing daemon, exhausted attempts -- fails closed.
+ *
+ * On macOS/Linux a proven exit means the kernel already dropped that daemon's
+ * flock, so a refusal here means something else holds the lock (another daemon
+ * on a different port or run-file, a restore): the bounded retries exhaust and
+ * fail visibly. The retry is for lock release that trails process exit (Windows
+ * LockFileEx) and costs at most three short-lived children elsewhere.
  */
 export function decideReplacementRetry(facts: ReplacementRetryFacts): ReplacementRetryDecision {
 	if (facts.replacedPid === null) {
