@@ -853,19 +853,35 @@ def close_maintenance(run):
     run.update_state(lambda s: s.pop("maintenance", None))
 
 
-def begin_event(run, kind, minutes):
+def begin_event(run, kind, minutes, **meta):
     """An operator event (e.g. electron-event) owns the daemon until end_event: scheduled restarts,
-    crashes and checkpoints wait for it instead of acting on a daemon it is stopping and starting."""
+    crashes and checkpoints wait for it instead of acting on a daemon it is stopping and starting.
+    The owning process is recorded: an event whose process died without end_event (SIGKILL, a closed
+    terminal) no longer owns anything."""
     now = time.time()
-    run.update_state(lambda s: s.update({"eventInProgress": {"kind": kind, "opened": now, "expires": now + minutes * 60}}))
+    ev = dict(meta, kind=kind, opened=now, expires=now + minutes * 60, ownerPid=os.getpid())
+    run.update_state(lambda s: s.update({"eventInProgress": ev}))
 
 
 def end_event(run):
     run.update_state(lambda s: s.pop("eventInProgress", None))
 
 
+def block_electron_event(run, checkout, pids):
+    """The app outlived the event: it would take a restored daemon over again. Until the operator quits
+    it and restores the daemon (daemon-start), nothing scheduled acts and only recovery is allowed --
+    regardless of the event's window or of the event process still existing."""
+    run.update_state(lambda s: (s.pop("eventInProgress", None),
+                                s.update({"electronBlocked": {"checkout": checkout, "since": time.time(), "pids": pids}})))
+
+
 def event_in_progress(st, now=None):
+    blocked = st.get("electronBlocked")
+    if blocked:
+        return dict(blocked, kind="electron-blocked")
     e = st.get("eventInProgress")
+    if e and e.get("ownerPid") and e["ownerPid"] != os.getpid() and not pid_alive(e["ownerPid"]):
+        return None
     return e if e and (now or time.time()) < e.get("expires", 0) else None
 
 
@@ -1623,7 +1639,7 @@ def electron_event(run, checkout, cycles=2, hold_sec=20, interactive=False, minu
         run.event("electron_event_refused", "refused", "; ".join(problems), checkout=checkout)
         die("electron-event refused: %s" % "; ".join(problems))
     minutes = minutes or needed
-    begin_event(run, "electron", minutes)
+    begin_event(run, "electron", minutes, checkout=checkout)
     open_maintenance(run, "electron-event", minutes)
     run.event("electron_event_started", "ok", checkout=checkout, cycles=cycles, holdSec=hold_sec,
               interactive=interactive, maintenanceMin=minutes, previousInstance=st.get("instanceId"))
@@ -1647,8 +1663,7 @@ def electron_event(run, checkout, cycles=2, hold_sec=20, interactive=False, minu
         # restored daemon over again. Leave maintenance and the event open for the operator instead.
         app_left = electron_processes(checkout)
         if app_left:
-            # Still owned (nothing scheduled acts), but only the operator's recovery is allowed now.
-            run.update_state(lambda s: s["eventInProgress"].update({"kind": "electron-blocked"}))
+            block_electron_event(run, checkout, app_left)
             run.event("electron_event_blocked", "attention",
                       "the desktop app is still running; the soak daemon was NOT restarted. Quit it, then run "
                       "`p11 daemon-start` and `p11 checkpoint --label post-electron`", pids=app_left)
@@ -1664,6 +1679,8 @@ def electron_event(run, checkout, cycles=2, hold_sec=20, interactive=False, minu
                 restart = {"error": str(e)}
             db = quick_db(man)
             # Before end_event: deferred scheduled items would otherwise take the checkpoint lock first.
+            # Refresh the ownership in case a slow stop/start ate into the window's margin.
+            begin_event(run, "electron", 30, checkout=checkout)
             if isinstance(restart, dict) and restart.get("instanceId"):
                 cp = checkpoint(run, "post-electron", trigger="electron-event")
     finally:
@@ -2251,11 +2268,11 @@ def cmd_daemon(args):
     refuse_during_event(run, "daemon-" + args.daemon_cmd)
     if args.daemon_cmd == "start":
         ev = event_in_progress(run.state())
-        if ev and ev.get("kind") == "electron-blocked" and electron_processes(run.man.get("electronCheckout", "")):
+        if ev and ev.get("kind") == "electron-blocked" and electron_processes(ev.get("checkout", "")):
             die("refusing daemon-start: the desktop app is still running; quit it first")
         print(json.dumps(daemon_start(run), indent=2))
         if ev and ev.get("kind") == "electron-blocked":
-            end_event(run)
+            run.update_state(lambda s: s.pop("electronBlocked", None))
             run.event("electron_event_recovered", "ok", "soak daemon restored by the operator after a blocked electron-event")
     elif args.daemon_cmd == "stop":
         res = daemon_stop(run)

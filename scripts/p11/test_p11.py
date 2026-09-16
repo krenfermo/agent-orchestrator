@@ -492,6 +492,8 @@ class ElectronEventTest(HeartbeatHarness):
         self.assertNotIn("ao stop", self.calls)
         self.assertEqual(len(self.run.events("electron_event_blocked")), 1)
         self.assertIsNotNone(p11.event_in_progress(self.run.state()))  # still owned: nothing scheduled acts
+        # ...even after the window would have expired and the event process is gone.
+        self.assertIsNotNone(p11.event_in_progress(self.run.state(), now=self.wall + 10 ** 7))
 
     def test_a_blocked_event_lets_the_operator_recover_and_then_closes(self):
         def cycle(run, checkout, n, hold, interactive):
@@ -511,6 +513,14 @@ class ElectronEventTest(HeartbeatHarness):
         args.fn(args)
         self.assertIsNone(p11.event_in_progress(self.run.state()))
         self.assertEqual(len(self.run.events("electron_event_recovered")), 1)
+
+    def test_an_event_whose_process_died_owns_nothing(self):
+        import subprocess
+        dead = subprocess.Popen(["/usr/bin/true"])
+        dead.wait()
+        p11.begin_event(self.run, "electron", minutes=30)
+        self.run.update_state(lambda s: s["eventInProgress"].update({"ownerPid": dead.pid}))
+        self.assertIsNone(p11.event_in_progress(self.run.state()))
 
     def test_post_checkpoint_runs_before_the_event_releases_the_daemon(self):
         p11.electron_cycle = lambda run, checkout, n, hold, interactive: (True, {"cycle": n, "checks": {"x": True}})
