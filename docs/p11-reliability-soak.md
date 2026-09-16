@@ -200,30 +200,36 @@ terminales no decrecientes y un checkpoint `post-crash` sin fallos. Nunca se mat
 `ao stop` (canónico) → PID desaparecido, puerto liberado, estado `stopped/stale` → `ao daemon`
 congelado → instancia nueva, misma instalación, base sana.
 
-### Electron (48h/72h, manual)
-Hecho verificado en código: la app de escritorio **no se adjunta** a un daemon que no lanzó ella.
-`browserDaemonOwnershipDecision` (`frontend/src/shared/daemon-takeover.ts`) devuelve `replace` si
-el `appRunId` difiere — siempre, con un daemon headless — y la app para ese daemon por su
-`/shutdown` y lanza el suyo. En modo dev ese daemon es `go run ./cmd/ao daemon` (fuente no
-congelada): el checkpoint lo detecta como `binary_under_test_not_serving` (incidente crítico,
-etapa invalidada). La app empaquetada (puerto 3001, `~/.ao/running.json`) no puede arrancar un
-segundo daemon sobre `~/.ao/data`: el `flock` de `<data>/daemon.lock` lo impide.
+### Electron (48h/72h): `p11 electron-event`
+Hecho verificado en código: la app de escritorio **no se adjunta** a un daemon que no lanzó ella
+(`browserDaemonOwnershipDecision` devuelve `replace`); lo para por su `/shutdown` y lanza el suyo.
+El procedimiento manual anterior (abrir la app con `AO_DAEMON_COMMAND` sobre el daemon vivo del soak)
+**falló en la etapa 2** (§19): el daemon de reemplazo chocó con `daemon.lock` del anterior y la
+etapa quedó sin daemon. Queda retirado. `AO_DAEMON_COMMAND` sólo elige el binario del reemplazo; no
+evita el reemplazo.
 
-Por eso: **durante la etapa 24h no se abre la app de AO** (ni dev ni empaquetada). En 48h/72h el
-evento se ejecuta así, para que el daemon de reemplazo sea el binario congelado:
+El evento es un comando del harness, determinista y con el binario congelado como **único** comando
+de daemon posible:
 
 ```bash
-~/.ao/soak/p11/p11 maintenance --reason electron --minutes 30
-cd ~/Downloads/proyectos_resp/dev-orchestrator/agent-orchestrator/frontend
-env -u AO_RUN_FILE -u AO_PORT AO_DATA_DIR="$HOME/.ao/data" \
-  AO_DAEMON_COMMAND="$HOME/.ao/soak/p11/bin/ao-9c80b9b2c daemon" npm run dev
-# usar la app; salir con Cmd+Q; volver a abrirla con el mismo comando; salir otra vez
-~/.ao/soak/p11/p11 checkpoint --label post-electron
-~/.ao/soak/p11/p11 event electron_close_reopen --result pass --note "..."
+~/.ao/soak/p11/p11 electron-event            # --cycles 2 (cerrar/reabrir), --hold 20 s, o --interactive
 ```
 
-El reemplazo queda con `owner=persistent` (el daemon previo no era `app`), así que sobrevive a
-cerrar la app. Tras el evento el checkpoint debe mostrar identidad sana con el binario congelado.
+1. Preflight (se niega sin tocar nada): checkout de la app (`electronCheckout` del manifest) en el
+   `eccSha` congelado y con `frontend/` limpio, Electron instalado completo, ninguna app de ese
+   checkout abierta, binario congelado con su SHA, daemon del soak `ready` con identidad probada.
+2. Abre la ventana de mantenimiento y marca el evento en curso: los eventos programados (reinicio,
+   checkpoint, fixtures) esperan a que termine.
+3. `daemon_stop` del harness (PID desaparecido, puerto liberado).
+4. Por ciclo: `npm run dev` con `AO_DATA_DIR`/`AO_RUN_FILE`/`AO_PORT` congelados y
+   `AO_DAEMON_COMMAND="<binario congelado> daemon"` (sin `AO_KEEP_DAEMON`). Como no hay daemon
+   vivo, la app lanza y **posee** el suyo (`owner=app`). Se exige: daemon `ready` con identidad
+   probada (binario congelado, data dir, puerto, instalación), run-file `owner=app` con `appRunId`,
+   el renderer pidiendo `/api/v1/auth/me`, ningún `refusing to start`; después la app sale (Ctrl+C
+   al grupo, o el operador con `--interactive`), su daemon se detiene solo (EOF del supervisor) y el
+   puerto queda libre. Salida de la app en `process/electron-<stamp>-cN.log`.
+5. Pase lo que pase: `daemon_start` del harness, `quick_check`, checkpoint `post-electron`, fin
+   del evento. Registra `electron_close_reopen` pass/fail con los checks de cada ciclo.
 
 ### Reboot (una vez en P11, preferible 48h/72h)
 Reiniciar la Mac. El monitor vuelve con el login y registra `reboot_detected`. **AO no tiene
@@ -295,6 +301,11 @@ Auto-abiertos por el harness (deduplicados): `duplicate_worker`, `duplicate_disp
 `orphan_runtime`, `installation_mismatch`, `data_dir_mismatch`, `binary_under_test_not_serving`,
 `binary_under_test_changed`, `backup_not_valid`, `restore_journal_present` (críticos);
 `daemon_down_unplanned`, `unplanned_daemon_restart`, `fixture_failed` (high).
+Deduplicación por episodio o causa, nunca por un texto con valores variables: una caída del daemon
+es **un** `daemon_down_unplanned` (clave: inicio de la caída) por muchos heartbeats que dure, y su
+fin es `daemon_available`; cada cambio de instancia no planificado es su propio
+`unplanned_daemon_restart` (clave: instancia nueva). Una ventana de mantenimiento que expira con el
+daemon caído registra `maintenance_expired_daemon_down` (attention) una vez.
 
 **Reinician la etapa** (crítico): corrupción de base, worker/reviewer duplicado, ownership
 incorrecto, write de generación stale, run terminal mutado, daemon irrecuperable, backup corrupto
@@ -355,7 +366,7 @@ p11=~/.ao/soak/p11/p11                  # wrapper: ejecuta el harness congelado 
 $p11 status                             # RUN, STAGE, START, ELAPSED, TARGET, heartbeat, checkpoint,
                                         # DAEMON, DB, BACKUP, INCIDENTS, MEMORY, NEXT EVENT, GO/NO-GO
 $p11 checkpoint --label <l>             # evidencia antes/después de un evento manual
-$p11 event electron_close_reopen --result pass --note "..."
+$p11 electron-event                     # Electron cerrar/reabrir (§8); registra electron_close_reopen
 $p11 incident --code <c> --severity high --summary "..."
 $p11 daemon-crash --confirm --restart   # crash controlado (identidad probada)
 $p11 daemon-restart | daemon-stop | daemon-start
@@ -500,3 +511,83 @@ T+3, 11, 21, 33 y 43. Manuales: dos noches de sleep ≥20 min, Electron cerrar/r
 El plan congelado **no exige reboot en la etapa de 48h** (§14: reboot "—" en 48h, "≥1" en 72h,
 contado en todo P11). No se añade ni se elimina: si ocurre un reboot en esta etapa, el monitor lo
 registra y cuenta para el requisito de P11; si no, queda para la etapa de 72h.
+
+## 19. Etapa 2 (48h) — FAIL / NO-GO y correcciones
+
+**Veredicto del harness: `FAIL / NO-GO`** (`final-report.json` del run
+`run-48h-20260915T231824Z-50fdac`), cerrada con `finalize --abort` a T+17.31h tras autorización.
+`electronCloseReopen` FAIL, `duration` FAIL (17.31h de 48h), `noCriticalIncident` UNKNOWN
+(INC-001..009 abiertos, sin reescribir). Resto de criterios con evidencia: fixtures P9/P10 PASS 2/2,
+checkpoints 2/2 sin hallazgos, base final PASS (integridad completa, FK 0, goose 170), backup T0
+re-verificado VALID, restore scratch PASS, memoria PASS.
+
+### 19.1 Causa raíz (confirmada)
+Evento Electron manual según el §8 anterior: `maintenance --reason electron` (15:19:13Z) y la app
+dev con `AO_DAEMON_COMMAND` = binario congelado. A las 15:25:28.229Z la app hizo `POST /shutdown` al
+daemon del soak (pid 13668, `ready` a las 15:20:50Z); 26 ms después lanzó el reemplazo, que salió con
+`another AO daemon holds data dir …; refusing to start`. El daemon cierra su listener HTTP antes de
+liberar `daemon.lock` (el `flock` cae con el proceso) y la app daba por terminado al anterior en
+cuanto `/healthz` dejaba de responder. Sin reintento, y con `DaemonFailureBanner` debajo de
+`ShellAuthGate`, la ventana quedó en "Preparando tu tablero" sin error. La ventana de mantenimiento
+expiró (15:49:13Z) con el daemon caído y el harness abrió un `daemon_down_unplanned` por heartbeat
+(INC-001..009, una sola caída). Evidencia: `analysis/root-cause-daemon-down-20260916.md` del run.
+
+Reproducción con el binario congelado sobre data dirs scratch
+(`frontend/src/shared/daemon-replace.e2e.test.ts`, un cliente con una petición en curso mantiene el
+proceso —y el lock— vivo tras cerrar el listener): semántica anterior **10/10 rechazos**; corregida
+**10/10 arranques**; con la base real restaurada (sin petición en curso) 10/10.
+
+### 19.2 Defectos y clasificación
+| Id | Tipo | Defecto | Corrección |
+| --- | --- | --- | --- |
+| AO-1 | bug AO | el reemplazo no esperaba la salida real del daemon anterior | `awaitPreviousDaemonExit`: PID fuera (o zombi) y `/healthz` mudo; falla cerrado ante timeout, estado ilegible u otro daemon en el puerto |
+| AO-2 | bug AO | sin reintento ni detalle ante un rechazo de lock | reintento acotado (250/500/1000 ms) sólo para el rechazo literal de lock tras un reemplazo probado y sin competidor; salida del hijo keep-alive leída de `~/.ao/daemon.log` |
+| AO-3 | bug AO | fallo de arranque invisible (loader infinito) | `ShellAuthGate` muestra `DaemonFailureBanner` mientras el supervisor reporta fallo |
+| H-1 | bug harness | `daemon_down_unplanned` deduplicado por texto con contador; `unplanned_daemon_restart` al revés (uno por run) | clave por episodio / por instancia |
+| H-2 | bug procedimiento | `electron-1` incompatible con el diseño de la app (y el script anterior lanzaba `go run`) | `p11 electron-event` (§8) |
+| H-3 | deuda harness | mantenimiento expirado con daemon caído sin registro; eventos programados podían actuar durante un evento manual | `maintenance_expired_daemon_down`; `eventInProgress` difiere lo programado |
+| H-4 | — | "harness sin versionar": **no era un defecto**; la fuente canónica es `scripts/p11/p11.py` en `feat/p11-reliability-soak`, idéntica (SHA `69ef0331…`) a las copias instaladas | ninguna |
+| H-5 | bug harness (latente) | `pid_alive` = `kill(pid, 0)` da vivo a un zombi: un daemon lanzado por el monitor y parado por otro actor | zombi = no vivo (`ps stat`), presunto vivo si `ps` no responde |
+
+H-5 no se disparó en la etapa 2 por el incidente, pero lo habría hecho en `rs-2` (T+19h: el monitor
+para un daemon que él mismo lanzó en `rs-1` → `pidGone=false` → `daemon_restart` FAIL + crítico).
+Ya aparece en la evidencia de la etapa 1: `daemon_crash_injected` registró `pidGone: false` (esperó
+30 s a un zombi del monitor); el check final pasó sólo porque el monitor lo recogió después.
+
+### 19.3 Validación (data dirs scratch, nunca `~/.ao/data`)
+Base de datos: restore del backup T0 de la etapa 2 con el binario congelado en
+`~/.ao/scratch/p11-electron-fix/base/data`, clonado (APFS) por ciclo. Huella de `~/.ao/data`
+idéntica antes y después; perfil `~/.ao/dev/electron` respaldado y restaurado byte a byte.
+
+- **V1 — camino del incidente en la app real** (daemon headless congelado sirviendo, la app lo
+  reemplaza; clientes con una petición en curso cada 2 s para que el `/shutdown` siempre drene con
+  el lock retenido): código anterior (`9c80b9b2c`) **1/5** (4 ciclos sin reemplazo en 240 s: la app
+  paró el daemon y no volvió a haber daemon); corregido **10/10**: reemplazo con el binario
+  congelado, `owner=persistent`, renderer conectado, sin `refusing to start`. En los 10 ciclos el
+  daemon anterior drenó 4–6 s tras `/shutdown` y el reemplazo arrancó ~100 ms **después** de su
+  salida.
+- **V2 — `p11 electron-event --cycles 10`** (harness/2, run scratch `selftest`): **10/10 ciclos**
+  (identidad probada, `owner=app`, renderer conectado, app y daemon salen, puerto libre), daemon
+  del harness reiniciado, `quick_check` ok, `electron_close_reopen` **pass**. El checkpoint
+  `post-electron` marca `goose_changed` (attention) sólo porque el run scratch no tenía baseline T0.
+
+### 19.4 Revisión independiente y alcance
+Revisión adversarial independiente de ambas ramas: **sin BLOCKER**. Corregidos antes de repetir la
+validación: AO — sondeo de estado que podía volver a reemplazar tras un fallo (bloqueo hasta un
+start/restart explícito), reintento decidido con salida de intentos anteriores (ahora sólo la del
+hijo), zombi en la toma del puerto, `/shutdown` sin timeout; harness — checkpoint `post-electron`
+que podía perder el lock frente a lo diferido (ahora antes de liberar el evento), restauración del
+daemon con la app aún viva (ahora no se restaura y queda `electron_event_blocked`), ventana que
+ignoraba `--hold`/`--interactive`, `pid_alive` con `ps` fallido, caída heredada de harness/1,
+comandos de operador durante el evento (rechazados), excepción sin registro (ahora `fail`), test
+del zombi que no veía `Z`.
+
+Pendiente, anterior a este cambio y **no corregido aquí** (decisión aparte, P9): la app pide
+`/shutdown` también a un daemon cuya identidad no coincide (`identity_mismatch` en
+`inspectExistingDaemon`), caso que `decidePortHolderTakeover` sí rechaza.
+
+Alcance: `p11 electron-event` para el daemon del soak antes de abrir la app, así que **no ejercita**
+el camino de reemplazo que falló; ese camino (AO-1/2/3) queda validado por V1 y por
+`daemon-replace.e2e.test.ts`, no por el soak. Los umbrales y `evaluate()` no cambian; la
+deduplicación por instancia hace que cada reinicio no planificado abra su propio incidente `high`
+(antes, uno por run): cambia la entrada del criterio, no el criterio.

@@ -218,6 +218,7 @@ class CommandLineTest(unittest.TestCase):
         args = parser.parse_args(["electron-event", "--cycles", "10", "--hold", "5"])
         self.assertIs(args.fn, p11.cmd_electron_event)
         self.assertEqual((args.cycles, args.hold, args.interactive), (10, 5, False))
+        self.assertIsNone(parser.parse_args(["electron-event", "--interactive"]).hold)
 
 
 class EvaluateTest(unittest.TestCase):
@@ -285,12 +286,22 @@ class PidAliveTest(unittest.TestCase):
         # its descriptors and flock are gone. Stage 1 recorded pidGone=false for 30 s this way.
         import signal
         import subprocess
-        pid = subprocess.Popen(["/bin/sleep", "300"], stdin=subprocess.DEVNULL, start_new_session=True).pid
-        os.kill(pid, signal.SIGKILL)
-        deadline = time.monotonic() + 5
-        while p11.pid_alive(pid) and time.monotonic() < deadline:
-            time.sleep(0.2)
-        self.assertFalse(p11.pid_alive(pid))
+        child = subprocess.Popen(["/bin/sleep", "300"], stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            os.kill(child.pid, signal.SIGKILL)
+            # Kept referenced and never waited: it stays a zombie for the whole assertion.
+            deadline = time.monotonic() + 5
+            stat = ""
+            while time.monotonic() < deadline:
+                stat = subprocess.run(["ps", "-o", "stat=", "-p", str(child.pid)], capture_output=True, text=True).stdout.strip()
+                if stat.startswith("Z"):
+                    break
+                time.sleep(0.1)
+            self.assertTrue(stat.startswith("Z"), stat)
+            os.kill(child.pid, 0)  # kill(pid, 0) still succeeds on the zombie
+            self.assertFalse(p11.pid_alive(child.pid))
+        finally:
+            child.wait()
 
     def test_live_process_is_alive(self):
         self.assertTrue(p11.pid_alive(os.getpid()))
@@ -345,6 +356,12 @@ class DaemonDownDedupeTest(HeartbeatHarness):
     def test_one_outage_is_one_incident(self):
         self.beat()
         self.beat(12, state="stopped")
+        self.assertEqual(self.codes(), ["daemon_down_unplanned"])
+
+    def test_an_outage_inherited_from_an_older_harness_is_still_one_incident(self):
+        self.beat()
+        self.run.update_state(lambda s: s.update({"downCount": 5}))  # harness/1 state: no downSince
+        self.beat(6, state="stopped")
         self.assertEqual(self.codes(), ["daemon_down_unplanned"])
 
     def test_a_second_outage_is_a_second_incident(self):
@@ -413,6 +430,9 @@ class ElectronEventTest(HeartbeatHarness):
         p11.quick_db = lambda man: {"ok": True}
         p11.checkpoint = lambda run, label, **kw: self.calls.append("checkpoint:" + label) or {"result": "ok"}
         p11.ao_cmd = lambda man, args, **kw: self.calls.append("ao " + args[0]) or (0, "", "", 0)
+        self.saved_ev["electron_processes"] = p11.electron_processes
+        self.app_running = []
+        p11.electron_processes = lambda checkout: list(self.app_running)
 
     def tearDown(self):
         for k, v in self.saved_ev.items():
@@ -449,7 +469,7 @@ class ElectronEventTest(HeartbeatHarness):
         self.assertEqual(self.run.events("electron_close_reopen")[-1]["result"], "fail")
         self.assertIsNone(p11.event_in_progress(self.run.state()))
 
-    def test_a_crashing_cycle_still_restores_the_daemon_and_clears_the_event(self):
+    def test_a_crashing_cycle_records_fail_restores_the_daemon_and_clears_the_event(self):
         def boom(*a):
             raise RuntimeError("forge died")
         p11.electron_cycle = boom
@@ -457,6 +477,42 @@ class ElectronEventTest(HeartbeatHarness):
             p11.electron_event(self.run, "/checkout", cycles=2)
         self.assertIn("start", self.calls)
         self.assertIsNone(p11.event_in_progress(self.run.state()))
+        recorded = self.run.events("electron_close_reopen")
+        self.assertEqual([e["result"] for e in recorded], ["fail"])
+        self.assertIn("forge died", recorded[0]["reason"])
+
+    def test_never_restores_the_daemon_while_the_app_is_still_running(self):
+        def cycle(run, checkout, n, hold, interactive):
+            self.app_running = [4242]  # the app survived its quit
+            return False, {"cycle": n, "checks": {"appQuit": False}}
+        p11.electron_cycle = cycle
+        res = p11.electron_event(self.run, "/checkout", cycles=2)
+        self.assertEqual(res["result"], "fail")
+        self.assertNotIn("start", self.calls)
+        self.assertNotIn("ao stop", self.calls)
+        self.assertEqual(len(self.run.events("electron_event_blocked")), 1)
+        self.assertIsNotNone(p11.event_in_progress(self.run.state()))  # still owned: nothing scheduled acts
+
+    def test_post_checkpoint_runs_before_the_event_releases_the_daemon(self):
+        p11.electron_cycle = lambda run, checkout, n, hold, interactive: (True, {"cycle": n, "checks": {"x": True}})
+        owned = []
+        p11.checkpoint = lambda run, label, **kw: owned.append(p11.event_in_progress(run.state()) is not None) or {"result": "ok"}
+        p11.electron_event(self.run, "/checkout", cycles=1)
+        self.assertEqual(owned, [True])
+
+    def test_window_covers_the_hold_and_a_short_minutes_is_refused(self):
+        self.assertGreater(p11.electron_event_minutes(self.run.man, 1, 1800), 30)
+        with self.assertRaises(SystemExit):
+            p11.electron_event(self.run, "/checkout", cycles=2, hold_sec=1800, minutes=31)
+        self.assertEqual(self.calls, [])
+
+    def test_operator_commands_wait_for_the_event(self):
+        p11.begin_event(self.run, "electron", minutes=30)
+        parser = p11.build_parser()
+        for argv in (["daemon-crash", "--confirm"], ["daemon-restart"], ["checkpoint"], ["fixtures"]):
+            args = parser.parse_args(["--run", self.run.id] + argv)
+            with self.assertRaises(SystemExit, msg=argv):
+                args.fn(args)
 
     def test_the_app_can_only_start_the_frozen_binary(self):
         saved = p11.base_env
