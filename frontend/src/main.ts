@@ -38,7 +38,7 @@ import {
 import { coerceUiSettings, readUiSettings, writeUiSettings, type UiSettings } from "./main/ui-settings";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -67,6 +67,13 @@ import {
 	resolveDaemonFromRunFile,
 } from "./shared/daemon-attach";
 import { browserDaemonOwnershipDecision, decidePortHolderTakeover } from "./shared/daemon-takeover";
+import {
+	PREVIOUS_DAEMON_EXIT_POLL_MS,
+	PREVIOUS_DAEMON_EXIT_TIMEOUT_MS,
+	awaitPreviousDaemonExit,
+	decideReplacementRetry,
+} from "./shared/daemon-replace";
+import { readProcessState } from "./main/process-state";
 import { buildDaemonEnv, resolveShellEnv, type ShellRunner } from "./shared/shell-env";
 import {
 	handleCloudDeepLink,
@@ -928,17 +935,28 @@ async function inspectExistingDaemon(
 	return { status, owner: info?.owner, appRunId: info?.appRunId };
 }
 
-async function gracefullyReplaceDaemonForBrowser(status: DaemonStatus): Promise<void> {
-	if (!status.port) throw new Error("the running daemon did not report a port");
-	const response = await fetch(`http://127.0.0.1:${status.port}/shutdown`, { method: "POST" });
+// Asks a proven daemon to stop and returns its PID once that process has
+// exited. /healthz going quiet is not enough: the daemon closes its listener
+// before it releases <data>/daemon.lock, and a replacement spawned into that
+// gap refuses to start (P11 Stage 2, 2026-09-16). See shared/daemon-replace.ts.
+async function gracefullyReplaceDaemonForBrowser(port: number | undefined, pid: number | undefined): Promise<number> {
+	if (!port) throw new Error("the running daemon did not report a port");
+	if (!pid) throw new Error("the running daemon did not report a PID, so its exit cannot be confirmed");
+	const response = await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
 	if (!response.ok) throw new Error(`daemon shutdown returned HTTP ${response.status}`);
 
-	const deadline = Date.now() + 8_000;
-	while (Date.now() < deadline) {
-		if (!(await readDaemonProbe(status.port, "healthz"))) return;
-		await new Promise<void>((resolve) => setTimeout(resolve, 200));
-	}
-	throw new Error("the previous daemon did not stop within 8 seconds");
+	const result = await awaitPreviousDaemonExit({
+		pid,
+		port,
+		probe: (p) => readDaemonProbe(p, "healthz"),
+		processState: (p) => readProcessState(p),
+		now: Date.now,
+		sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+		timeoutMs: PREVIOUS_DAEMON_EXIT_TIMEOUT_MS,
+		pollMs: PREVIOUS_DAEMON_EXIT_POLL_MS,
+	});
+	if (!result.ok) throw new Error(result.reason);
+	return pid;
 }
 
 async function refreshDaemonStatus(): Promise<DaemonStatus> {
@@ -973,12 +991,16 @@ async function refreshDaemonStatus(): Promise<DaemonStatus> {
 	return daemonStatus;
 }
 
-async function startDaemon(): Promise<DaemonStatus> {
+// A replacement that refused to start over a still-held ownership lock right
+// after this app stopped the daemon it replaced (see decideReplacementRetry).
+type ReplacementRetry = { replacedPid: number; attempt: number; keepAlive: boolean | undefined };
+
+async function startDaemon(retry?: ReplacementRetry): Promise<DaemonStatus> {
 	if (daemonStartPromise) {
 		return daemonStartPromise;
 	}
 	const startEpoch = daemonStartEpoch;
-	const promise = startDaemonInner(startEpoch).finally(() => {
+	const promise = startDaemonInner(startEpoch, retry).finally(() => {
 		if (daemonStartPromise === promise) {
 			daemonStartPromise = null;
 		}
@@ -994,7 +1016,7 @@ function resolvedDaemonPort(): number {
 	return isDev && !process.env.AO_PORT ? DEV_DAEMON_PORT : expectedDaemonPort(process.env);
 }
 
-async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
+async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): Promise<DaemonStatus> {
 	if (daemonProcess) {
 		return daemonStatus;
 	}
@@ -1021,16 +1043,32 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		return daemonStatus;
 	}
 
-	let replacementKeepAlive: boolean | undefined;
+	let replacementKeepAlive: boolean | undefined = retry?.keepAlive;
+	// The PID of the daemon this start stopped, once its exit is proven. Only a
+	// start that replaced a daemon may retry a lock refusal.
+	let replacedPid: number | null = retry?.replacedPid ?? null;
+	// A retry only re-spawns into a data dir it just proved free. Anything that
+	// has claimed the port or run-file meanwhile is ambiguous: fail closed, never
+	// replace a second time.
+	const refuseRetry = (holder: string): DaemonStatus => {
+		setDaemonStatus({
+			state: "error",
+			message: `AO daemon did not start: ${holder} appeared while retrying the replacement; AO will not replace it again.`,
+			details: daemonOutput.trim() || undefined,
+			code: "not_ready",
+		});
+		return daemonStatus;
+	};
 	const existing = await inspectExistingDaemon(launch);
 	if (startEpoch !== daemonStartEpoch) {
 		return daemonStatus;
 	}
+	if (existing && retry) return refuseRetry(`an AO daemon (pid ${existing.status.pid ?? "unknown"})`);
 	if (existing) {
 		const ownership = browserDaemonOwnershipDecision(appRunId, existing);
 		if (ownership.action === "replace") {
 			try {
-				await gracefullyReplaceDaemonForBrowser(existing.status);
+				replacedPid = await gracefullyReplaceDaemonForBrowser(existing.status.port, existing.status.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
 				setDaemonStatus({
@@ -1068,6 +1106,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	if (startEpoch !== daemonStartEpoch) {
 		return daemonStatus;
 	}
+	if (directDaemon && retry) return refuseRetry(`an AO daemon (pid ${directDaemon.pid ?? "unknown"})`);
 	if (directDaemon) {
 		let portAttachOwner: string | undefined;
 		let portAttachAppRunId: string | undefined;
@@ -1094,7 +1133,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		});
 		if (ownership.action === "replace") {
 			try {
-				await gracefullyReplaceDaemonForBrowser(directDaemon);
+				replacedPid = await gracefullyReplaceDaemonForBrowser(directDaemon.port, directDaemon.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
 				setDaemonStatus({
@@ -1136,6 +1175,9 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		runFilePidAlive: runFilePid ? processAlive(runFilePid) : false,
 		identityError: orphanProbe ? daemonIdentityError(launch, orphanProbe) : null,
 	});
+	if (retry && takeover.action !== "spawn") {
+		return refuseRetry(orphanProbe ? `an AO daemon (pid ${orphanProbe.pid})` : `a live run-file process (pid ${runFilePid})`);
+	}
 	if (takeover.action === "refuse") {
 		setDaemonStatus({
 			state: "error",
@@ -1146,7 +1188,8 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	}
 	if (takeover.action === "graceful_shutdown" && orphanProbe) {
 		try {
-			await gracefullyReplaceDaemonForBrowser({ ...daemonStatus, port: resolvedDaemonPort() });
+			// decidePortHolderTakeover proved probe.pid === runFilePid.
+			replacedPid = await gracefullyReplaceDaemonForBrowser(resolvedDaemonPort(), orphanProbe.pid);
 		} catch (err) {
 			setDaemonStatus({
 				state: "error",
@@ -1176,7 +1219,8 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		return daemonStatus;
 	}
 
-	daemonOutput = "";
+	// A retry keeps the previous attempt's output: it is the evidence if all fail.
+	if (!retry) daemonOutput = "";
 	setDaemonStatus({ state: "starting" });
 	if (launch.source === "bundled") {
 		try {
@@ -1213,10 +1257,15 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	const keep = replacementKeepAlive ?? keepDaemonAlive(process.env);
 	let keepDaemonLogFd: number | undefined;
 	let stdio: "pipe" | "ignore" | ["pipe", number | "ignore", number | "ignore"] = "pipe";
+	const keepLogPath = path.join(os.homedir(), ".ao", "daemon.log");
+	// Where this child's keep-alive log output starts: its only diagnostic, since
+	// there are no pipes to capture. Read back if it fails to start.
+	let keepLogOffset = 0;
 	if (keep) {
-		const logPath = path.join(os.homedir(), ".ao", "daemon.log");
+		const logPath = keepLogPath;
 		try {
 			keepDaemonLogFd = openSync(logPath, "a");
+			keepLogOffset = statSync(logPath).size;
 			stdio = ["pipe", keepDaemonLogFd, keepDaemonLogFd];
 		} catch {
 			// Log redirect failed (e.g. ~/.ao not creatable, permission denied):
@@ -1411,17 +1460,97 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 			setDaemonStatus({ state: "stopped" });
 			return;
 		}
-		setDaemonStatus({
+		if (keep) appendDaemonOutput(readDaemonLogSince(keepLogPath, keepLogOffset));
+		const exitedStatus: DaemonStatus = {
 			state: "stopped",
 			message: signal ? `Daemon exited with ${signal}` : `Daemon exited with code ${code ?? "unknown"}`,
 			details: daemonOutput.trim() || undefined,
 			code: "exited",
 			exitCode: code,
 			signal,
-		});
+		};
+		if (portConfirmed || replacedPid === null) {
+			setDaemonStatus(exitedStatus);
+			return;
+		}
+		// It never came up, and this start had replaced a daemon: decide whether
+		// the one justified retry applies. Keep "starting" visible meanwhile.
+		void (async () => {
+			const port = resolvedDaemonPort();
+			const portProbe = await readDaemonProbe(port, "healthz");
+			let liveRunFilePid: number | null = null;
+			const rfp = runFilePath();
+			if (rfp) {
+				try {
+					const info = parseRunFile(await readFile(rfp, "utf8"));
+					if (info?.pid && (await readProcessState(info.pid)) === "alive") liveRunFilePid = info.pid;
+				} catch {
+					// no run-file: nothing claims the data dir through it
+				}
+			}
+			const attempt = retry?.attempt ?? 0;
+			const decision = decideReplacementRetry({
+				replacedPid,
+				attempt,
+				exitCode: code,
+				signal,
+				output: daemonOutput,
+				portProbe,
+				liveRunFilePid,
+			});
+			if (startEpoch !== daemonStartEpoch || daemonProcess) return;
+			if (decision.action === "fail") {
+				setDaemonStatus({
+					...exitedStatus,
+					message: `${exitedStatus.message}: ${decision.reason}`,
+				});
+				return;
+			}
+			console.warn(
+				`AO: replacement daemon refused to start over a held lock; retry ${attempt + 1} in ${decision.delayMs}ms`,
+			);
+			setDaemonStatus({ state: "starting" });
+			setTimeout(() => {
+				if (startEpoch !== daemonStartEpoch || daemonProcess) return;
+				void startDaemon({ replacedPid, attempt: attempt + 1, keepAlive: keep }).catch((error: unknown) => {
+					setDaemonStatus({
+						state: "error",
+						message: `Could not start the AO daemon: ${error instanceof Error ? error.message : String(error)}`,
+						details: daemonOutput.trim() || undefined,
+						code: "spawn_failed",
+					});
+				});
+			}, decision.delayMs);
+		})();
 	});
 
 	return daemonStatus;
+}
+
+const MAX_DAEMON_LOG_READBACK_BYTES = 64 * 1024;
+
+// The tail of what a keep-alive daemon wrote to ~/.ao/daemon.log since `offset`.
+function readDaemonLogSince(logPath: string, offset: number): string {
+	let fd: number | undefined;
+	try {
+		const size = statSync(logPath).size;
+		if (size <= offset) return "";
+		const start = Math.max(offset, size - MAX_DAEMON_LOG_READBACK_BYTES);
+		const buffer = Buffer.alloc(size - start);
+		fd = openSync(logPath, "r");
+		const read = readSync(fd, buffer, 0, buffer.length, start);
+		return buffer.subarray(0, read).toString("utf8");
+	} catch {
+		return "";
+	} finally {
+		if (fd !== undefined) {
+			try {
+				closeSync(fd);
+			} catch {
+				// best-effort
+			}
+		}
+	}
 }
 
 // Signal the daemon's whole process group so the kill reaches the real daemon
