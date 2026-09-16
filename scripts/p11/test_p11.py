@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -214,6 +215,9 @@ class CommandLineTest(unittest.TestCase):
         args = parser.parse_args(["maintenance", "--reason", "electron", "--minutes", "20"])
         self.assertIs(args.fn, p11.cmd_maintenance)
         self.assertEqual((args.reason, args.minutes, args.close), ("electron", 20, False))
+        args = parser.parse_args(["electron-event", "--cycles", "10", "--hold", "5"])
+        self.assertIs(args.fn, p11.cmd_electron_event)
+        self.assertEqual((args.cycles, args.hold, args.interactive), (10, 5, False))
 
 
 class EvaluateTest(unittest.TestCase):
@@ -272,6 +276,201 @@ class EvaluateTest(unittest.TestCase):
         rel = self.run.evidence("checkpoints/x.json", {"a": 1})
         self.assertEqual(os.stat(self.run.p(rel)).st_mode & 0o777, 0o600)
         self.assertEqual(os.stat(self.run.p("checkpoints")).st_mode & 0o777, 0o700)
+
+
+class PidAliveTest(unittest.TestCase):
+    def test_zombie_child_is_not_alive(self):
+        # A daemon the monitor spawned and dropped (daemon_start) and that another actor then
+        # stopped stays a zombie until this process reaps it: kill(pid, 0) still succeeds, but
+        # its descriptors and flock are gone. Stage 1 recorded pidGone=false for 30 s this way.
+        import signal
+        import subprocess
+        pid = subprocess.Popen(["/bin/sleep", "300"], stdin=subprocess.DEVNULL, start_new_session=True).pid
+        os.kill(pid, signal.SIGKILL)
+        deadline = time.monotonic() + 5
+        while p11.pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        self.assertFalse(p11.pid_alive(pid))
+
+    def test_live_process_is_alive(self):
+        self.assertTrue(p11.pid_alive(os.getpid()))
+
+
+class HeartbeatHarness(unittest.TestCase):
+    """Heartbeats with every observation stubbed: only the state machine runs."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.saved = {k: getattr(p11, k) for k in ("ROOT", "clock_sample", "daemon_status", "daemon_identity",
+                                                    "system_stats", "db_files", "ps_one", "rotate_daemon_log")}
+        p11.ROOT = self.tmp
+        rid = "run-48h-test"
+        os.makedirs(os.path.join(self.tmp, "runs", rid))
+        man = {"runId": rid, "stage": "48h", "targetHours": 48, "heartbeatSeconds": 300,
+               "schedule": p11.STAGES["48h"]["schedule"], "manualEvents": [], "required": p11.STAGES["48h"]["required"],
+               "thresholds": TH, "ao": {"port": 3002}, "limitations": [], "platform": {}, "eccSha": "x"}
+        p11.write_json(os.path.join(self.tmp, "runs", rid, "manifest.json"), man)
+        self.run = p11.Run(rid)
+        self.wall = 1_000_000.0
+        self.daemon = {"state": "ready", "pid": 10, "instanceId": "aod-1"}
+        p11.clock_sample = lambda: {"wall": self.wall, "mono": self.wall, "up": self.wall, "boot": 1, "sleep": 0, "wake": 1}
+        p11.daemon_status = lambda man: dict(self.daemon)
+        p11.daemon_identity = lambda man, st: {"problems": []}
+        p11.system_stats = lambda: {}
+        p11.db_files = lambda man: {}
+        p11.ps_one = lambda pid: None
+        p11.rotate_daemon_log = lambda run: None
+        self.real_time = p11.time.time
+        p11.time.time = lambda: self.wall
+
+    def tearDown(self):
+        p11.time.time = self.real_time
+        for k, v in self.saved.items():
+            setattr(p11, k, v)
+
+    def beat(self, n=1, state=None, instance=None):
+        for _ in range(n):
+            if state:
+                self.daemon["state"] = state
+            if instance:
+                self.daemon["instanceId"] = instance
+            self.wall += 300
+            p11.heartbeat(self.run)
+
+    def codes(self):
+        return [i["code"] for i in p11.incidents(self.run)]
+
+
+class DaemonDownDedupeTest(HeartbeatHarness):
+    def test_one_outage_is_one_incident(self):
+        self.beat()
+        self.beat(12, state="stopped")
+        self.assertEqual(self.codes(), ["daemon_down_unplanned"])
+
+    def test_a_second_outage_is_a_second_incident(self):
+        self.beat()
+        self.beat(4, state="stopped")
+        self.beat(1, state="ready")
+        self.beat(4, state="stopped")
+        self.assertEqual(self.codes(), ["daemon_down_unplanned", "daemon_down_unplanned"])
+
+    def test_each_unplanned_restart_is_its_own_incident(self):
+        self.beat()
+        self.beat(1, instance="aod-2")
+        self.beat(1, instance="aod-3")
+        self.assertEqual(self.codes(), ["unplanned_daemon_restart", "unplanned_daemon_restart"])
+
+
+class MaintenanceExpiryTest(HeartbeatHarness):
+    def test_expired_window_with_daemon_down_is_recorded_once(self):
+        self.beat()
+        p11.open_maintenance(self.run, "manual:electron", minutes=10)
+        self.beat(1, state="stopped")
+        self.assertEqual(self.run.events("maintenance_expired_daemon_down"), [])
+        self.beat(5, state="stopped")
+        expired = self.run.events("maintenance_expired_daemon_down")
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(expired[0]["result"], "attention")
+        self.assertEqual(expired[0]["maintenance"], "manual:electron")
+
+    def test_expired_window_with_daemon_up_is_not_an_attention(self):
+        self.beat()
+        p11.open_maintenance(self.run, "manual:electron", minutes=10)
+        self.beat(5)
+        self.assertEqual(self.run.events("maintenance_expired_daemon_down"), [])
+
+
+class EventInProgressTest(HeartbeatHarness):
+    def test_scheduled_restart_waits_for_an_operator_event(self):
+        calls = []
+        saved = (p11.daemon_restart, p11.active_work)
+        p11.daemon_restart = lambda run, reason: calls.append(reason)
+        p11.active_work = lambda man: (0, 0)
+        try:
+            p11.begin_event(self.run, "electron", minutes=30)
+            item = {"id": "rs-2", "atHours": 19, "actions": ["daemon_restart"]}
+            self.assertFalse(p11.run_scheduled(self.run, item))
+            self.assertEqual(calls, [])
+            p11.end_event(self.run)
+            self.assertTrue(p11.run_scheduled(self.run, item))
+            self.assertEqual(calls, ["scheduled:rs-2"])
+        finally:
+            p11.daemon_restart, p11.active_work = saved
+
+
+class ElectronEventTest(HeartbeatHarness):
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        self.saved_ev = {k: getattr(p11, k) for k in ("electron_preflight", "daemon_stop", "daemon_start", "electron_cycle",
+                                                       "quick_db", "checkpoint", "ao_cmd")}
+        self.run.man["ao"].update({"binary": "/frozen/ao bin", "dataDir": "/d", "runFile": "/r.json", "port": 3002,
+                                   "extraEnv": {}})
+        self.run.man.update({"loginShell": "/bin/sh", "pathFloor": "/usr/bin:/bin"})
+        p11.electron_preflight = lambda man, checkout: []
+        p11.daemon_stop = lambda run, reason: self.calls.append("stop") or self.daemon.update(state="stopped") or {"result": "pass"}
+        p11.daemon_start = lambda run, reason: self.calls.append("start") or {"instanceId": "aod-9"}
+        p11.quick_db = lambda man: {"ok": True}
+        p11.checkpoint = lambda run, label, **kw: self.calls.append("checkpoint:" + label) or {"result": "ok"}
+        p11.ao_cmd = lambda man, args, **kw: self.calls.append("ao " + args[0]) or (0, "", "", 0)
+
+    def tearDown(self):
+        for k, v in self.saved_ev.items():
+            setattr(p11, k, v)
+        super().tearDown()
+
+    def test_refuses_without_touching_the_daemon_when_preflight_fails(self):
+        p11.electron_preflight = lambda man, checkout: ["checkout HEAD abc is not the frozen eccSha x"]
+        with self.assertRaises(SystemExit):
+            p11.electron_event(self.run, "/checkout")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.run.events("electron_event_refused")), 1)
+        self.assertEqual(self.run.events("electron_close_reopen"), [])
+
+    def test_all_cycles_pass_restarts_the_soak_daemon_and_records_pass(self):
+        p11.electron_cycle = lambda run, checkout, n, hold, interactive: (True, {"cycle": n, "checks": {"x": True}})
+        res = p11.electron_event(self.run, "/checkout", cycles=3)
+        self.assertEqual(res["result"], "pass")
+        self.assertEqual(self.calls, ["stop", "start", "checkpoint:post-electron"])
+        self.assertEqual(self.run.events("electron_close_reopen")[-1]["result"], "pass")
+        self.assertIsNone(p11.event_in_progress(self.run.state()))
+
+    def test_a_failed_cycle_stops_the_event_records_fail_and_still_restores_the_daemon(self):
+        seen = []
+
+        def cycle(run, checkout, n, hold, interactive):
+            seen.append(n)
+            return n < 2, {"cycle": n, "checks": {"rendererConnected": n < 2}}
+        p11.electron_cycle = cycle
+        res = p11.electron_event(self.run, "/checkout", cycles=5)
+        self.assertEqual(seen, [1, 2])
+        self.assertEqual(res["result"], "fail")
+        self.assertIn("start", self.calls)
+        self.assertEqual(self.run.events("electron_close_reopen")[-1]["result"], "fail")
+        self.assertIsNone(p11.event_in_progress(self.run.state()))
+
+    def test_a_crashing_cycle_still_restores_the_daemon_and_clears_the_event(self):
+        def boom(*a):
+            raise RuntimeError("forge died")
+        p11.electron_cycle = boom
+        with self.assertRaises(RuntimeError):
+            p11.electron_event(self.run, "/checkout", cycles=2)
+        self.assertIn("start", self.calls)
+        self.assertIsNone(p11.event_in_progress(self.run.state()))
+
+    def test_the_app_can_only_start_the_frozen_binary(self):
+        saved = p11.base_env
+        p11.base_env = lambda man: ({"PATH": "/usr/bin", "AO_KEEP_DAEMON": "1", "AO_DAEMON_COMMAND": "go run"}, "test")
+        try:
+            env = p11.electron_env(self.run.man)
+        finally:
+            p11.base_env = saved
+        self.assertEqual(env["AO_DAEMON_COMMAND"], "'/frozen/ao bin' daemon")
+        self.assertEqual((env["AO_DATA_DIR"], env["AO_RUN_FILE"], env["AO_PORT"]), ("/d", "/r.json", "3002"))
+        self.assertNotIn("AO_KEEP_DAEMON", env)
+
+    def test_preflight_rejects_a_checkout_without_frontend(self):
+        self.assertTrue(self.saved_ev["electron_preflight"](self.run.man, tempfile.mkdtemp()))
 
 
 if __name__ == "__main__":

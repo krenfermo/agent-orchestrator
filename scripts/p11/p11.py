@@ -21,6 +21,7 @@ import os
 import plistlib
 import pwd
 import re
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -32,7 +33,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 
-HARNESS_VERSION = "p11-harness/1"
+HARNESS_VERSION = "p11-harness/2"
 HOME = pwd.getpwuid(os.getuid()).pw_dir
 ROOT = os.environ.get("P11_ROOT") or os.path.join(HOME, ".ao", "soak", "p11")
 LAUNCHD_LABEL = "com.aoagents.p11-soak"
@@ -121,7 +122,7 @@ STAGES = {
             {"id": "sleep-1", "window": "first night", "do": "let the Mac sleep >= 20 min"},
             {"id": "sleep-2", "window": "second night", "do": "let the Mac sleep >= 20 min"},
             {"id": "electron-1", "window": "T+14h..T+30h",
-             "do": "open the desktop app (scripts/ao-electron-real.sh), use it, quit it; run p11 event electron_close_reopen --result pass|fail --note ..."},
+             "do": "p11 electron-event (stops the soak daemon, opens/uses/quits the dev app twice on the frozen binary, restarts the soak daemon, records electron_close_reopen)"},
             {"id": "crash-1", "window": "T+26h..T+40h", "do": "p11 daemon-crash --confirm --restart"},
             {"id": "finalize", "window": ">= T+48h", "do": "p11 finalize"},
         ],
@@ -142,7 +143,7 @@ STAGES = {
             {"id": "nights", "window": "all three nights", "do": "normal day/night use; let the Mac sleep"},
             {"id": "reboot-1", "window": "any time, if not done in 48h",
              "do": "reboot the Mac; after login run p11 daemon-start and p11 checkpoint --label post-reboot"},
-            {"id": "electron-1", "window": "any day", "do": "open, use, quit the desktop app; p11 event electron_close_reopen --result ..."},
+            {"id": "electron-1", "window": "any day", "do": "p11 electron-event"},
             {"id": "crash-1", "window": "T+20h..T+60h", "do": "p11 daemon-crash --confirm --restart"},
             {"id": "finalize", "window": ">= T+72h", "do": "p11 finalize"},
         ],
@@ -452,13 +453,21 @@ def daemon_identity(man, st):
 
 
 def pid_alive(pid):
+    """True while pid exists and has not exited. kill(pid, 0) also succeeds on a zombie: a process
+    that exited (every descriptor, and its flock, released) whose parent has not reaped it yet --
+    e.g. a daemon this monitor spawned and someone else stopped. A zombie is not alive. When ps
+    cannot answer, the process is presumed alive (never report a pid gone without proof)."""
     try:
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    rc, out, _, _ = run_cmd(["ps", "-o", "stat=", "-p", str(pid)], 10)
+    stat = out.strip()
+    if rc == 1 and not stat:
+        return False  # vanished (or reaped by run_cmd's own child bookkeeping) between the two checks
+    return not stat.startswith("Z")
 
 
 def port_listeners(port):
@@ -805,8 +814,11 @@ def open_incident(run, code, severity, summary, invariant="", evidence=None, sou
     return inc_id
 
 
-def auto_incident_once(run, code, severity, summary, evidence=None, invariant=""):
-    key = "%s:%s" % (code, summary[:80])
+def auto_incident_once(run, code, severity, summary, evidence=None, invariant="", key=None):
+    """Open an incident once per key. The default key is the summary text, which is only right for
+    summaries that name one fixed cause; anything carrying a changing value (a count, a duration)
+    must pass the episode's own key or every observation opens a new incident."""
+    key = key or "%s:%s" % (code, summary[:80])
     fresh = run.update_state(lambda s: (key not in s.setdefault("autoIncidentKeys", [])) and
                              (s["autoIncidentKeys"].append(key) or True))
     if fresh:
@@ -838,6 +850,22 @@ def open_maintenance(run, reason, minutes=None):
 
 def close_maintenance(run):
     run.update_state(lambda s: s.pop("maintenance", None))
+
+
+def begin_event(run, kind, minutes):
+    """An operator event (e.g. electron-event) owns the daemon until end_event: scheduled restarts,
+    crashes and checkpoints wait for it instead of acting on a daemon it is stopping and starting."""
+    now = time.time()
+    run.update_state(lambda s: s.update({"eventInProgress": {"kind": kind, "opened": now, "expires": now + minutes * 60}}))
+
+
+def end_event(run):
+    run.update_state(lambda s: s.pop("eventInProgress", None))
+
+
+def event_in_progress(st, now=None):
+    e = st.get("eventInProgress")
+    return e if e and (now or time.time()) < e.get("expires", 0) else None
 
 
 # ----------------------------------------------------------------------------- heartbeat
@@ -897,22 +925,40 @@ def heartbeat(run, monitor_pid=None):
                                 {"previous": prev_inst, "instanceId": inst, "planned": planned}))
                 if not planned:
                     pending.append(("__incident__", "high", "unplanned_daemon_restart",
-                                    {"summary": "daemon instance changed outside a planned event"}))
+                                    {"summary": "daemon instance changed outside a planned event (%s -> %s)" % (prev_inst, inst),
+                                     "key": "unplanned_daemon_restart:%s" % inst}))
             s["daemonInstance"] = inst
             s["daemonInstanceSince"] = s.get("daemonInstanceSince") if prev_inst == inst else now
             if s.get("downCount"):
-                pending.append(("daemon_available", "ok", "", {"afterHeartbeats": s["downCount"]}))
+                pending.append(("daemon_available", "ok", "", {"afterHeartbeats": s["downCount"],
+                                                               "downSince": iso(s["downSince"]) if s.get("downSince") else None}))
             s["downCount"] = 0
+            s.pop("downSince", None)
             for problem in ident["problems"]:
                 pending.append(("__incident__", "critical", problem, {"summary": "daemon identity: " + problem}))
         else:
             s["downCount"] = s.get("downCount", 0) + 1
             if s["downCount"] == 1:
+                s["downSince"] = now
                 pending.append(("daemon_unavailable", "ok" if maintenance_open(s, now) else "attention", "",
                                 {"state": state, "maintenance": (s.get("maintenance") or {}).get("reason")}))
             if s["downCount"] >= th["daemonDownHeartbeats"] and not maintenance_open(s, now):
+                # One incident per outage episode (keyed by when it began), however many heartbeats
+                # it lasts; the episode's end is the daemon_available event.
+                down_since = s.get("downSince") or now
                 pending.append(("__incident__", "high", "daemon_down_unplanned",
-                                {"summary": "daemon %s for %d heartbeats outside a maintenance window" % (state, s["downCount"])}))
+                                {"summary": "daemon %s since %s, outside a maintenance window (%d heartbeats when opened)"
+                                            % (state, iso(down_since), s["downCount"]),
+                                 "key": "daemon_down_unplanned:%s" % iso(down_since)}))
+        m = s.get("maintenance")
+        if m and now >= m.get("expires", 0) and not m.get("expiryRecorded"):
+            m["expiryRecorded"] = True
+            if state != "ready":
+                pending.append(("maintenance_expired_daemon_down", "attention",
+                                "maintenance window expired with the daemon %s" % state,
+                                {"maintenance": m.get("reason"), "openedAt": iso(m.get("opened")),
+                                 "expiredAt": iso(m.get("expires")),
+                                 "downSince": iso(s["downSince"]) if s.get("downSince") else None}))
         if sysm.get("diskFreeGB") is not None and sysm["diskFreeGB"] < th["diskFreeMinGB"]:
             pending.append(("disk_low", "attention", "", {"diskFreeGB": sysm["diskFreeGB"]}))
         return iv
@@ -925,7 +971,7 @@ def heartbeat(run, monitor_pid=None):
     run.event("heartbeat", **rec)
     for etype, result, reason, meta in pending:
         if etype == "__incident__":
-            auto_incident_once(run, reason, result, meta["summary"])
+            auto_incident_once(run, reason, result, meta["summary"], key=meta.get("key"))
         else:
             run.event(etype, result, reason, **meta)
     return rec
@@ -1414,6 +1460,191 @@ def daemon_crash(run, restart):
     return {"result": result, "checks": checks}
 
 
+# ----------------------------------------------------------------------------- electron event
+
+ELECTRON_READY_SEC = 240        # app launch (forge build + window) until the daemon serves and the renderer asks
+ELECTRON_QUIT_SEC = 60          # Ctrl+C to the dev process group until every process in it is gone
+APP_DAEMON_EXIT_SEC = 60        # app gone until its app-owned daemon self-stops (supervisor EOF + grace)
+
+
+def electron_bundle(checkout):
+    return os.path.join(checkout, "frontend", "node_modules", "electron", "dist", "Electron.app")
+
+
+def electron_processes(checkout):
+    """PIDs running this checkout's Electron binary (the dev app), matched by full path, never by name."""
+    bundle = electron_bundle(checkout)
+    rc, out, _, _ = run_cmd(["ps", "-axo", "pid=,command="], 20)
+    pids = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].startswith(bundle):
+            pids.append(int(parts[0]))
+    return sorted(pids)
+
+
+def electron_preflight(man, checkout):
+    """Everything that must hold before the event touches the daemon. Returns a list of problems."""
+    problems = []
+    if not checkout or not os.path.isdir(os.path.join(checkout, "frontend")):
+        return ["electron checkout %r has no frontend/" % checkout]
+    rc, head, _, _ = run_cmd(["git", "-C", checkout, "rev-parse", "HEAD"], 20)
+    if rc != 0 or head.strip() != man["eccSha"]:
+        problems.append("checkout HEAD %s is not the frozen eccSha %s" % (head.strip() or "?", man["eccSha"]))
+    rc, dirty, _, _ = run_cmd(["git", "-C", checkout, "status", "--porcelain", "--untracked-files=no", "--", "frontend"], 20)
+    if rc != 0 or dirty.strip():
+        problems.append("checkout frontend/ has uncommitted changes")
+    framework = os.path.join(electron_bundle(checkout), "Contents", "Frameworks", "Electron Framework.framework")
+    if not os.path.isdir(framework):
+        problems.append("Electron is not fully installed in the checkout (%s missing)" % framework)
+    if electron_processes(checkout):
+        problems.append("this checkout's Electron app is already running")
+    if sha256_file(man["ao"]["binary"]) != man["ao"]["binarySha256"]:
+        problems.append("frozen AO binary does not match the manifest")
+    return problems
+
+
+def read_run_file(man):
+    return read_json(man["ao"]["runFile"], None)
+
+
+def electron_env(man):
+    """The dev app's environment: the frozen data dir, run-file and port, and the frozen binary as the
+    ONLY daemon command. Nothing else can start a daemon (no `go run`, no bundled binary)."""
+    env = ao_env(man)
+    env["AO_DAEMON_COMMAND"] = "%s daemon" % shlex.quote(man["ao"]["binary"])
+    env.pop("AO_KEEP_DAEMON", None)
+    return env
+
+
+def electron_cycle(run, checkout, n, hold_sec, interactive):
+    """One open -> use -> quit of the dev app. The harness daemon is already stopped, so the app spawns
+    and owns the frozen daemon (owner=app) and that daemon must stop when the app quits."""
+    man = run.man
+    log_rel = "process/electron-%s-c%d.log" % (stamp(), n)
+    log_fd = open_private(run.p(log_rel), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    t = time.monotonic()
+    proc = subprocess.Popen(["npm", "run", "dev"], cwd=os.path.join(checkout, "frontend"), env=electron_env(man),
+                            stdin=subprocess.DEVNULL, stdout=log_fd, stderr=log_fd, start_new_session=True, close_fds=True)
+    os.close(log_fd)
+    checks = {"appDaemonReady": False, "identityProven": False, "ownerApp": False, "rendererConnected": False,
+              "noLockRefusal": False, "appQuit": False, "appDaemonExited": False, "portReleased": False}
+    facts = {"cycle": n, "log": log_rel, "launcherPid": proc.pid}
+    app_daemon_pid = None
+    try:
+        while time.monotonic() - t < ELECTRON_READY_SEC and proc.poll() is None:
+            st = daemon_status(man)
+            text = open(run.p(log_rel), errors="replace").read()
+            if st.get("state") == "ready":
+                ident = daemon_identity(man, st)
+                rf = read_run_file(man) or {}
+                app_daemon_pid = st.get("pid")
+                checks["appDaemonReady"] = True
+                checks["identityProven"] = not ident["problems"]
+                checks["ownerApp"] = rf.get("owner") == "app" and bool(rf.get("appRunId")) and rf.get("pid") == st.get("pid")
+                checks["rendererConnected"] = "path=/api/v1/auth/me" in text
+                facts.update({"daemonPid": st.get("pid"), "instanceId": st.get("instanceId"),
+                              "identityProblems": ident["problems"], "executablePath": ident.get("executablePath"),
+                              "owner": rf.get("owner")})
+                if checks["rendererConnected"]:
+                    break
+            time.sleep(2)
+        facts["readySec"] = round(time.monotonic() - t, 1)
+        if checks["rendererConnected"]:
+            if interactive:
+                print("electron-event cycle %d: the app is up. Use it, then quit it (Cmd+Q)." % n, flush=True)
+                proc.wait(timeout=hold_sec)
+            else:
+                time.sleep(hold_sec)
+    except subprocess.TimeoutExpired:
+        facts["interactiveTimeout"] = True
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGINT)  # Ctrl+C to the dev process group, as an operator would
+            except ProcessLookupError:
+                pass
+        q = time.monotonic()
+        while (proc.poll() is None or electron_processes(checkout)) and time.monotonic() - q < ELECTRON_QUIT_SEC:
+            time.sleep(1)
+        checks["appQuit"] = proc.poll() is not None and not electron_processes(checkout)
+        if not checks["appQuit"]:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            facts["forcedQuit"] = True
+    text = open(run.p(log_rel), errors="replace").read()
+    checks["noLockRefusal"] = "refusing to start" not in text
+    if app_daemon_pid:
+        q = time.monotonic()
+        while pid_alive(app_daemon_pid) and time.monotonic() - q < APP_DAEMON_EXIT_SEC:
+            time.sleep(1)
+        checks["appDaemonExited"] = not pid_alive(app_daemon_pid)
+    checks["portReleased"] = not port_listeners(man["ao"]["port"])
+    facts["checks"] = checks
+    return all(checks.values()), facts
+
+
+def electron_event(run, checkout, cycles=2, hold_sec=20, interactive=False, minutes=None):
+    """P11 electron close/reopen, deterministically: stop the soak daemon through the harness, open the
+    dev app on the frozen data dir with the frozen binary as its only daemon command, use and quit it
+    `cycles` times, then start the harness daemon again and checkpoint. Records electron_close_reopen."""
+    man = run.man
+    problems = electron_preflight(man, checkout)
+    st = daemon_status(man)
+    if st.get("state") != "ready":
+        problems.append("the soak daemon is %s, not ready" % st.get("state"))
+    elif daemon_identity(man, st)["problems"]:
+        problems.append("the soak daemon identity is not proven: %s" % daemon_identity(man, st)["problems"])
+    if problems:
+        run.event("electron_event_refused", "refused", "; ".join(problems), checkout=checkout)
+        die("electron-event refused: %s" % "; ".join(problems))
+    minutes = minutes or max(man["thresholds"]["maintenanceWindowMin"], cycles * 10 + 10)
+    begin_event(run, "electron", minutes)
+    open_maintenance(run, "electron-event", minutes)
+    run.event("electron_event_started", "ok", checkout=checkout, cycles=cycles, holdSec=hold_sec,
+              interactive=interactive, maintenanceMin=minutes, previousInstance=st.get("instanceId"))
+    results = []
+    restart = None
+    try:
+        stop = daemon_stop(run, "electron-event")
+        open_maintenance(run, "electron-event", minutes)  # daemon_stop opened its own, shorter window
+        if stop.get("result") != "pass":
+            results.append({"cycle": 0, "checks": {"harnessDaemonStopped": False}, "stop": stop})
+        else:
+            for n in range(1, cycles + 1):
+                ok, facts = electron_cycle(run, checkout, n, hold_sec, interactive)
+                results.append(facts)
+                run.event("electron_cycle", "pass" if ok else "fail", **facts)
+                if not ok:
+                    break
+    finally:
+        # Hand the data dir back to the soak's own daemon whatever happened above. A daemon still
+        # serving here is only stopped through `ao stop` (never signalled), and only if it is the frozen
+        # binary on this data dir.
+        left = daemon_status(man)
+        if left.get("state") == "ready" and not daemon_identity(man, left)["problems"]:
+            ao_cmd(man, ["stop", "--json", "--timeout", "120s"], timeout=180)
+        try:
+            restart = daemon_start(run, "electron-event")
+        except SystemExit as e:
+            restart = {"error": str(e)}
+        end_event(run)
+    db = quick_db(man)
+    cp = checkpoint(run, "post-electron", trigger="electron-event") if isinstance(restart, dict) and restart.get("instanceId") else None
+    checks = {"harnessDaemonStopped": bool(results) and results[0].get("cycle") != 0,
+              "allCyclesPassed": len(results) == cycles and all(all(r["checks"].values()) for r in results),
+              "harnessDaemonRestarted": isinstance(restart, dict) and bool(restart.get("instanceId")) and not restart.get("problems"),
+              "dbQuickCheck": bool(db.get("ok")), "postCheckpointNotFailed": bool(cp) and cp.get("result") != "fail"}
+    result = "pass" if all(checks.values()) else "fail"
+    run.event("electron_close_reopen", result, "electron-event: %d/%d cycles" % (
+        sum(1 for r in results if r.get("cycle") and all(r["checks"].values())), cycles),
+        checks=checks, cycles=results, checkout=checkout,
+        instanceId=(restart or {}).get("instanceId") if isinstance(restart, dict) else None)
+    return {"result": result, "checks": checks, "cycles": results}
+
+
 # ----------------------------------------------------------------------------- monitor
 
 def due_items(schedule, elapsed_h, done):
@@ -1435,6 +1666,10 @@ def due_items(schedule, elapsed_h, done):
 def run_scheduled(run, item):
     acts = item["actions"]
     man = run.man
+    ev = event_in_progress(run.state())
+    if ev:
+        # An operator event owns the daemon right now; the item stays due and runs after it.
+        return False
     if "daemon_restart" in acts:
         runs, sess = active_work(man)
         first = run.state().get("deferred", {}).get(item["id"])
@@ -1756,6 +1991,7 @@ def cmd_init(args):
         "fixtures": fixtures, "srcSnapshot": src, "scratchPort": args.scratch_port,
         "scratchRestoreFlags": args.scratch_restore_flag or [],
         "electronPath": args.electron_path or "",
+        "electronCheckout": os.path.abspath(args.electron_checkout) if args.electron_checkout else "",
         "pathFloor": args.path_floor, "loginShell": args.login_shell,
         "platform": {"system": os.uname().sysname, "release": os.uname().release, "machine": os.uname().machine,
                      "macos": run_cmd(["sw_vers", "-productVersion"], 10)[1].strip(),
@@ -1978,6 +2214,15 @@ def cmd_daemon(args):
     return 0
 
 
+def cmd_electron_event(args):
+    run = current_run(args)
+    checkout = os.path.abspath(args.checkout) if args.checkout else run.man.get("electronCheckout", "")
+    res = electron_event(run, checkout, cycles=args.cycles, hold_sec=args.hold, interactive=args.interactive,
+                         minutes=args.minutes)
+    print(json.dumps({k: res[k] for k in ("result", "checks")}, indent=2))
+    return 0 if res["result"] == "pass" else 1
+
+
 def cmd_scratch_restore(args):
     run = current_run(args)
     rep = scratch_restore(run, args.backup)
@@ -2078,6 +2323,7 @@ def build_parser():
     p.add_argument("--daemon-env", action="append", help="extra KEY=VALUE for the daemon (frozen)")
     p.add_argument("--scratch-restore-flag", action="append")
     p.add_argument("--electron-path")
+    p.add_argument("--electron-checkout", help="repo checkout at --ecc-sha whose frontend electron-event launches")
     p.add_argument("--path-floor", default="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     p.add_argument("--login-shell", default=pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh")
     p.set_defaults(fn=cmd_init)
@@ -2134,6 +2380,13 @@ def build_parser():
     for name in ("install", "uninstall", "heartbeat"):
         p = sub.add_parser("monitor-" + name)
         p.set_defaults(fn=cmd_monitor, monitor_cmd=name)
+    p = sub.add_parser("electron-event")
+    p.add_argument("--checkout", help="default: the manifest's electronCheckout")
+    p.add_argument("--cycles", type=int, default=2)
+    p.add_argument("--hold", type=int, default=20, help="seconds the app stays open per cycle (interactive: max wait)")
+    p.add_argument("--interactive", action="store_true", help="wait for the operator to quit the app each cycle")
+    p.add_argument("--minutes", type=int)
+    p.set_defaults(fn=cmd_electron_event)
     p = sub.add_parser("finalize")
     p.add_argument("--abort", action="store_true")
     p.set_defaults(fn=cmd_finalize)
