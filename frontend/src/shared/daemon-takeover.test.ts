@@ -204,7 +204,7 @@ describe("proveDaemonOwnedForShutdown (P9 §15: /shutdown only a verified daemon
 			"no_provenance",
 		);
 		expect(proveDaemonOwnedForShutdown(facts({ probe: null })).verdict).toBe("unhealthy");
-		expect(proveDaemonOwnedForShutdown(facts({ runFilePidState: "unknown" })).verdict).toBe("running_unverified");
+		expect(proveDaemonOwnedForShutdown(facts({ runFilePidState: "unknown" })).verdict).toBe("undetermined");
 		expect(proveDaemonOwnedForShutdown(facts({ runFilePidState: "gone" })).verdict).toBe("stale");
 		expect(proveDaemonOwnedForShutdown(facts({ expectedDataDir: null })).verdict).toBe("no_provenance");
 	});

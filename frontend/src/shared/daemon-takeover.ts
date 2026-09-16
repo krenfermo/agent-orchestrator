@@ -101,6 +101,11 @@ export function browserDaemonOwnershipDecision(
 	return { action: "replace", keepAlive: existing.owner !== "app" };
 }
 
+/** Verdicts that prove nothing either way at this moment; worth asking again, never acting on. */
+export function isTransientOwnershipVerdict(verdict: ShutdownProof["verdict"]): boolean {
+	return verdict === "unhealthy" || verdict === "undetermined";
+}
+
 /**
  * P9 §15 for the desktop app: the ONLY condition under which Electron may ask a
  * daemon it did not spawn to stop through /shutdown. It is the same definition
@@ -141,7 +146,14 @@ export type ShutdownProof =
 			dataDir: string;
 	  }
 	| {
-			verdict: "no_provenance" | "foreign" | "stale" | "unhealthy" | "running_unverified" | "identity_mismatch";
+			verdict:
+				| "no_provenance"
+				| "foreign"
+				| "stale"
+				| "unhealthy"
+				| "undetermined"
+				| "running_unverified"
+				| "identity_mismatch";
 			reason: string;
 	  };
 
@@ -172,9 +184,10 @@ export function proveDaemonOwnedForShutdown(f: ShutdownProofFacts): ShutdownProo
 		return { verdict: "stale", reason: `the run-file names process ${rf.pid}, which has exited` };
 	}
 	if (f.runFilePidState !== "alive") {
+		// Not a mismatch: nothing is proven either way right now (e.g. ps timed out).
 		return {
-			verdict: "running_unverified",
-			reason: `the state of run-file process ${rf.pid} cannot be determined`,
+			verdict: "undetermined",
+			reason: `the state of run-file process ${rf.pid} cannot be determined right now`,
 		};
 	}
 	const p = f.probe;
