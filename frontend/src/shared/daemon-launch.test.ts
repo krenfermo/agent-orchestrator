@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bundledDaemonIdentityError, resolveDaemonLaunch } from "./daemon-launch";
+import { bundledDaemonIdentityError, configuredDaemonIdentityError, resolveDaemonLaunch } from "./daemon-launch";
 
 describe("resolveDaemonLaunch", () => {
 	it("uses AO_DAEMON_COMMAND when configured", () => {
@@ -104,5 +104,31 @@ describe("bundledDaemonIdentityError", () => {
 		expect(bundledDaemonIdentityError({}, "/opt/ao/resources/daemon/ao", undefined, samePath)).toBe(
 			"An older AO daemon is already running, but it does not report its binary path. Stop it and restart this app.",
 		);
+	});
+});
+
+describe("configuredDaemonIdentityError (AO_DAEMON_COMMAND is not an ownership exception)", () => {
+	const same = (a: string, b: string) => a === b;
+
+	it("8. a daemon of another binary than the configured command is not ours", () => {
+		expect(configuredDaemonIdentityError({ executablePath: "/frozen/ao" }, "/frozen/ao daemon", same)).toBeNull();
+		expect(configuredDaemonIdentityError({ executablePath: "/frozen/ao" }, "'/frozen/ao' daemon", same)).toBeNull();
+		expect(
+			configuredDaemonIdentityError({ executablePath: "/other/ao" }, "/frozen/ao daemon", same),
+		).toContain("/other/ao");
+	});
+
+	it("fails closed when the command or the daemon cannot prove a binary", () => {
+		expect(configuredDaemonIdentityError({ executablePath: "/frozen/ao" }, "ao daemon", same)).not.toBeNull();
+		expect(configuredDaemonIdentityError({}, "/frozen/ao daemon", same)).not.toBeNull();
+		expect(configuredDaemonIdentityError({ executablePath: "/frozen/ao" }, "'unterminated daemon", same)).not.toBeNull();
+	});
+});
+
+describe("configuredDaemonIdentityError on Windows paths", () => {
+	it("accepts an absolute Windows binary", () => {
+		expect(
+			configuredDaemonIdentityError({ executablePath: "C:\\ao\\ao.exe" }, '"C:\\ao\\ao.exe" daemon', (a, b) => a === b),
+		).toBeNull();
 	});
 });

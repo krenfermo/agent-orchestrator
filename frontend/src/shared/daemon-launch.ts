@@ -90,3 +90,42 @@ export function bundledDaemonIdentityError(
 	}
 	return null;
 }
+
+/** The first word of a shell command (single/double quotes honoured), or null when unparseable. */
+function commandExecutable(command: string): string | null {
+	const text = command.trim();
+	if (!text) return null;
+	const quote = text[0];
+	if (quote === "'" || quote === '"') {
+		const end = text.indexOf(quote, 1);
+		return end > 1 ? text.slice(1, end) : null;
+	}
+	const word = text.split(/\s+/)[0];
+	return /['"\\$`]/.test(word) ? null : word;
+}
+
+/**
+ * Identity check for a daemon started through AO_DAEMON_COMMAND. The command is
+ * configuration, not proof of ownership: a running daemon is this launch's only
+ * when it is the executable the command names (an absolute path, compared with
+ * symlinks resolved by `samePath`). Anything that cannot be proven -- a bare
+ * command name resolved through PATH, an unparseable command, a daemon that does
+ * not report its binary -- fails closed.
+ */
+export function configuredDaemonIdentityError(
+	probe: BundledDaemonProbe,
+	configuredCommand: string,
+	samePath: (a: string, b: string) => boolean,
+): string | null {
+	const executable = commandExecutable(configuredCommand);
+	if (!executable || !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(executable)) {
+		return "AO_DAEMON_COMMAND does not name an absolute daemon binary, so AO cannot prove a running daemon is the configured one. Stop it yourself, then restart the app.";
+	}
+	if (!probe.executablePath) {
+		return "An AO daemon is already running, but it does not report its binary path. Stop it and restart this app.";
+	}
+	if (!samePath(probe.executablePath, executable)) {
+		return `Another AO daemon is already running from ${probe.executablePath}; AO_DAEMON_COMMAND names ${executable}. Stop the other daemon before using this app.`;
+	}
+	return null;
+}
