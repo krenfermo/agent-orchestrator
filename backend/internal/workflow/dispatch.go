@@ -608,6 +608,28 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStagePreflight, perr)
 	}
 
+	// And, still before anything is spawned: can git even SEE what this task is
+	// required to produce? A deliverable under .gitignore is invisible to the
+	// completion classifier and is silently dropped by the integration commit,
+	// so dispatching one buys a turn whose result AO has already proven it
+	// cannot read (deliverable_observability.go, incident MEDUSA 2026-09-09).
+	//
+	// It sits after the provider preflight deliberately: a provider that cannot
+	// start is the more fundamental refusal and the one a person fixes first.
+	// Like that check, it is a pre-work failure in the strictest sense --
+	// nothing created, nothing owned -- so it travels the same
+	// recordWorkerLaunchFailure path, and neither a missing probe nor an
+	// unreadable one is a refusal.
+	if derr := c.preflightDeliverableObservability(ctx, run); derr != nil {
+		now := c.clock()
+		class := classifyWorkerLaunchFailure(derr).Class
+		if aerr := c.concludeWorkerAttemptFailure(ctx, intent, class, now); aerr != nil {
+			return step, aerr
+		}
+		c.recordLaunchFailureBoundary(ctx, run, step, entry, intent, domain.LaunchStagePreflight, class, derr)
+		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStagePreflight, derr)
+	}
+
 	// P3-A §7: the frozen placement decides BOTH where the work happens and
 	// which branch is checked out there. Reading one from the record and the
 	// other from project configuration is what produced a direct-branch run

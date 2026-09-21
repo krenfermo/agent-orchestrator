@@ -182,6 +182,13 @@ func classifyWorkerLaunchFailure(err error) workerLaunchClassification {
 	if cls, ok := classifyPreflightRefusal(err); ok {
 		return cls
 	}
+	// A deliverable git cannot see is the same shape of refusal and for the
+	// same reason: retrying does not change a .gitignore, and the remedy
+	// (untrack the path, or move the deliverable) is nothing any other class
+	// would send a person to. See deliverable_observability.go.
+	if cls, ok := classifyDeliverableRefusal(err); ok {
+		return cls
+	}
 	base := classifyProviderFailure(err)
 	switch base.Class {
 	case domain.WorkflowErrorAuth, domain.WorkflowErrorBinaryMissing:
