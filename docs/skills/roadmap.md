@@ -8,12 +8,18 @@ reachable with an enterprise root; there is deliberately no official one). The
 roadmap after P11 is organized by **Frentes**: this is Frente 2.
 
 - **2A — audit: closed.** What exists, what runs, what is blocked.
-- **2B — durable runs: implemented on `feat/skills-2b-run-persistence`, pending
-  merge.** A run is a durable record with history, cancellation, restart
-  reconciliation and verified reports — see `docs/skills/skill-runs.md`.
-- **2C-2G — pending:** agent-driven modes (host read-only for builtin/trusted
-  first, agent inside the runner as the target architecture), more deterministic
-  scanners, full SAST, DAST/pentest behind its own control, hardening.
+- **2B — durable runs: merged into ECC.** A run is a durable record with
+  history, cancellation, restart reconciliation and verified reports — see
+  `docs/skills/skill-runs.md`.
+- **2C — agent modes: implemented on `feat/skills-2c-agent-mode`, pending
+  merge.** A mode declares `executor: tool | agent`; an agent mode of a builtin
+  or signature-trusted package runs Claude Code on the host over a read-only
+  staged copy, and its report is validated against the canonical findings
+  schema and redacted before it is stored. One agent mode: `authz-review`. See
+  ADR 0010 and `docs/skills/skill-runs.md` §7.
+- **2D-2G — pending:** agent inside the runner (the target architecture), more
+  deterministic scanners, full SAST, DAST/pentest behind its own control,
+  hardening.
 
 Three controls are built but not wired into the daemon (scoped secret
 delivery, writable workspace, egress allowlist — the last only with
@@ -178,8 +184,9 @@ Only once the core is stable and subfase 3 has landed.
 Done in 2B (`docs/skills/skill-runs.md`, migration 0172): `skill_runs` +
 `skill_run_findings`, the report stored as exact bytes with its SHA-256 and
 verified on every read, history per project, cancellation, restart
-reconciliation. Still open from the list below: validation against the
-manifest's declared output schema, storage-layer redaction, diffing and export.
+reconciliation. Done in 2C for AGENT reports: strict validation against the
+package's declared (canonical) output schema and storage-layer redaction
+(`internal/skillreport`). Still open: diffing and export.
 
 - A `skill_runs` table: run id, project, skill, version, mode, decision, granted
   capabilities, approver, target, timings, exit reason.

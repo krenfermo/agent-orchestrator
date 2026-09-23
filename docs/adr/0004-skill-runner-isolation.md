@@ -3,7 +3,9 @@
 Date: 2026-09-09
 Status: Accepted. Phase 4 (2026-09-09) turned the prototype into one real
 execution path — see the "Phase 4" note at the end. Four controls remain
-unbuilt and are designed in ADR 0005.
+unbuilt and are designed in ADR 0005. ADR 0010 (2026-09-23) amends the phase-4
+note for `repo.read` in the AGENT modes of builtin or signature-trusted
+packages only; the container boundary itself is unchanged.
 
 ## Context
 
