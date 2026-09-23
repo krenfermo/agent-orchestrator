@@ -177,6 +177,19 @@ type StageRequest struct {
 	// the disk before the container's limits ever apply.
 	MaxFiles     int
 	MaxFileBytes int64
+	// Exclude, when set, is asked about every candidate FILE (repo-relative,
+	// slash-separated) after the built-in exclusions. A non-empty reason keeps
+	// the file out and records it as skipped with that reason, so a manifest's
+	// deny list shows up in coverage instead of silently shrinking the scope.
+	// Nil excludes nothing more, which is what the container path has always
+	// done.
+	Exclude func(rel string) string
+	// AddressAnyName stages a file whose name the container scan tool could
+	// not pass through its shell (a space, a quote). Only a consumer that
+	// never builds a shell command from the names may set it -- the host
+	// agent reads files through its own tools, so for it the skip would be a
+	// coverage gap with no reason behind it.
+	AddressAnyName bool
 }
 
 // excludedFromStaging never reaches the container. `.git` is the important
@@ -262,6 +275,12 @@ func Stage(req StageRequest) (Staging, error) {
 				staging.skip(rel, SkipReasonNotRegular, 0, 0)
 				return nil
 			}
+			if req.Exclude != nil {
+				if reason := req.Exclude(filepath.ToSlash(rel)); reason != "" {
+					staging.skip(rel, reason, 0, 0)
+					return nil
+				}
+			}
 			info, infoErr := d.Info()
 			if infoErr != nil {
 				return infoErr
@@ -284,7 +303,7 @@ func Stage(req StageRequest) (Staging, error) {
 			// the file would simply not be scanned -- and a file that was
 			// never scanned but was counted as staged is a coverage lie, which
 			// is the one failure this whole path exists to prevent.
-			if hasShellHostileName(rel) {
+			if !req.AddressAnyName && hasShellHostileName(rel) {
 				staging.skip(rel, SkipReasonUnaddressable, 0, 0)
 				return nil
 			}
