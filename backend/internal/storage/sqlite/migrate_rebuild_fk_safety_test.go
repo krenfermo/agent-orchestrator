@@ -251,6 +251,18 @@ var knownTableRebuilds = []tableRebuild{
 		},
 		handling: handlingPragmaOff, outcome: outcomePreserved,
 	},
+	{
+		// 0171 re-widens the attempt error_class CHECK to the classes AO
+		// actually writes. Same table, same three children and same
+		// park-and-restore recipe as the corrected 0160.
+		version: 171, table: "workflow_attempts",
+		children: []string{
+			"workflow_checkpoints.attempt_id ON DELETE NO ACTION",
+			"workflow_dispatch_checkpoints.attempt_id ON DELETE NO ACTION",
+			"workflow_mutation_provenance.attempt_id ON DELETE NO ACTION",
+		},
+		handling: handlingPark, outcome: outcomePreserved,
+	},
 }
 
 // TestTableRebuildInventoryIsComplete walks the migrations in order, and at
