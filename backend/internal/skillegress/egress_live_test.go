@@ -2,6 +2,7 @@ package skillegress
 
 import (
 	"encoding/json"
+	"github.com/aoagents/agent-orchestrator/backend/internal/testsupport/dockerlock"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +40,9 @@ func dockerAvailable(t *testing.T) {
 	if !strings.HasPrefix(strings.TrimSpace(string(out)), "linux/2") {
 		t.Skipf("runtime is %q, not linux/cgroup v2", strings.TrimSpace(string(out)))
 	}
+	// Host-wide: the skill runner's live tests use the same runtime, and
+	// these create networks whose names derive from test names.
+	dockerlock.Acquire(t)
 	if err := exec.Command("docker", "image", "inspect", "alpine:3.19").Run(); err != nil {
 		t.Skip("alpine:3.19 is not present locally, and these tests do not pull")
 	}
