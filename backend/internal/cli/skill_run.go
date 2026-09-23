@@ -141,7 +141,8 @@ func skillRunTerminal(state string) bool {
 
 // skillRunPath builds a project-scoped runs path with every segment escaped.
 func skillRunPath(project string, rest ...string) string {
-	parts := []string{"projects", url.PathEscape(project), "skills"}
+	parts := make([]string, 0, 3+len(rest))
+	parts = append(parts, "projects", url.PathEscape(project), "skills")
 	for _, r := range rest {
 		parts = append(parts, url.PathEscape(r))
 	}

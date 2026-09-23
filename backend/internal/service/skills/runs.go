@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -175,22 +176,13 @@ type SkillRunDetail struct {
 	Integrity string
 }
 
-var idempotencyKeyRe = func(k string) bool {
-	if len(k) == 0 || len(k) > 128 {
-		return false
-	}
-	for _, c := range k {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("-_.:", c)) {
-			return false
-		}
-	}
-	return true
-}
+// idempotencyKeyRe is the only shape an idempotency key may take.
+var idempotencyKeyRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
 // StartRun accepts a run and executes it asynchronously. created reports
 // whether this call created the run (false: an idempotent or in-flight match).
 func (s *Service) StartRun(ctx context.Context, req StartRunRequest) (SkillRun, bool, error) {
-	if req.IdempotencyKey != "" && !idempotencyKeyRe(req.IdempotencyKey) {
+	if req.IdempotencyKey != "" && !idempotencyKeyRe.MatchString(req.IdempotencyKey) {
 		return SkillRun{}, false, apierr.Invalid("SKILL_RUN_IDEMPOTENCY_KEY_INVALID",
 			"idempotencyKey must be 1-128 characters of [A-Za-z0-9-_.:]", nil)
 	}
