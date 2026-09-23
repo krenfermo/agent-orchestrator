@@ -453,6 +453,10 @@ func (s *Service) GetSkillRun(ctx context.Context, projectID domain.ProjectID, r
 		}
 		view.Report = raw
 	}
+	if d.AgentReport != nil {
+		// Served exactly as stored: these are the bytes the digest covers.
+		view.Report = d.AgentReport
+	}
 	return view, nil
 }
 

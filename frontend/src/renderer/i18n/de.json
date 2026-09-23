@@ -1386,6 +1386,8 @@
 	"settings.project.skills.noneInstalled": "Auf dieser Installation sind keine Skills installiert.",
 	"settings.project.skills.nothingScanned": "Es wurde nichts geprüft, also nichts gefunden. Das ist kein sauberes Ergebnis.",
 	"settings.project.skills.ranImage": "Ausgeführt: {{digest}}, genehmigt von {{actor}}",
+	"settings.project.skills.ranAgent": "Gelesen von {{runner}} über eine schreibgeschützte, bereitgestellte Kopie des Projekts. Ein Host-Agent, kein Container: Nur integrierte oder vertrauenswürdige Skills laufen so.",
+	"settings.project.skills.agentCoverage": "Abdeckung: {{examined}} untersucht, {{skipped}} ausgeschlossen",
 	"settings.project.skills.revokedDuringRun": "Die Genehmigung wurde während der Ausführung widerrufen. AO stoppt keinen laufenden Container, diese Ergebnisse entstanden also unter einer zurückgezogenen Autorisierung.",
 	"settings.project.skills.risk.critical": "Kritisch",
 	"settings.project.skills.risk.high": "Hoch",

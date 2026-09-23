@@ -63,6 +63,27 @@ type StaticScanReport = {
 	}[];
 };
 
+// An agent run's report is the package's findings.v1 document, validated and
+// redacted by the daemon before it was stored (Frente 2 / 2C). It carries no
+// image or container evidence, so it is rendered from its own shape.
+const SKILL_AGENT_TOOL = "ao.skill-agent/v1";
+
+type AgentReport = {
+	coverage?: {
+		examined?: string[];
+		skipped?: { path: string; reason: string }[];
+	};
+	findings?: {
+		id: string;
+		title: string;
+		severity: string;
+		confidence: string;
+		category: string;
+		evidence?: { locations?: { path: string; line?: number }[] };
+		recommendation: string;
+	}[];
+};
+
 /**
  * Project settings → Skills. Which skills are enabled on THIS project, with
  * what capabilities, and what a run of each mode would need.
@@ -511,6 +532,9 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 				</p>
 			);
 		}
+		if (run.tool === SKILL_AGENT_TOOL) {
+			return agentReportPanel(detail);
+		}
 		const report = (detail.report ?? {}) as StaticScanReport;
 		const coverage = report.coverage ?? {};
 		const findings = report.findings ?? [];
@@ -593,6 +617,65 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 						</ul>
 					</>
 				) : null}
+			</div>
+		);
+	};
+
+	// An agent run: who read it and how, then coverage, then findings -- the
+	// same order as the static scan, for the same reason.
+	const agentReportPanel = (detail: SkillRunDetail) => {
+		const report = (detail.report ?? {}) as AgentReport;
+		const examined = report.coverage?.examined ?? [];
+		const skipped = report.coverage?.skipped ?? [];
+		const findings = report.findings ?? [];
+		return (
+			<div
+				className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+				data-testid="project-skill-run-report"
+			>
+				<p className="text-caption text-settings-muted">
+					{t("settings.project.skills.ranAgent", { runner: detail.run.runnerId })}
+				</p>
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.agentCoverage", {
+						examined: examined.length,
+						skipped: skipped.length,
+					})}
+				</p>
+				{skipped.length > 0 ? (
+					<ul className="flex flex-col gap-0.5">
+						{skipped.map((sk) => (
+							<li className="text-caption text-settings-muted" key={sk.path}>
+								{t("settings.project.skills.skipped", { path: sk.path, reason: sk.reason })}
+							</li>
+						))}
+					</ul>
+				) : null}
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.findingsCount", { count: findings.length })}
+				</p>
+				{findings.length === 0 && examined.length === 0 ? (
+					<p className="flex items-start gap-2 text-caption text-error">
+						<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+						{t("settings.project.skills.nothingScanned")}
+					</p>
+				) : null}
+				<ul className="flex flex-col gap-1">
+					{findings.map((f) => {
+						const loc = f.evidence?.locations?.[0];
+						return (
+							<li className="text-caption" key={f.id}>
+								<span className="font-medium">
+									[{f.severity.toUpperCase()}] {f.title}
+								</span>
+								<span className="text-settings-muted">
+									{" "}
+									{loc ? `${loc.path}${loc.line ? `:${loc.line}` : ""}` : ""} · {f.id} · {f.confidence}
+								</span>
+							</li>
+						);
+					})}
+				</ul>
 			</div>
 		);
 	};

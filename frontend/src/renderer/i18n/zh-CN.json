@@ -1368,6 +1368,8 @@
 	"settings.project.skills.noneInstalled": "本安装中没有已安装的技能。",
 	"settings.project.skills.nothingScanned": "没有扫描任何内容，因此没有任何发现。这不是一个干净的结果。",
 	"settings.project.skills.ranImage": "已运行 {{digest}}，由 {{actor}} 批准",
+	"settings.project.skills.ranAgent": "由 {{runner}} 在项目的只读暂存副本上读取。这是主机上的代理，而非容器：只有内置或受信任的技能以此方式运行。",
+	"settings.project.skills.agentCoverage": "覆盖范围：已检查 {{examined}} 个，已排除 {{skipped}} 个",
 	"settings.project.skills.revokedDuringRun": "运行期间该批准已被撤销。AO 不会停止正在运行的容器，因此这些结果是在已撤回的授权下产生的。",
 	"settings.project.skills.risk.critical": "严重",
 	"settings.project.skills.risk.high": "高",

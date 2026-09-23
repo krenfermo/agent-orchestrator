@@ -260,6 +260,9 @@ func renderSkillRunOutcome(cmd *cobra.Command, detail skillRunDetailDTO) error {
 		return fmt.Errorf("run %s succeeded but its stored report did not verify (integrity %q); "+
 			"it is not shown", r.ID, detail.Integrity)
 	}
+	if r.Tool == skillAgentTool {
+		return renderAgentReport(cmd, r, detail.Report)
+	}
 	res := skillRunDTO{SkillID: r.SkillID, Version: r.Version, ModeID: r.ModeID, Tool: r.Tool}
 	if err := json.Unmarshal(detail.Report, &res.Report); err != nil {
 		return fmt.Errorf("decode run %s report: %w", r.ID, err)

@@ -1386,6 +1386,8 @@
 	"settings.project.skills.noneInstalled": "이 설치에 설치된 스킬이 없습니다.",
 	"settings.project.skills.nothingScanned": "아무것도 검사하지 않아 아무것도 발견되지 않았습니다. 깨끗한 결과가 아닙니다.",
 	"settings.project.skills.ranImage": "{{digest}} 실행 (승인자 {{actor}})",
+	"settings.project.skills.ranAgent": "{{runner}}이(가) 프로젝트의 읽기 전용 스테이징 사본을 읽었습니다. 컨테이너가 아닌 호스트 에이전트이며, 내장 또는 신뢰된 스킬만 이 방식으로 실행됩니다.",
+	"settings.project.skills.agentCoverage": "커버리지: {{examined}}개 검토, {{skipped}}개 제외",
 	"settings.project.skills.revokedDuringRun": "실행 중에 승인이 취소되었습니다. AO는 실행 중인 컨테이너를 중지하지 않으므로 이 결과는 철회된 권한으로 생성되었습니다.",
 	"settings.project.skills.risk.critical": "심각",
 	"settings.project.skills.risk.high": "높음",

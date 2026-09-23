@@ -107,6 +107,9 @@ type Service struct {
 	// this", which only a real container runtime can do. A service with an
 	// attestation and no executor reports honestly and refuses to run.
 	executor SkillExecutor
+	// agent is AO's host agent executor (ADR 0010), used only for modes whose
+	// executor is agent. Nil refuses every such mode before acceptance.
+	agent AgentExecutor
 	// images is the trust root. A nil one authorizes nothing rather than
 	// everything, which is what makes an unconfigured installation fail closed.
 	images *ImageAuthority
