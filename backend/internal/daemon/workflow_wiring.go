@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/capacityprobe"
 	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/gitignoreprobe"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
 	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
@@ -436,6 +437,12 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// (incarnation + owner token + installation stamp), not from its row.
 		WorkerRuntimeOwnership: sessionMgr,
 		WorkerPreflight:        &providerpreflight.Checker{Agents: agents, AuthMode: cfg.ProviderAuthMode},
+		// The pre-dispatch deliverable-observability check: before AO spends a
+		// turn, ask git whether it could see what the task is required to
+		// produce. Like WorkerPreflight it answers "unknown" rather than "no"
+		// whenever it cannot tell, so it can never ground a dispatch on its own
+		// uncertainty. See internal/workflow/deliverable_observability.go.
+		DeliverableIgnores: &gitignoreprobe.Probe{},
 		// Checkpoint 8P-E.13A.4: without an active prober, a provider profile
 		// that has never been dispatched to reports CapacityUnknown until a
 		// human happens to run it, which is how an authenticated Codex reviewer

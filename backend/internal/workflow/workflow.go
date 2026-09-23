@@ -535,6 +535,13 @@ type Deps struct {
 	// spawning straight into whatever the provider does.
 	WorkerPreflight WorkerPreflight
 
+	// DeliverableIgnores is the optional pre-dispatch check that a task's
+	// required deliverables live where git can see them
+	// (deliverable_observability.go). Optional: nil keeps the pre-existing
+	// behaviour of dispatching and discovering afterwards that nothing in the
+	// tree changed.
+	DeliverableIgnores DeliverableIgnoreProbe
+
 	// Placements and ProviderAttempts are P1-D's two durable authorities: the
 	// FROZEN execution placement (execution_placement.go) and the provider-
 	// attempt ledger (provider_attempt.go). Both optional, like everything else
@@ -821,6 +828,9 @@ type Coordinator struct {
 	// check. Both optional.
 	workerLiveness  WorkerLivenessProbe
 	workerPreflight WorkerPreflight
+	// deliverableIgnores backs the pre-dispatch deliverable-observability
+	// check. Optional; see deliverable_observability.go.
+	deliverableIgnores DeliverableIgnoreProbe
 
 	// commitHistory backs the approved-head reconstruction. Optional; see
 	// commitHistoryOrDefault.
@@ -925,6 +935,7 @@ func New(d Deps) *Coordinator {
 		taskWorktreeRecords:      d.TaskWorktreeRecords,
 		workerLiveness:           d.WorkerLiveness,
 		workerPreflight:          d.WorkerPreflight,
+		deliverableIgnores:       d.DeliverableIgnores,
 		commitHistory:            d.CommitHistory,
 		repairGitPort:            d.RepairGit,
 		placements:               d.Placements,

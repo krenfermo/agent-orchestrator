@@ -776,22 +776,39 @@ func extractPaths(text string, roots []string) []string {
 	return out
 }
 
-// normalizePath canonicalizes one candidate token and decides whether it is a
-// repository path at all.
-func normalizePath(tok string, roots []string) (string, bool) {
+// cleanPathToken strips the punctuation a path picks up from prose and rejects
+// the shapes that are never a repository-relative path: a URL, an absolute
+// path, anything walking upwards, and anything with an empty segment. It
+// returns the cleaned token and its segments.
+//
+// It is split out of normalizePath because the deliverable-observability check
+// admits a slightly wider set of extensions than the scope classifier does
+// (deliverable_observability.go) and must clean its candidates by exactly the
+// same rules -- two spellings of "is this a path" would be two answers.
+func cleanPathToken(tok string) (string, []string, bool) {
 	tok = strings.TrimSpace(tok)
 	tok = strings.Trim(tok, "`'\"()[]{}<>,;:")
 	tok = strings.TrimSuffix(tok, ".")
 	tok = strings.TrimPrefix(tok, "./")
 	tok = strings.TrimSuffix(tok, "/")
 	if tok == "" || tok == "." || strings.Contains(tok, "://") || strings.HasPrefix(tok, "/") || strings.Contains(tok, "..") {
-		return "", false
+		return "", nil, false
 	}
 	segments := strings.Split(tok, "/")
 	for _, s := range segments {
 		if s == "" {
-			return "", false
+			return "", nil, false
 		}
+	}
+	return tok, segments, true
+}
+
+// normalizePath canonicalizes one candidate token and decides whether it is a
+// repository path at all.
+func normalizePath(tok string, roots []string) (string, bool) {
+	tok, segments, ok := cleanPathToken(tok)
+	if !ok {
+		return "", false
 	}
 	if isFilePath(tok) {
 		// A bare filename with a known code extension is a path even without a

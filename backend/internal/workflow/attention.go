@@ -712,6 +712,14 @@ var attentionDispositions = map[string]AttentionDisposition{
 	ReasonProviderPreflightFailed: {
 		HumanAction: "The provider would have asked the operator something before it could work — usually a permission mode that cannot run unattended. Correct the provider configuration, then continue this run.",
 	},
+	// The deliverable-observability refusal. It is deliberately an operator
+	// action rather than a repair: the thing that is wrong is the repository's
+	// ignore rules or the task's own target path, and neither is something a
+	// repair agent may decide on a person's behalf.
+	ReasonDeliverableNotObservable: {
+		Recovery:    domain.RecoveryInspectRepository,
+		HumanAction: "A file this task is required to produce sits at a path the repository ignores, so the integration commit would have dropped it and git could not have shown it. The checkpoint names each path and the exact .gitignore rule that hides it. Either stop ignoring that path (remove or negate the rule, or track the file with `git add -f`), or change the task to deliver somewhere git can see, then continue this run.",
+	},
 	// The repair-artifact refusals. None of them is repairable: aiming a second
 	// repair at a stop whose cause is that AO cannot establish the artifact
 	// would produce the same refusal, and aiming one at a repair that already
@@ -768,6 +776,7 @@ var attentionErrorClasses = map[domain.WorkflowErrorClass]AttentionDisposition{
 	WorkflowErrorProviderAuthInteractive:        attentionDispositions[ReasonProviderAuthInteractive],
 	WorkflowErrorProviderWorkspaceTrustRequired: attentionDispositions[ReasonProviderWorkspaceTrustRequired],
 	WorkflowErrorProviderPreflightFailed:        attentionDispositions[ReasonProviderPreflightFailed],
+	WorkflowErrorDeliverableNotObservable:       attentionDispositions[ReasonDeliverableNotObservable],
 }
 
 // AttentionVerdict is ClassifyAttention's whole output: the classification, the
