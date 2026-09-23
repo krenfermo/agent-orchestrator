@@ -100,7 +100,7 @@ Planner, worker lifecycle, placement, recovery, tmux E2E, sqlc y migraciones.
 | Evidencia de resultado rechazado | **Integrado (ECC)** | `04751b186`, merge lote 3 | Activo en el próximo arranque |
 | Migraciones: gate de rebuild con FKs entrantes | **Integrado + probado** | `027a21f99`, merge lote 2; suite sqlite en verde | — |
 | Verify estructurado, evidencia pre-review | **Integrado** | `pre-review-evidence.md`, `feat/proportional-execution-review` | — |
-| **Tests E2E contra tmux real** | **Parcial** | `p0c-runtime-evidence.md` cubre tmux real | Cobertura E2E del ciclo completo workflow→worker→review→verify sobre tmux real: **pendiente** |
+| **Tests E2E contra tmux real** | **Implementado (rama `test/frente1-tmux-full-cycle-e2e`, pendiente de merge)** | `p0c-runtime-evidence.md` (runtime); [`workflow-cycle-e2e.md`](workflow-cycle-e2e.md) (ciclo completo con daemon, SQLite y tmux reales) | Ciclos de fix, failover y reinicio a mitad de ciclo no cubiertos; el pane del reviewer vive hasta el barrido de GC |
 | **Soak 24 h** | **Pendiente** | `p0d-reliability-validation.md` define el criterio | No hay evidencia de una corrida completa reciente |
 
 **Riesgo abierto verificado:** el 2026-09-09 un run de MEDUSA se bloqueó en
