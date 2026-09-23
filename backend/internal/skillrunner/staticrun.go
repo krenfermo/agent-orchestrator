@@ -53,6 +53,11 @@ type StaticScanRequest struct {
 	// Params are the tool's two validated integers.
 	Params ToolParams
 	Limits Limits
+	// RunID, when set, is the durable skill run this scan belongs to. It names
+	// the staging directory and labels the container (RunIDLabel), so a daemon
+	// that restarts after a crash can remove exactly this run's leftovers with
+	// ReapRun. It must satisfy ValidRunID. It changes nothing about isolation.
+	RunID string
 }
 
 // ScanFinding is one match. It carries the rule, never the matched text: a
@@ -308,6 +313,12 @@ func (r *Runner) RunStaticScan(
 		return StaticScanReport{}, err
 	}
 	runID := "run-" + randomToken()
+	if req.RunID != "" {
+		if !ValidRunID(req.RunID) {
+			return StaticScanReport{}, fmt.Errorf("%w: run id %q is not a valid run id", ErrStagingUnusable, req.RunID)
+		}
+		runID = req.RunID
+	}
 	staging, err := Stage(StageRequest{
 		SourceDir: req.ProjectPath, ScopePaths: req.ScopePaths, Root: root, RunID: runID,
 		MaxFiles: params.MaxFiles, MaxFileBytes: int64(params.MaxFileBytes),
@@ -332,6 +343,7 @@ func (r *Runner) RunStaticScan(
 		Argv:     contract.Argv(params),
 		InputDir: staging.Dir,
 		Limits:   limits,
+		RunID:    req.RunID,
 	})
 	if err != nil {
 		return StaticScanReport{}, err
