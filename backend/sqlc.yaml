@@ -541,6 +541,10 @@ sql:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "ProjectID"
               pointer: true
+          - column: "skill_runs.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
           # Skills phase 5: scoped secret delivery.
           - column: "skill_secret_grants.project_id"
             go_type:

@@ -1111,6 +1111,52 @@ type SkillRegistryStatus struct {
 	UpdatedAt            time.Time
 }
 
+type SkillRun struct {
+	ID               string
+	ProjectID        domain.ProjectID
+	SkillID          string
+	SkillVersion     string
+	ModeID           string
+	Tool             string
+	State            string
+	IdempotencyKey   sql.NullString
+	RequestedBy      string
+	InputsJson       string
+	CapabilitiesJson string
+	PackageDigest    string
+	RunnerID         string
+	RunnerControls   string
+	OwnerInstance    string
+	ImageDigest      string
+	ApprovalID       string
+	ApprovedBy       string
+	Summary          string
+	FindingCount     int64
+	Truncated        int64
+	ReportJson       sql.NullString
+	ReportSha256     string
+	ErrorCode        string
+	ErrorMessage     string
+	CancelRequested  int64
+	CreatedAt        time.Time
+	StartedAt        sql.NullTime
+	FinishedAt       sql.NullTime
+	UpdatedAt        time.Time
+}
+
+type SkillRunFinding struct {
+	RunID          string
+	Ordinal        int64
+	RuleID         string
+	Severity       string
+	Category       string
+	Title          string
+	Path           string
+	Line           int64
+	Recommendation string
+	Confidence     string
+}
+
 type SkillSecret struct {
 	Name        string
 	Description string
