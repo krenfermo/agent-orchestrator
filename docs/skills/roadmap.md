@@ -1,17 +1,24 @@
 # Skills catalog — integration roadmap
 
-**Status: subfases 1-2 mostly done; subfase 3 partly done. Phase 4
-(2026-09-09) made ONE mode execute: `static-code`, inside the container, over a
-staged scope-limited copy. Phase 10 (2026-09-09) added the registry /
-marketplace foundation and settled open question 6 -- see
-`docs/skills/registry.md` and ADR 0006; it added no execution surface.
-Phase 11 (2026-09-09) connected AO to a real PRIVATE registry over HTTPS --
-one origin, a sealed credential, a connection test, a two-part cache, an
-offline install that runs only on bytes AO already verified, and revocation
-sync; see `docs/skills/private-registry.md` and ADR 0007. It added no
-execution surface either, and `trusted` is still unreachable.** Four controls remain unbuilt and each blocks one
-capability — see `docs/adr/0005-pending-capability-controls.md` for the design
-of all four and the implementation of none.
+**Status (2026-09-23): phases 1-13 are integrated in ECC** — catalog, manifest,
+per-project activation with capability grants, the container runner (ADR 0004)
+with one executable mode (`static-code`), the image trust root, registries
+(local, private HTTPS, GitHub), signatures and trust roots (`trusted` is
+reachable with an enterprise root; there is deliberately no official one). The
+roadmap after P11 is organized by **Frentes**: this is Frente 2.
+
+- **2A — audit: closed.** What exists, what runs, what is blocked.
+- **2B — durable runs: implemented on `feat/skills-2b-run-persistence`, pending
+  merge.** A run is a durable record with history, cancellation, restart
+  reconciliation and verified reports — see `docs/skills/skill-runs.md`.
+- **2C-2G — pending:** agent-driven modes (host read-only for builtin/trusted
+  first, agent inside the runner as the target architecture), more deterministic
+  scanners, full SAST, DAST/pentest behind its own control, hardening.
+
+Three controls are built but not wired into the daemon (scoped secret
+delivery, writable workspace, egress allowlist — the last only with
+`-tags ao_embed_egress_proxy`), and `arbitrary_process_execution` is design
+only: see `docs/adr/0005-pending-capability-controls.md`.
 
 Phase 1 delivered the catalog core and the `security-audit` package. Phase 2
 made it administrable: SQLite persistence, an audit trail, HTTP routes, `ao
@@ -166,7 +173,13 @@ Only once the core is stable and subfase 3 has landed.
 - **Touches:** `internal/workflow`, `internal/review`. **Conflict risk: high**
   — do not start while lifecycle work is in flight.
 
-## Subfase 5 — Reports and durable evidence — **not started**
+## Subfase 5 — Reports and durable evidence — **partly done (Frente 2 / 2B)**
+
+Done in 2B (`docs/skills/skill-runs.md`, migration 0172): `skill_runs` +
+`skill_run_findings`, the report stored as exact bytes with its SHA-256 and
+verified on every read, history per project, cancellation, restart
+reconciliation. Still open from the list below: validation against the
+manifest's declared output schema, storage-layer redaction, diffing and export.
 
 - A `skill_runs` table: run id, project, skill, version, mode, decision, granted
   capabilities, approver, target, timings, exit reason.

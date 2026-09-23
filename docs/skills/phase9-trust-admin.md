@@ -138,7 +138,8 @@ while `openapi.yaml` had already moved — the known trap. Regenerated with the 
    `net.egress` (dependency and advisory modes) can run at all.
 3. **`net.active_scan`'s own control**: named targets, a time window, rate limits, and an
    approval separate from the image approval.
-4. **Report persistence.** Runs are audited (`run_executed` / `run_refused`, with digest,
+4. **Report persistence.** *(Superseded by Frente 2 / 2B: runs are durable and
+   readable — `docs/skills/skill-runs.md`. Kept for the record.)* Runs are audited (`run_executed` / `run_refused`, with digest,
    mode and a summary) and readable via `GET /skills/{id}/audit`, but the **full report is
    returned to the caller and not stored**. Re-reading yesterday's findings is not
    possible yet; that needs a report store and a retrieval route.
