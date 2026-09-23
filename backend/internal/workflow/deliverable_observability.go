@@ -59,9 +59,10 @@ import (
 //     them. It reports; the person decides.
 
 // WorkflowErrorDeliverableNotObservable is the attempt error class for a
-// dispatch refused here: everything this task is required to produce sits at a
-// path the repository ignores, so neither the completion classifier nor the
-// integration commit could ever see it.
+// dispatch refused here: a file the plan's verification requires to exist, or
+// everything the task is required to produce, sits at a path the repository
+// ignores, so the integration commit would drop it -- and, in the second case,
+// the completion classifier could not see the work at all.
 //
 // It is a class of its own rather than a flavour of ambiguous_worker_state
 // because it is the opposite kind of statement. `ambiguous_worker_state` is AO
@@ -102,6 +103,28 @@ type RequiredDeliverable struct {
 	// verification check's own path -- so the refusal can quote the requirement
 	// rather than paraphrase it.
 	Declaration string
+	// Readings are every repository-relative spelling of Path that the check
+	// that will later judge it could use, Path first. A criterion path has one.
+	// A verification file check can have two: verifyFile resolves a relative
+	// path against the namespace its spec's commands run in and falls back to
+	// the repository-root reading when the first is absent (verify.go), so the
+	// deliverable is hidden only when EVERY reading is ignored. Refusing on the
+	// one reading verify may not use would be a refusal grounded on a guess.
+	Readings []string
+}
+
+// contractual reports whether the plan declared this path structurally. See
+// evaluateDeliverableObservability for what that changes.
+func (d RequiredDeliverable) contractual() bool {
+	return d.Source == DeliverableFromVerification
+}
+
+// readings returns Readings, or Path alone for a value built without them.
+func (d RequiredDeliverable) readings() []string {
+	if len(d.Readings) == 0 {
+		return []string{d.Path}
+	}
+	return d.Readings
 }
 
 // IgnoredDeliverable is one required path the repository ignores, with the
@@ -189,6 +212,15 @@ func RequiredDeliverables(artifact PlanArtifact) []RequiredDeliverable {
 		byPath[d.Path] = d
 	}
 
+	// The namespace verify will resolve these files against: the same
+	// verifyPathContextFor over the same commands' directories that
+	// runVerification uses, so the preflight asks about the paths verify reads.
+	commandDirs := make([]string, 0, len(artifact.Verification.Commands))
+	for _, cmd := range artifact.Verification.Commands {
+		commandDirs = append(commandDirs, normalizeRel(cmd.WorkingDirectory))
+	}
+	pathCtx := verifyPathContextFor(commandDirs)
+
 	for _, check := range artifact.Verification.Files {
 		// Exists false asserts a path is ABSENT afterwards. An absent file is
 		// not a deliverable and an ignored one is not a problem, so those are
@@ -200,7 +232,11 @@ func RequiredDeliverables(artifact PlanArtifact) []RequiredDeliverable {
 		if !ok {
 			continue
 		}
-		add(RequiredDeliverable{Path: p, Source: DeliverableFromVerification, Declaration: check.Path})
+		readings := []string{p}
+		if resolved := pathCtx.ResolvePath(p); resolved != p && resolved != "." {
+			readings = append(readings, resolved)
+		}
+		add(RequiredDeliverable{Path: p, Source: DeliverableFromVerification, Declaration: check.Path, Readings: readings})
 	}
 
 	for _, criterion := range artifact.AcceptanceCriteria {
@@ -209,6 +245,7 @@ func RequiredDeliverables(artifact PlanArtifact) []RequiredDeliverable {
 				Path:        p,
 				Source:      DeliverableFromCriterion,
 				Declaration: strings.TrimSpace(criterion),
+				Readings:    []string{p},
 			})
 		}
 	}
@@ -296,12 +333,29 @@ type deliverableVerdict struct {
 // evaluateDeliverableObservability is the whole policy, as a pure function, so
 // every rule below is testable without a repository.
 //
-// It refuses on ONE condition, and the narrowness is the point:
+// A mutating task that declares at least one required deliverable is refused
+// on either of two conditions, and the difference between them is the
+// difference between what the plan ASSERTED and what AO READ out of prose:
 //
-//	the task is mutating, it declares at least one required deliverable, and
-//	EVERY required deliverable is ignored.
+//  1. CONTRACTUAL. Any Verification.Files check with Exists true names a path
+//     every reading of which the repository ignores. That check is the
+//     plan stating, structurally, that the file must be there afterwards --
+//     and the integration commit (`git add -A`, no `-f`) would drop it while
+//     verify, which reads the worktree's filesystem, still passes it. So a
+//     task requiring A and B is not safe because A is preservable: it would
+//     be reported a success with B silently lost. Other observable
+//     deliverables do not change that.
+//  2. EVERY. All required deliverables, contractual or prose, are ignored.
+//     This is the MEDUSA shape: AO has nothing at all to observe, and the run
+//     can only end in an unreadable stop.
 //
-// Each clause removes a way of being wrong:
+// A path found ONLY in acceptance-criterion prose does not carry the first
+// condition's force. The extractor reads sentences, and "the build writes
+// dist/app.js and the tests pass" mentions an ignored build output without
+// requiring it to be committed. Such a path can contribute to a refusal only
+// when nothing else the task requires is observable.
+//
+// The remaining clauses remove the other ways of being wrong:
 //
 //   - MUTATING. A task the plan declared read-only is required to change
 //     nothing, so it has no deliverable to hide and read_only_completion.go
@@ -309,13 +363,8 @@ type deliverableVerdict struct {
 //     mutating, as everywhere else.
 //   - AT LEAST ONE. A task that names no path is not thereby suspicious. Most
 //     tasks name none; refusing them would ground the product.
-//   - EVERY. If even one required path is observable, the worker's work lands
-//     somewhere git can see, the completion classifier gets its evidence, and
-//     the run does not end where MEDUSA's did. Refusing there would stop
-//     perfectly good tasks that mention an ignored build output in passing
-//     ("the build writes dist/app.js and the tests pass") -- which is a common
-//     sentence and not a defect. The condition this check exists for is the
-//     one where AO has NOTHING to observe.
+//   - EVERY READING. A deliverable is hidden only when all of its Readings are
+//     ignored (see RequiredDeliverable.Readings).
 func evaluateDeliverableObservability(intent domain.WorkflowWriteIntent, required []RequiredDeliverable, ignored []IgnoredDeliverable) deliverableVerdict {
 	if intent.ReadOnly() || len(required) == 0 || len(ignored) == 0 {
 		return deliverableVerdict{Ready: true}
@@ -327,17 +376,26 @@ func evaluateDeliverableObservability(intent domain.WorkflowWriteIntent, require
 		// refusal beyond what the plan actually asked for.
 		hidden[ig.Path] = ig
 	}
-	observable := 0
-	matched := make([]IgnoredDeliverable, 0, len(required))
+	var contractual, all []IgnoredDeliverable
 	for _, d := range required {
-		ig, ok := hidden[d.Path]
+		ig, ok := hiddenEverywhere(d, hidden)
 		if !ok {
-			observable++
 			continue
 		}
-		matched = append(matched, ig)
+		all = append(all, ig)
+		if d.contractual() {
+			contractual = append(contractual, ig)
+		}
 	}
-	if observable > 0 || len(matched) == 0 {
+	var matched []IgnoredDeliverable
+	switch {
+	case len(all) == len(required):
+		// Everything is hidden: name every path, contractual or not, so the
+		// person sees the whole of what the task could not deliver.
+		matched = all
+	case len(contractual) > 0:
+		matched = contractual
+	default:
 		return deliverableVerdict{Ready: true}
 	}
 	sort.Slice(matched, func(i, j int) bool { return matched[i].Path < matched[j].Path })
@@ -345,6 +403,21 @@ func evaluateDeliverableObservability(intent domain.WorkflowWriteIntent, require
 		Ignored: matched,
 		Detail:  describeIgnoredDeliverables(required, matched),
 	}
+}
+
+// hiddenEverywhere reports whether every reading of d is ignored, returning the
+// rule for its first reading. The reported Path is the declared one, so the
+// refusal names what the plan wrote.
+func hiddenEverywhere(d RequiredDeliverable, hidden map[string]IgnoredDeliverable) (IgnoredDeliverable, bool) {
+	readings := d.readings()
+	for _, r := range readings {
+		if _, ok := hidden[r]; !ok {
+			return IgnoredDeliverable{}, false
+		}
+	}
+	ig := hidden[readings[0]]
+	ig.Path = d.Path
+	return ig, true
 }
 
 // describeIgnoredDeliverables writes the refusal a person reads. It names every
@@ -359,7 +432,12 @@ func describeIgnoredDeliverables(required []RequiredDeliverable, ignored []Ignor
 	}
 	var b strings.Builder
 	noun := "the only deliverable this task requires is"
-	if len(ignored) > 1 {
+	switch {
+	case len(ignored) < len(required) && len(ignored) == 1:
+		noun = "a file this task's verification requires to exist is"
+	case len(ignored) < len(required):
+		noun = fmt.Sprintf("%d files this task's verification requires to exist are", len(ignored))
+	case len(ignored) > 1:
 		noun = fmt.Sprintf("all %d deliverables this task requires are", len(ignored))
 	}
 	fmt.Fprintf(&b, "deliverable observability: %s at a path this repository ignores, so git could not show the work and the integration commit would drop it", noun)
@@ -429,8 +507,14 @@ func (c *Coordinator) preflightDeliverableObservability(ctx stdctx.Context, run 
 		return nil
 	}
 	paths := make([]string, 0, len(required))
+	asked := map[string]bool{}
 	for _, d := range required {
-		paths = append(paths, d.Path)
+		for _, r := range d.readings() {
+			if !asked[r] {
+				asked[r] = true
+				paths = append(paths, r)
+			}
+		}
 	}
 	ignored, err := c.deliverableIgnores.IgnoredPaths(ctx, repoPath, paths)
 	if err != nil {

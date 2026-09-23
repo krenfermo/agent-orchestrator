@@ -718,7 +718,7 @@ var attentionDispositions = map[string]AttentionDisposition{
 	// repair agent may decide on a person's behalf.
 	ReasonDeliverableNotObservable: {
 		Recovery:    domain.RecoveryInspectRepository,
-		HumanAction: "Everything this task is required to produce sits at a path the repository ignores, so git could not have shown the work and the integration commit would have dropped it. The checkpoint names each path and the exact .gitignore rule that hides it. Either stop ignoring that path (remove or negate the rule, or track the file with `git add -f`), or change the task to deliver somewhere git can see, then continue this run.",
+		HumanAction: "A file this task is required to produce sits at a path the repository ignores, so the integration commit would have dropped it and git could not have shown it. The checkpoint names each path and the exact .gitignore rule that hides it. Either stop ignoring that path (remove or negate the rule, or track the file with `git add -f`), or change the task to deliver somewhere git can see, then continue this run.",
 	},
 	// The repair-artifact refusals. None of them is repairable: aiming a second
 	// repair at a stop whose cause is that AO cannot establish the artifact

@@ -37,18 +37,47 @@ un trabajo que ya ha probado que no podría ni observar ni conservar.
 
 El chequeo corre en `attemptWorkHarness`, justo después del preflight de
 proveedor y antes de cualquier spawn (`backend/internal/workflow/dispatch.go`).
-Rechaza **una sola** condición:
+Para una tarea *mutating* que declara al menos un entregable requerido, rechaza
+en cualquiera de **dos** condiciones:
 
-> la tarea es *mutating*, declara al menos un entregable requerido, y **todos**
-> sus entregables requeridos están ignorados.
+> 1. **Contractual.** Alguna ruta de `Verification.Files` con `Exists: true`
+>    está ignorada (en todas sus lecturas, ver abajo).
+> 2. **Todos.** Todos los entregables requeridos (contractuales o de prosa)
+>    están ignorados — la forma exacta de MEDUSA.
 
-Cada cláusula elimina una forma de equivocarse:
+La diferencia entre ambas es la diferencia entre lo que el plan **afirmó** y lo
+que AO **leyó** en prosa:
+
+- Un `Verification.Files` con `Exists: true` es contractual. Si está ignorado,
+  el commit de integración (`git add -A`, sin `-f`) lo descarta mientras
+  `verify`, que lee el sistema de ficheros del worktree, lo da por bueno: AO
+  declararía éxito habiendo perdido un entregable requerido. Que existan otros
+  entregables observables no lo cambia; una tarea que exige A+B no es segura
+  porque sólo A sea preservable. *(Corrige el BLOCKER de la auditoría
+  pre-merge: la versión inicial sólo rechazaba cuando **todo** estaba
+  ignorado.)*
+- Una ruta encontrada **sólo** en la prosa de un criterio no adquiere esa
+  fuerza. «El build escribe `dist/app.js` y los tests pasan» menciona una salida
+  de build ignorada sin exigir que se commitee. Una ruta así sólo contribuye a
+  un rechazo cuando nada más de lo que la tarea exige es observable.
+
+Cuando rechaza por la condición contractual, el detalle nombra sólo las rutas
+contractuales ignoradas; cuando rechaza por «todos», las nombra todas.
+
+**Lecturas de una ruta contractual.** `verifyFile` resuelve una ruta relativa
+en el espacio de nombres donde corren los comandos de su spec
+(`verifyPathContextFor`) y, si no existe ahí, cae a la lectura desde la raíz del
+repositorio (`verify.go`). El preflight pregunta a git por ambas y considera la
+ruta oculta sólo si **todas** sus lecturas están ignoradas: rechazar por la
+lectura que `verify` quizá no use sería fundar un rechazo en una conjetura.
+
+Cada cláusula restante elimina una forma de equivocarse:
 
 | Cláusula | Qué evita |
 | --- | --- |
 | **mutating** | Una tarea declarada `read_only` no debe producir nada; su éxito *es* el árbol intacto (`read_only_completion.go`). `unspecified` se trata como mutating, como en todo AO. |
 | **al menos uno** | La mayoría de tareas no nombran ninguna ruta. Rechazarlas apagaría el producto. |
-| **todos** | Si una sola ruta requerida es observable, el trabajo aterriza donde git lo ve y el run no acaba donde acabó MEDUSA. Rechazar ahí pararía tareas sanas que mencionan de pasada una salida de build («el build escribe `dist/app.js` y los tests pasan»), que es una frase común y no un defecto. |
+| **prosa sin fuerza contractual** | Rechazar por cualquier mención textual ignorada pararía tareas sanas que citan de pasada una salida de build, que es una frase común y no un defecto. |
 
 ### Qué cuenta como entregable requerido
 
@@ -129,5 +158,13 @@ habría fallado. El detalle nombra cada ruta, la regla que la esconde en formato
   (`httpd/controllers/workflow.go`), igual que `provider_auth_interactive` e
   `invalid_placement` tampoco lo están. Añadirlo exige regenerar el contrato
   OpenAPI y `schema.ts`; queda como deuda declarada, no como olvido.
+- **La re-resolución de módulo Go en tiempo de verify no se replica.** Si un
+  comando Go de la spec declara un directorio que no está dentro de ningún
+  módulo, `verify` lo mueve a la raíz de módulo descubierta al ejecutarse; el
+  preflight sólo conoce el directorio declarado. En ese caso raro puede
+  preguntar por una lectura distinta de la que `verify` acabará usando.
+- **Una ruta sólo de prosa ignorada junto a otras observables** no se reporta.
+  Es deliberado (ver §3); si debe preservarse, el plan tiene que declararla en
+  `Verification.Files`.
 - **Un `.gitignore` que cambia después del dispatch** no se re-evalúa. El
   chequeo es de pre-dispatch por diseño.

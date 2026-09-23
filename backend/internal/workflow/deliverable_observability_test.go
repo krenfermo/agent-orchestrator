@@ -38,7 +38,7 @@ func TestRequiredDeliverables(t *testing.T) {
 				}},
 			},
 			want: []RequiredDeliverable{
-				{Path: "reports/audit.pdf", Source: DeliverableFromVerification, Declaration: "reports/audit.pdf"},
+				{Path: "reports/audit.pdf", Source: DeliverableFromVerification, Declaration: "reports/audit.pdf", Readings: []string{"reports/audit.pdf"}},
 			},
 		},
 		{
@@ -59,6 +59,7 @@ func TestRequiredDeliverables(t *testing.T) {
 				Path:        "backend/internal/foo/bar.go",
 				Source:      DeliverableFromCriterion,
 				Declaration: "backend/internal/foo/bar.go compiles and is covered.",
+				Readings:    []string{"backend/internal/foo/bar.go"},
 			}},
 		},
 		{
@@ -72,6 +73,7 @@ func TestRequiredDeliverables(t *testing.T) {
 				Path:        "postrunqa/report.csv",
 				Source:      DeliverableFromCriterion,
 				Declaration: "The run writes postrunqa/report.csv with one row per finding.",
+				Readings:    []string{"postrunqa/report.csv"},
 			}},
 		},
 		{
@@ -103,7 +105,7 @@ func TestRequiredDeliverables(t *testing.T) {
 				}},
 			},
 			want: []RequiredDeliverable{
-				{Path: "out/report.pdf", Source: DeliverableFromVerification, Declaration: "out/report.pdf"},
+				{Path: "out/report.pdf", Source: DeliverableFromVerification, Declaration: "out/report.pdf", Readings: []string{"out/report.pdf"}},
 			},
 		},
 		{
@@ -116,9 +118,26 @@ func TestRequiredDeliverables(t *testing.T) {
 				},
 			},
 			want: []RequiredDeliverable{
-				{Path: "alpha/first.go", Source: DeliverableFromCriterion, Declaration: "touch alpha/first.go"},
-				{Path: "zeta/last.go", Source: DeliverableFromCriterion, Declaration: "touch zeta/last.go"},
+				{Path: "alpha/first.go", Source: DeliverableFromCriterion, Declaration: "touch alpha/first.go", Readings: []string{"alpha/first.go"}},
+				{Path: "zeta/last.go", Source: DeliverableFromCriterion, Declaration: "touch zeta/last.go", Readings: []string{"zeta/last.go"}},
 			},
+		},
+		{
+			// verifyFile reads a relative path in the namespace its spec's
+			// commands run in, and falls back to the root reading. The preflight
+			// must ask about both, or it could refuse on the reading verify
+			// does not use.
+			name: "a verification file check carries the namespace reading verify will use",
+			artifact: PlanArtifact{
+				Verification: VerificationPlan{
+					Commands: []VerificationCommandCheck{{Command: "go test ./...", WorkingDirectory: "backend"}},
+					Files:    []VerificationFileCheck{{Path: "out/report.pdf", Exists: true}},
+				},
+			},
+			want: []RequiredDeliverable{{
+				Path: "out/report.pdf", Source: DeliverableFromVerification, Declaration: "out/report.pdf",
+				Readings: []string{"out/report.pdf", "backend/out/report.pdf"},
+			}},
 		},
 		{
 			name:     "the generic artifact every standalone objective gets names nothing",
@@ -170,6 +189,21 @@ func TestEvaluateDeliverableObservability(t *testing.T) {
 		}
 		return out
 	}
+	// vf builds contractual deliverables: Verification.Files with Exists true.
+	vf := func(paths ...string) []RequiredDeliverable {
+		out := make([]RequiredDeliverable, 0, len(paths))
+		for _, p := range paths {
+			out = append(out, RequiredDeliverable{Path: p, Source: DeliverableFromVerification, Declaration: p, Readings: []string{p}})
+		}
+		return out
+	}
+	both := func(sets ...[]RequiredDeliverable) []RequiredDeliverable {
+		var out []RequiredDeliverable
+		for _, s := range sets {
+			out = append(out, s...)
+		}
+		return out
+	}
 	ign := func(path, pattern string) IgnoredDeliverable {
 		return IgnoredDeliverable{Path: path, RuleSource: ".gitignore", RuleLine: 3, Pattern: pattern}
 	}
@@ -198,12 +232,115 @@ func TestEvaluateDeliverableObservability(t *testing.T) {
 			wantHidden: []string{"postrunqa/report.csv"},
 		},
 		{
+			// The audited BLOCKER. The task requires both files; only the
+			// report is declared structurally. The worker's change to
+			// src/main.go satisfies the completion classifier, verify reads
+			// out/report.pdf from the worktree's filesystem and passes it, and
+			// the integration commit (`git add -A`, no -f) drops it. AO would
+			// report success with a required deliverable lost.
+			name:       "a contractual deliverable ignored beside an observable one refuses",
+			intent:     domain.WorkflowWriteIntentMutating,
+			required:   both(vf("out/report.pdf"), req("src/main.go")),
+			ignored:    []IgnoredDeliverable{ign("out/report.pdf", "out/")},
+			wantReady:  false,
+			wantHidden: []string{"out/report.pdf"},
+		},
+		{
+			name:       "several contractual deliverables, one ignored, refuses naming only that one",
+			intent:     domain.WorkflowWriteIntentMutating,
+			required:   vf("docs/a.md", "out/report.pdf", "src/main.go"),
+			ignored:    []IgnoredDeliverable{ign("out/report.pdf", "out/")},
+			wantReady:  false,
+			wantHidden: []string{"out/report.pdf"},
+		},
+		{
+			name:      "several contractual deliverables, all observable, proceeds",
+			intent:    domain.WorkflowWriteIntentMutating,
+			required:  vf("docs/a.md", "out/report.pdf", "src/main.go"),
+			ignored:   nil,
+			wantReady: true,
+		},
+		{
+			name:     "several contractual deliverables, all ignored, refuses naming them all",
+			intent:   domain.WorkflowWriteIntentMutating,
+			required: vf("out/b.pdf", "out/a.pdf"),
+			ignored: []IgnoredDeliverable{
+				ign("out/b.pdf", "out/"),
+				ign("out/a.pdf", "out/"),
+			},
+			wantReady:  false,
+			wantHidden: []string{"out/a.pdf", "out/b.pdf"},
+		},
+		{
 			// A criterion that mentions a build output in passing is a common
-			// sentence, not a defect: the work still lands in the tracked file.
-			name:      "one observable path is enough, even beside an ignored one",
+			// sentence, not a defect: prose does not carry contractual force,
+			// so an ignored path found ONLY in prose, beside an observable one,
+			// does not refuse.
+			name:      "a prose-only ignored path beside an observable one proceeds",
 			intent:    domain.WorkflowWriteIntentMutating,
 			required:  req("backend/internal/a/b.go", "dist/app.js"),
 			ignored:   []IgnoredDeliverable{ign("dist/app.js", "dist/")},
+			wantReady: true,
+		},
+		{
+			name:      "contractual observable plus a prose-only ignored path proceeds",
+			intent:    domain.WorkflowWriteIntentMutating,
+			required:  both(vf("src/main.go"), req("dist/app.js")),
+			ignored:   []IgnoredDeliverable{ign("dist/app.js", "dist/")},
+			wantReady: true,
+		},
+		{
+			// The refusal names the contractual path only: the prose mention
+			// is observable and was never the problem.
+			name:       "contractual ignored plus an observable prose path refuses on the contractual one",
+			intent:     domain.WorkflowWriteIntentMutating,
+			required:   both(vf("out/report.pdf"), req("docs/notes.md")),
+			ignored:    []IgnoredDeliverable{ign("out/report.pdf", "out/")},
+			wantReady:  false,
+			wantHidden: []string{"out/report.pdf"},
+		},
+		{
+			name:     "contractual and prose paths all ignored refuses naming every one",
+			intent:   domain.WorkflowWriteIntentMutating,
+			required: both(vf("out/report.pdf"), req("dist/app.js")),
+			ignored: []IgnoredDeliverable{
+				ign("out/report.pdf", "out/"),
+				ign("dist/app.js", "dist/"),
+			},
+			wantReady:  false,
+			wantHidden: []string{"dist/app.js", "out/report.pdf"},
+		},
+		{
+			// verify may read either spelling; the file is only lost when
+			// both are ignored.
+			name:   "a contractual path with one observable reading proceeds",
+			intent: domain.WorkflowWriteIntentMutating,
+			required: []RequiredDeliverable{{
+				Path: "out/report.pdf", Source: DeliverableFromVerification, Declaration: "out/report.pdf",
+				Readings: []string{"out/report.pdf", "backend/out/report.pdf"},
+			}, {Path: "src/main.go", Source: DeliverableFromCriterion, Readings: []string{"src/main.go"}}},
+			ignored:   []IgnoredDeliverable{ign("out/report.pdf", "/out/")},
+			wantReady: true,
+		},
+		{
+			name:   "a contractual path with every reading ignored refuses under its declared name",
+			intent: domain.WorkflowWriteIntentMutating,
+			required: []RequiredDeliverable{{
+				Path: "out/report.pdf", Source: DeliverableFromVerification, Declaration: "out/report.pdf",
+				Readings: []string{"out/report.pdf", "backend/out/report.pdf"},
+			}, {Path: "src/main.go", Source: DeliverableFromCriterion, Readings: []string{"src/main.go"}}},
+			ignored: []IgnoredDeliverable{
+				ign("out/report.pdf", "out/"),
+				ign("backend/out/report.pdf", "out/"),
+			},
+			wantReady:  false,
+			wantHidden: []string{"out/report.pdf"},
+		},
+		{
+			name:      "a contractual read-only task is never refused",
+			intent:    domain.WorkflowWriteIntentReadOnly,
+			required:  both(vf("out/report.pdf"), req("src/main.go")),
+			ignored:   []IgnoredDeliverable{ign("out/report.pdf", "out/")},
 			wantReady: true,
 		},
 		{
