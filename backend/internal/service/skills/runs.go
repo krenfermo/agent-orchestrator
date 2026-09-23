@@ -400,7 +400,8 @@ func classifyExecutionError(err error) (store.SkillRunState, string) {
 	switch {
 	case errors.Is(err, skillrunner.ErrImageNotApproved), errors.Is(err, skillimage.ErrNotApproved),
 		errors.Is(err, skillrunner.ErrToolNotApproved), errors.Is(err, skillrunner.ErrStagingUnusable),
-		errors.Is(err, skillrunner.ErrRuntimeUnavailable):
+		errors.Is(err, skillrunner.ErrRuntimeUnavailable), errors.Is(err, skillrunner.ErrStagingNotVisible),
+		errors.Is(err, skillrunner.ErrStagedInputsMismatch), errors.Is(err, skillrunner.ErrBoundaryNotDemonstrated):
 		return store.SkillRunRefused, code
 	}
 	// A lower layer (the trust root) may answer with an already-coded API
@@ -414,10 +415,15 @@ func classifyExecutionError(err error) (store.SkillRunState, string) {
 // refusalCodes are the boundary's "no": each one is a policy or precondition
 // an operator must change before a rerun can do anything different.
 var refusalCodes = map[string]bool{
-	"SKILL_IMAGE_NOT_APPROVED":  true,
-	"SKILL_RUNTIME_UNAVAILABLE": true,
-	"SKILL_STAGING_UNUSABLE":    true,
-	"SKILL_TOOL_NOT_APPROVED":   true,
+	"SKILL_IMAGE_NOT_APPROVED":           true,
+	"SKILL_IMAGE_APPROVAL_INACTIVE":      true, // revoked or expired
+	"SKILL_IMAGE_NOT_PRESENT":            true,
+	"SKILL_IMAGE_DIGEST_MISMATCH":        true,
+	"SKILL_IMAGE_UNVERIFIABLE":           true,
+	"SKILL_IMAGE_TRUST_ROOT_UNAVAILABLE": true,
+	"SKILL_RUNTIME_UNAVAILABLE":          true,
+	"SKILL_STAGING_UNUSABLE":             true,
+	"SKILL_TOOL_NOT_APPROVED":            true,
 }
 
 // CancelRun asks a queued or running run of this project to stop.

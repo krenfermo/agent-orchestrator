@@ -35,6 +35,10 @@ const RunIDLabel = "ao.skillrun.id"
 // staging directory name: no path separators, no leading dash, bounded.
 var runIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,79}$`)
 
+// ErrBoundaryNotDemonstrated is returned when a run's own evidence does not
+// show a control the runner attested. The output of such a run is not trusted.
+var ErrBoundaryNotDemonstrated = errors.New("skillrunner: the run did not demonstrate")
+
 // ValidRunID reports whether id may name a container label and a staging
 // directory.
 func ValidRunID(id string) bool { return runIDRe.MatchString(id) }
@@ -556,7 +560,7 @@ func (e BoundaryEvidence) Verify(claimed []skillcatalog.Control) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("skillrunner: the run did not demonstrate %s", strings.Join(missing, ", "))
+		return fmt.Errorf("%w %s", ErrBoundaryNotDemonstrated, strings.Join(missing, ", "))
 	}
 	return nil
 }

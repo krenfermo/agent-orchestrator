@@ -350,3 +350,21 @@ func TestStartRun_WithoutDurableRunsRefuses(t *testing.T) {
 	}
 	_ = domain.ProjectID("")
 }
+
+// Found by the 2B E2E against a real daemon: a REVOKED approval answers with
+// SKILL_IMAGE_APPROVAL_INACTIVE (not the not-approved sentinel), and it was
+// recorded as failed. It is the boundary saying no, so it is refused.
+func TestStartRun_ARevokedApprovalIsRefused(t *testing.T) {
+	r := newRunRig(t, false, false, "aod-owner-1")
+	approval, err := r.auth.Approve(context.Background(), approveRequest(r.scope, digestOf('b')))
+	if err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if err := r.auth.Revoke(context.Background(), approval.ID, admin, adminPerms()); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	d := r.waitTerminal(t, r.start(t, "").ID)
+	if d.State != store.SkillRunRefused {
+		t.Fatalf("a run under a revoked approval ended %q (%s), want refused", d.State, d.ErrorCode)
+	}
+}
