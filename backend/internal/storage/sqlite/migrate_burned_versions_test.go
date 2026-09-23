@@ -174,6 +174,7 @@ var shippedMigrations = map[int64]string{
 	168: "0168_session_last_signal.sql",
 	169: "0169_usage_turn_class.sql",
 	170: "0170_usage_cache_ttl.sql",
+	171: "0171_workflow_attempt_error_class_drift.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they
