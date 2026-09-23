@@ -94,7 +94,10 @@ func newSkillsWorld(t *testing.T) *skillsWorld {
 			// The trust root refuses to approve bytes it cannot see, so the
 			// e2e harness supplies the host check a real daemon gets from the
 			// container runtime.
-			skills.NewImageAuthority(st, st).WithImageInspector(presentInspector{}), st, "", ""))
+			skills.NewImageAuthority(st, st).WithImageInspector(presentInspector{}), st, "", ""),
+		// Durable runs are wired exactly as the daemon wires them, so the
+		// run-history routes are exercised against the real store.
+		skills.WithDurableRuns(st, "aod-httpd-e2e", nil, nil))
 	deps := APIDeps{
 		Auth:             authMgr,
 		Projects:         &fakeProjectManager{items: projects},
@@ -619,4 +622,22 @@ func TestSkillRun_RefusesAnythingItDoesNotDeclare(t *testing.T) {
 		w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/security-audit/run", ownerCookie,
 			body, http.StatusBadRequest)
 	}
+}
+
+// The run history is a project read: a viewer lists it, a stranger gets 404,
+// an unknown or foreign run id is 404, and cancelling needs project.manage.
+func TestSkillRuns_HistoryRoutesAreProjectScoped(t *testing.T) {
+	w := newSkillsWorld(t)
+	ownerCookie := w.login("owner")
+	w.grantProjectRole(w.viewer, "medusa", domain.ProjectRoleViewer)
+	viewerCookie := w.login("viewer")
+
+	body := w.expect(http.MethodGet, "/api/v1/projects/medusa/skills/runs", viewerCookie, "", http.StatusOK)
+	if !strings.Contains(body, `"runs":[]`) {
+		t.Fatalf("an empty history must be an empty list, got %s", body)
+	}
+	w.expect(http.MethodGet, "/api/v1/projects/medusa/skills/runs?limit=0", ownerCookie, "", http.StatusBadRequest)
+	w.expect(http.MethodGet, "/api/v1/projects/medusa/skills/runs/skr-doesnotexist", ownerCookie, "", http.StatusNotFound)
+	w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/runs/skr-doesnotexist/cancel", viewerCookie, "", http.StatusForbidden)
+	w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/runs/skr-doesnotexist/cancel", ownerCookie, "", http.StatusNotFound)
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillcatalog"
+	"github.com/aoagents/agent-orchestrator/backend/internal/testsupport/dockerlock"
 )
 
 // The tests in this file drive a REAL container runtime. They are the evidence
@@ -38,6 +39,9 @@ func liveRunner(t *testing.T) *Runner {
 	if !r.Available() {
 		t.Skipf("no container runtime on this host: %s", r.Unavailable())
 	}
+	// Host-wide: other packages' live tests start containers on the same
+	// runtime and some of these assertions are about host-wide state.
+	dockerlock.Acquire(t)
 	return r
 }
 

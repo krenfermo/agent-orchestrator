@@ -32,7 +32,8 @@ siguiente subalcance.
 3. **Frente 9 (arquitectura empresarial) queda en diseño** hasta estabilizar.
 4. **Congelar funcionalidad nueva en ECC** tras integrar estas correcciones.
    Skills sigue aislado en `feat/skills-catalog-foundation` y **no** forma parte
-   de este lote.
+   de este lote. *(Actualizado 2026-09-23: Skills se integró en ECC a partir del
+   2026-09-09 — fases 1-13; ver Frente 2.)*
 
 ## Cómo leer los estados
 
@@ -70,7 +71,7 @@ No estaba en la lista de nueve frentes y va primero porque condiciona a todos.
 | ECC → `main` | **Pendiente** | `git rev-list --count main..feat/engineering-control-center` = 303 |
 | Ramas mergeadas en ECC y no en `main` | **Integrado (ECC)** | 28 ramas de feature mergeadas en ECC, incluidas `p4a-sso-oidc`, `p4b-users-teams-rbac`, `p4c-multitenancy` |
 | Lote de correcciones 2026-09-09 | **Integrado (ECC)** | `fix/oidc-secret-out-of-process-env`, `fix/migration-rebuild-fk-gate`, `feat/planner-rejected-result-evidence`, `fix/workflow-attention-i18n`, `docs/consolidated-roadmap` — cuatro merges `--no-ff` + `43883a5c2` |
-| Ramas listas y **no** integradas | **Implementado** | `feat/backup-restore` (respaldo restaurable), `feat/skills-catalog-foundation` (aislada por decisión), `fix/new-session-naming` |
+| Ramas listas y **no** integradas | **Implementado** | `feat/backup-restore` (respaldo restaurable), `feat/skills-catalog-foundation` (aislada por decisión; *integrada en ECC desde el 2026-09-09, ver Frente 2*), `fix/new-session-naming` |
 
 **Criterio de aceptación:** una release desde `main` que arranque, migre una
 `ao.db` real y pase el gate de `npm run lint` + `go test -race`.
@@ -119,10 +120,22 @@ gastar el turno. Coste bajo, evita exactamente el bloqueo observado.
 
 | Elemento | Estado | Evidencia |
 | --- | --- | --- |
-| Catálogo de Skills | **Implementado, no integrado** | rama `feat/skills-catalog-foundation` (trabajo de otro frente, no auditado aquí) |
-| Auditoría de seguridad por proyecto a demanda | **Pendiente** | — |
-| Manifiesto de capacidades y permisos mínimos | **Pendiente** | — |
-| Pentest activo con autorización explícita | **Pendiente** | — |
+| Catálogo, manifiesto `ao.skill/v1`, activación por proyecto, capabilities | **Integrado** (fases 1-13, migraciones 0161-0167) | ADR 0003-0009, `docs/skills/` |
+| Runner aislado en contenedor, modo `static-code` | **Integrado** | ADR 0004; único modo ejecutable, escáner determinista (no agente) |
+| **2A — auditoría** | **Cerrada** | decisiones D1-D5 abajo |
+| **2B — runs durables, historial, reconcile** | **Implementado en `feat/skills-2b-run-persistence`, pendiente de merge** | [`skills/skill-runs.md`](skills/skill-runs.md), migración 0172, E2E real con Docker |
+| 2C — modos con agente | **Pendiente** | D1 |
+| 2D — scanners deterministas (secret-scan, dependencies) | **Pendiente** | necesita egress empaquetado (D4) para dependencies |
+| 2E — Security Audit SAST completo | **Pendiente** | — |
+| 2F — DAST / pentest activo con autorización explícita | **Pendiente** | `net.active_scan` + control propio |
+| 2G — E2E, hardening y cierre | **Pendiente** | — |
+
+**Decisiones de 2A (aprobadas):** D1 — arquitectura objetivo: agente dentro del
+runner; paso intermedio en 2C: agente en el host de solo lectura únicamente para
+Skills builtin/trusted; DAST siempre aislado. D2 — limpiar las fixtures del
+piloto en la DB productiva como mantenimiento separado. D3 — un `SkillRun` vive
+fuera del motor de workflows. D4 — el egress proxy entra en el release, fuera de
+2B. D5 — housekeeping de ramas/worktrees después de 2B.
 
 **Dependencia dura:** el gateway de capacidades de reviewers interactivos
 ([ADR 0002](adr/0002-secure-interactive-reviewer-gateway.md)) ya establece que

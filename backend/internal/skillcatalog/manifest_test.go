@@ -113,6 +113,7 @@ func TestManifestValidation_RejectsInvalidManifests(t *testing.T) {
 		{"unsupported api version", "apiVersion: ao.skill/v1", "apiVersion: ao.skill/v2", "apiVersion"},
 		{"uppercase id", "id: example-audit", "id: ExampleAudit", "kebab-case"},
 		{"reserved id", "id: example-audit", "id: using-ao", "reserved"},
+		{"reserved id: the run-history route segment", "id: example-audit", "id: runs", "reserved"},
 		{"non semver version", "version: 1.2.3", "version: v1.2", "MAJOR.MINOR.PATCH"},
 		{"missing description", "description: An example skill used by the catalog tests.", "description: \"\"", "description is required"},
 		{"builtin origin with ref", "  type: local\n  ref: /tmp/example", "  type: builtin\n  ref: /tmp/example", "origin.ref must be empty"},

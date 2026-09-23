@@ -117,6 +117,9 @@ type Service struct {
 	// stagingRoot optionally overrides where inputs are staged, for a host
 	// whose container runtime shares only certain paths.
 	stagingRoot string
+	// runs is the durable-run engine (runs.go), nil unless WithDurableRuns was
+	// given.
+	runs *runEngine
 }
 
 // Option configures a Service at construction.

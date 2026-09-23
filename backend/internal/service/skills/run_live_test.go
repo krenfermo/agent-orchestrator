@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillcatalog"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillimage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
+	"github.com/aoagents/agent-orchestrator/backend/internal/testsupport/dockerlock"
 )
 
 // run_live_test.go -- the whole path against a REAL container: an activation, an
@@ -34,6 +35,7 @@ func liveRunner(t *testing.T) *skillrunner.Runner {
 	if !r.Available() {
 		t.Skipf("no container runtime on this host: %s", r.Unavailable())
 	}
+	dockerlock.Acquire(t)
 	return r
 }
 

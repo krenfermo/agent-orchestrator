@@ -22,7 +22,12 @@ type SkillInstall = components["schemas"]["SkillInstallView"];
 type SkillCapability = components["schemas"]["SkillCapabilityView"];
 type SkillActivation = components["schemas"]["SkillActivationView"];
 type SkillDryRun = components["schemas"]["SkillDryRunResponse"];
-type SkillRun = components["schemas"]["ControllersSkillRunView"];
+type SkillRunStart = components["schemas"]["ControllersSkillRunStartView"];
+type SkillRunSummary = components["schemas"]["ControllersSkillRunSummaryView"];
+type SkillRunDetail = components["schemas"]["ControllersSkillRunDetailView"];
+
+const TERMINAL_RUN_STATES = new Set(["succeeded", "failed", "refused", "cancelled"]);
+const isTerminalRun = (state: string | undefined) => state !== undefined && TERMINAL_RUN_STATES.has(state);
 
 /**
  * The static scan's report, as this panel reads it.
@@ -74,11 +79,16 @@ type StaticScanReport = {
  * effective permissions on this project — rather than from a role name this
  * component would have to interpret. A viewer sees the state read-only.
  *
- * The dry run is the only "run"-shaped control here, and it runs nothing. AO
- * has no isolated runner, so a mode needing containment reports blocked with
- * the reason. The panel shows that refusal plainly instead of hiding the mode:
+ * The dry run runs nothing: it reports what a run of a mode would need, and a
+ * mode that cannot run shows the reason plainly instead of being hidden --
  * "this cannot run yet, and here is exactly what is missing" is the answer
- * somebody came to this screen for.
+ * somebody came to this screen for. Only a mode the dry run calls executable
+ * offers Run.
+ *
+ * A run is durable (Frente 2 / 2B): Run returns the run the daemon accepted,
+ * this panel follows it until it ends, and the project's run history keeps
+ * every result. A report is shown only when the daemon verified its stored
+ * bytes against their digest.
  */
 export function ProjectSkillsSettingsSection({ projectId }: { projectId: string }) {
 	const { t } = useTranslation();
@@ -89,7 +99,8 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 	const [grant, setGrant] = useState<Record<string, boolean>>({});
 	const [dryRunMode, setDryRunMode] = useState<Record<string, string>>({});
 	const [dryRun, setDryRun] = useState<SkillDryRun | null>(null);
-	const [run, setRun] = useState<SkillRun | null>(null);
+	const [activeRunId, setActiveRunId] = useState<string>("");
+	const runsKey = ["skills", "project", projectId, "runs"] as const;
 
 	const skills = useQuery({
 		queryKey: skillsKey,
@@ -118,6 +129,37 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 		},
 		enabled: skills.isSuccess,
 		retry: false,
+	});
+
+	// The run this panel is following, re-read until it reaches a terminal state.
+	const activeRun = useQuery({
+		queryKey: [...runsKey, activeRunId] as const,
+		queryFn: async (): Promise<SkillRunDetail> => {
+			const { data, error: apiError } = await apiClient.GET("/api/v1/projects/{id}/skills/runs/{runId}", {
+				credentials: "include",
+				params: { path: { id: projectId, runId: activeRunId } },
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		enabled: activeRunId !== "",
+		refetchInterval: (query) => (isTerminalRun(query.state.data?.run.state) ? false : 1000),
+	});
+
+	// The project's run history, newest first. It refreshes while the run being
+	// followed is still in flight so its row moves with it.
+	const runHistory = useQuery({
+		queryKey: runsKey,
+		queryFn: async (): Promise<SkillRunSummary[]> => {
+			const { data, error: apiError } = await apiClient.GET("/api/v1/projects/{id}/skills/runs", {
+				credentials: "include",
+				params: { path: { id: projectId }, query: { limit: 20 } },
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data.runs;
+		},
+		enabled: skills.isSuccess,
+		refetchInterval: activeRunId !== "" && !isTerminalRun(activeRun.data?.run.state) ? 2000 : false,
 	});
 
 	const permissions = skills.data?.permissions ?? [];
@@ -199,7 +241,7 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 	// only appears once a dry run has said this mode is executable. The dry run
 	// is the honest way to find out; this is the thing that acts.
 	const execute = useMutation({
-		mutationFn: async ({ skill, modeId }: { skill: string; modeId: string }): Promise<SkillRun> => {
+		mutationFn: async ({ skill, modeId }: { skill: string; modeId: string }): Promise<SkillRunStart> => {
 			const { data, error: apiError } = await apiClient.POST(
 				"/api/v1/projects/{id}/skills/{skillId}/run",
 				{
@@ -212,17 +254,64 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 			return data;
 		},
 		onSuccess: (data) => {
-			setRun(data);
+			// The daemon accepted a durable run (or returned the one already in
+			// flight for this mode). Follow it; the result arrives when it ends.
+			setActiveRunId(data.run.id);
 			setError(null);
-			// A run leaves an audit row; the activation view carries the last
-			// one, so the list is no longer current.
+			void queryClient.invalidateQueries({ queryKey: runsKey });
 			invalidate();
 		},
 		onError: (err: Error) => {
-			setRun(null);
 			setError(err.message);
 		},
 	});
+
+	const cancelRun = useMutation({
+		mutationFn: async (runId: string): Promise<SkillRunSummary> => {
+			const { data, error: apiError } = await apiClient.POST(
+				"/api/v1/projects/{id}/skills/runs/{runId}/cancel",
+				{ credentials: "include", params: { path: { id: projectId, runId } } },
+			);
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		onSuccess: () => {
+			setError(null);
+			void queryClient.invalidateQueries({ queryKey: runsKey });
+		},
+		onError: (err: Error) => setError(err.message),
+	});
+
+	const runStateLabel = (state: string) => {
+		switch (state) {
+			case "queued":
+				return t("settings.project.skills.runState.queued");
+			case "running":
+				return t("settings.project.skills.runState.running");
+			case "succeeded":
+				return t("settings.project.skills.runState.succeeded");
+			case "refused":
+				return t("settings.project.skills.runState.refused");
+			case "cancelled":
+				return t("settings.project.skills.runState.cancelled");
+			default:
+				return t("settings.project.skills.runState.failed");
+		}
+	};
+
+	const runStateBadge = (state: string) => {
+		switch (state) {
+			case "succeeded":
+				return "success" as const;
+			case "failed":
+			case "refused":
+				return "error" as const;
+			case "cancelled":
+				return "neutral" as const;
+			default:
+				return "warning" as const;
+		}
+	};
 
 	const riskBadge = (risk: string) => {
 		switch (risk) {
@@ -366,7 +455,7 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 					</div>
 				) : null}
 
-				{run && run.skillId === row.skillId ? runPanel(run) : null}
+				{activeRun.data && activeRun.data.run.skillId === row.skillId ? runPanel(activeRun.data) : null}
 			</li>
 		);
 	};
@@ -377,8 +466,52 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 	// until you know what was read, and a scan that staged nothing and found
 	// nothing must not render like a clean bill of health — so when nothing was
 	// scanned, this says so in words rather than showing an empty list.
-	const runPanel = (result: SkillRun) => {
-		const report = (result.report ?? {}) as StaticScanReport;
+	const runPanel = (detail: SkillRunDetail) => {
+		const run = detail.run;
+		if (!isTerminalRun(run.state)) {
+			return (
+				<div className="flex items-center gap-2" data-testid="project-skill-run-progress">
+					<Loader2 className="size-3 animate-spin" aria-hidden="true" />
+					<span className="text-caption">
+						{t("settings.project.skills.runInProgress", { id: run.id, state: runStateLabel(run.state) })}
+					</span>
+					{canManage ? (
+						<Button
+							variant="secondary"
+							size="sm"
+							disabled={cancelRun.isPending || run.cancelRequested}
+							onClick={() => cancelRun.mutate(run.id)}
+							data-testid="project-skill-run-cancel"
+						>
+							{t("settings.project.skills.cancelRun")}
+						</Button>
+					) : null}
+				</div>
+			);
+		}
+		if (run.state !== "succeeded") {
+			return (
+				<p className="flex items-start gap-2 text-caption text-error" data-testid="project-skill-run-ended">
+					<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+					{t("settings.project.skills.runEnded", {
+						id: run.id,
+						state: runStateLabel(run.state),
+						code: run.errorCode ?? "",
+						message: run.errorMessage ?? "",
+					})}
+				</p>
+			);
+		}
+		if (detail.integrity !== "verified" || !detail.report) {
+			// The stored report no longer matches its digest: it is not shown.
+			return (
+				<p className="flex items-start gap-2 text-caption text-error" data-testid="project-skill-run-unverified">
+					<ShieldAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+					{t("settings.project.skills.reportUnverified", { id: run.id })}
+				</p>
+			);
+		}
+		const report = (detail.report ?? {}) as StaticScanReport;
 		const coverage = report.coverage ?? {};
 		const findings = report.findings ?? [];
 		const scanned = coverage.filesScanned ?? 0;
@@ -646,6 +779,43 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 					) : null}
 				</div>
 			) : null}
+
+			{/* The project's run history. Every accepted run is here, including
+			    the ones that were refused, failed, cancelled or interrupted by a
+			    restart -- a history that only kept successes would read as a
+			    project that was audited more cleanly than it was. */}
+			<div className="flex flex-col gap-2 px-3" data-testid="project-skill-runs">
+				<p className="text-caption font-medium">{t("settings.project.skills.history")}</p>
+				{(runHistory.data ?? []).length === 0 ? (
+					<p className="text-caption text-settings-muted">{t("settings.project.skills.historyEmpty")}</p>
+				) : (
+					<ul className="flex flex-col gap-1">
+						{(runHistory.data ?? []).map((r) => (
+							<li key={r.id}>
+								<button
+									type="button"
+									className="flex w-full items-center gap-2 text-left text-caption"
+									onClick={() => setActiveRunId(r.id)}
+									data-testid="project-skill-run-row"
+								>
+									<Badge variant={runStateBadge(r.state)}>{runStateLabel(r.state)}</Badge>
+									<span className="font-medium">
+										{r.skillId}@{r.version} · {r.modeId}
+									</span>
+									<span className="text-settings-muted">
+										{new Date(r.createdAt).toLocaleString()}
+										{r.durationMs !== undefined && r.durationMs !== null
+											? ` · ${(r.durationMs / 1000).toFixed(1)}s`
+											: ""}
+										{" · "}
+										{r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ""}` : r.summary}
+									</span>
+								</button>
+							</li>
+						))}
+					</ul>
+				)}
+			</div>
 		</SettingsSection>
 	);
 }

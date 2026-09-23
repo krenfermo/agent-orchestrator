@@ -2929,5 +2929,17 @@
 	"cc.fact.notApplicable": "No aplica: ningún paso en curso",
 	"cc.incident.verify_failed.evidenceNoChecks": "el paso Verify falló; no hay resultado de checks registrado.",
 	"cc.usage.costPartial": "{{amount}} (parcial: excluye los modelos sin precio)",
-	"cc.objective.full": "Especificación completa"
+	"cc.objective.full": "Especificación completa",
+	"settings.project.skills.history": "Historial de ejecuciones",
+	"settings.project.skills.historyEmpty": "Aún no hay ejecuciones de skills registradas para este proyecto.",
+	"settings.project.skills.runInProgress": "La ejecución {{id}} está {{state}}.",
+	"settings.project.skills.runEnded": "La ejecución {{id}} terminó {{state}}: {{code}} {{message}}",
+	"settings.project.skills.reportUnverified": "La ejecución {{id}} terminó bien, pero su informe guardado ya no coincide con su digest, así que no se muestra.",
+	"settings.project.skills.cancelRun": "Cancelar",
+	"settings.project.skills.runState.queued": "en cola",
+	"settings.project.skills.runState.running": "en ejecución",
+	"settings.project.skills.runState.succeeded": "completada",
+	"settings.project.skills.runState.failed": "fallida",
+	"settings.project.skills.runState.refused": "rechazada",
+	"settings.project.skills.runState.cancelled": "cancelada"
 }

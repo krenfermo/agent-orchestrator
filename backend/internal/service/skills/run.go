@@ -134,9 +134,45 @@ type RunResult struct {
 // Steps 1-4 happen before anything is staged, so a refused run leaves no copy
 // of somebody's source on disk.
 func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, error) {
-	resolved, err := s.Resolve(ctx, req.ProjectID, req.SkillID)
+	prep, err := s.prepareRun(ctx, req)
 	if err != nil {
 		return RunResult{}, err
+	}
+	report, err := s.executeScan(ctx, prep, "")
+	if err != nil {
+		s.recordRun(ctx, store.SkillAuditRunRefused, req, prep.scope.Version, prep.mode.ID, "", err.Error())
+		return RunResult{}, executionError(err)
+	}
+	s.recordExecuted(ctx, prep, report)
+	return RunResult{
+		SkillID: prep.resolved.Package.Manifest.ID, Version: prep.scope.Version, ModeID: prep.mode.ID,
+		Tool: string(prep.tool), Report: report, Plan: prep.plan,
+	}, nil
+}
+
+// preparedRun is a run that passed every check that can be made before
+// anything is staged: resolved, authorized against AO's own attestation,
+// implemented, and with a derived scope. It is the one value both the
+// synchronous RunSkill and the durable StartRun execute, so the two paths can
+// never authorize differently.
+type preparedRun struct {
+	req          RunRequest
+	resolved     skillcatalog.Resolved
+	mode         skillcatalog.Mode
+	project      domain.ProjectRecord
+	inputs       map[string]string
+	plan         skillcatalog.Plan
+	tool         skillrunner.Tool
+	scope        skillimage.Scope
+	stagingPaths []string
+}
+
+// prepareRun performs steps 1-4 of RunSkill's contract. Every refusal is
+// audited as run_refused, exactly as before.
+func (s *Service) prepareRun(ctx context.Context, req RunRequest) (preparedRun, error) {
+	resolved, err := s.Resolve(ctx, req.ProjectID, req.SkillID)
+	if err != nil {
+		return preparedRun{}, err
 	}
 	manifest := resolved.Package.Manifest
 
@@ -146,20 +182,20 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 	}
 	mode, ok := manifest.Mode(modeID)
 	if !ok {
-		return RunResult{}, apierr.Invalid("SKILL_MODE_UNKNOWN",
+		return preparedRun{}, apierr.Invalid("SKILL_MODE_UNKNOWN",
 			fmt.Sprintf("%s has no mode %q", req.SkillID, modeID), nil)
 	}
 
 	project, ok, err := s.project(ctx, req.ProjectID)
 	if err != nil {
-		return RunResult{}, err
+		return preparedRun{}, err
 	}
 	if !ok {
-		return RunResult{}, apierr.NotFound("PROJECT_NOT_FOUND",
+		return preparedRun{}, apierr.NotFound("PROJECT_NOT_FOUND",
 			fmt.Sprintf("no project %q", req.ProjectID))
 	}
 	if strings.TrimSpace(project.Path) == "" {
-		return RunResult{}, apierr.Invalid("PROJECT_PATH_MISSING",
+		return preparedRun{}, apierr.Invalid("PROJECT_PATH_MISSING",
 			fmt.Sprintf("project %q has no checkout on this host to scan", req.ProjectID), nil)
 	}
 
@@ -173,7 +209,7 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 	}
 	if declared, ok := declaredInput(manifest, modeInputName); ok && declared.Required {
 		if named, given := supplied[modeInputName]; given && named != mode.ID {
-			return RunResult{}, apierr.Invalid("SKILL_MODE_INPUT_MISMATCH",
+			return preparedRun{}, apierr.Invalid("SKILL_MODE_INPUT_MISMATCH",
 				fmt.Sprintf("the run is authorized for mode %q and the %q input says %q",
 					mode.ID, modeInputName, named), nil)
 		}
@@ -181,7 +217,7 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 	}
 	inputs, err := skillcatalog.ResolveInputs(manifest, supplied)
 	if err != nil {
-		return RunResult{}, apierr.Invalid("SKILL_INPUTS_INVALID", err.Error(), nil)
+		return preparedRun{}, apierr.Invalid("SKILL_INPUTS_INVALID", err.Error(), nil)
 	}
 
 	// A missing execution environment is answered HERE, not at the top of the
@@ -199,7 +235,7 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 	if s.executor == nil {
 		s.recordRun(ctx, store.SkillAuditRunRefused, req, resolved.Activation.Version, mode.ID, "",
 			s.runnerRefusal())
-		return RunResult{}, apierr.Conflict("SKILL_RUNNER_UNAVAILABLE", s.runnerRefusal(), nil)
+		return preparedRun{}, apierr.Conflict("SKILL_RUNNER_UNAVAILABLE", s.runnerRefusal(), nil)
 	}
 
 	// The attestation is AO's own. RunRequest has no field for one, and this is
@@ -214,7 +250,7 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 	})
 	if err != nil {
 		s.recordRun(ctx, store.SkillAuditRunRefused, req, resolved.Activation.Version, mode.ID, "", err.Error())
-		return RunResult{}, apierr.Forbidden("SKILL_RUN_REFUSED", err.Error())
+		return preparedRun{}, apierr.Forbidden("SKILL_RUN_REFUSED", err.Error())
 	}
 	plan := skillcatalog.Plan{
 		Resolved: resolved, Mode: mode, Decision: decision, Inputs: inputs,
@@ -228,7 +264,7 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 		detail := fmt.Sprintf("mode %q is authorized but AO ships no execution path for it "+
 			"(implemented: %s)", mode.ID, implementedModes())
 		s.recordRun(ctx, store.SkillAuditRunRefused, req, resolved.Activation.Version, mode.ID, "", detail)
-		return RunResult{}, apierr.Conflict("SKILL_MODE_NOT_EXECUTABLE", detail, nil)
+		return preparedRun{}, apierr.Conflict("SKILL_MODE_NOT_EXECUTABLE", detail, nil)
 	}
 
 	// The scope is DERIVED, never supplied. Every field comes from something
@@ -245,36 +281,45 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 	stagingPaths, err := stagingPathsFor(manifest)
 	if err != nil {
 		s.recordRun(ctx, store.SkillAuditRunRefused, req, scope.Version, mode.ID, "", err.Error())
-		return RunResult{}, apierr.Conflict("SKILL_SCOPE_NOT_STAGEABLE", err.Error(), nil)
+		return preparedRun{}, apierr.Conflict("SKILL_SCOPE_NOT_STAGEABLE", err.Error(), nil)
 	}
+	return preparedRun{
+		req: req, resolved: resolved, mode: mode, project: project, inputs: inputs,
+		plan: plan, tool: tool, scope: scope, stagingPaths: stagingPaths,
+	}, nil
+}
 
-	report, err := s.executor.RunStaticScan(ctx, s.images, skillrunner.StaticScanRequest{
-		Scope:       scope,
-		ProjectID:   string(req.ProjectID),
-		ProjectPath: project.Path,
+// executeScan performs step 5: the container run. It records nothing: the
+// caller decides what the outcome means (a synchronous refusal, a durable run
+// that was cancelled, one whose daemon is shutting down) and audits it.
+//
+// runID, when set, is the durable run the scan belongs to. It labels the
+// container and names the staging directory so a restarted daemon can reap
+// exactly this run's leftovers.
+func (s *Service) executeScan(ctx context.Context, prep preparedRun, runID string) (skillrunner.StaticScanReport, error) {
+	return s.executor.RunStaticScan(ctx, s.images, skillrunner.StaticScanRequest{
+		Scope:       prep.scope,
+		ProjectID:   string(prep.req.ProjectID),
+		ProjectPath: prep.project.Path,
 		// The files come from the MANIFEST's declared read scope, not from the
 		// request. A caller who could name paths could name the ones the
 		// manifest was reviewed for not naming.
-		ScopePaths:          stagingPaths,
+		ScopePaths:          prep.stagingPaths,
 		StagingRootOverride: s.stagingRoot,
 		DataDir:             s.dataDir,
 		Params:              skillrunner.DefaultToolParams(),
 		Limits:              skillrunner.DefaultLimits(),
+		RunID:               runID,
 	})
-	if err != nil {
-		s.recordRun(ctx, store.SkillAuditRunRefused, req, scope.Version, mode.ID, "", err.Error())
-		return RunResult{}, executionError(err)
-	}
+}
 
-	s.recordRun(ctx, store.SkillAuditRunExecuted, req, scope.Version, mode.ID, report.ImageDigest,
+// recordExecuted audits a completed scan exactly as the synchronous path always
+// has, so the trail reads the same whichever path ran it.
+func (s *Service) recordExecuted(ctx context.Context, prep preparedRun, report skillrunner.StaticScanReport) {
+	s.recordRun(ctx, store.SkillAuditRunExecuted, prep.req, prep.scope.Version, prep.mode.ID, report.ImageDigest,
 		fmt.Sprintf("%s scanned %d of %d staged files, %d findings, approval %s by %s",
-			tool, report.Coverage.FilesScanned, report.Coverage.FilesStaged,
+			prep.tool, report.Coverage.FilesScanned, report.Coverage.FilesStaged,
 			len(report.Findings), report.ApprovalID, report.ApprovedBy))
-
-	return RunResult{
-		SkillID: manifest.ID, Version: scope.Version, ModeID: mode.ID,
-		Tool: string(tool), Report: report, Plan: plan,
-	}, nil
 }
 
 // executionError maps a runner refusal onto the API envelope without losing

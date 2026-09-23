@@ -56,9 +56,13 @@ function renderSection() {
 function mockSkills({
 	permissions,
 	activations,
+	runDetail,
+	runs = [],
 }: {
 	permissions: string[];
 	activations: unknown[];
+	runDetail?: unknown;
+	runs?: unknown[];
 }) {
 	return vi.spyOn(apiClient, "GET").mockImplementation((async (path: string) => {
 		if (path === "/api/v1/projects/{id}/skills") {
@@ -66,9 +70,33 @@ function mockSkills({
 				data: { projectId: "medusa", installed: [securityAudit], activations, permissions },
 			} as never;
 		}
+		if (path === "/api/v1/projects/{id}/skills/runs/{runId}") {
+			return { data: runDetail } as never;
+		}
+		if (path === "/api/v1/projects/{id}/skills/runs") {
+			return { data: { runs } } as never;
+		}
 		return { data: { skills: [securityAudit], capabilities: capabilityPolicy } } as never;
 	}) as never);
 }
+
+const runSummary = (state: string, extra: Record<string, unknown> = {}) => ({
+	id: "skr-1", projectId: "medusa", skillId: "security-audit", version: "0.1.0",
+	modeId: "static-code", tool: "ao.static-scan/v1", state, requestedBy: "ada",
+	inputs: {}, capabilities: ["repo.read", "report.write"], runnerId: "container/docker",
+	runnerControls: [], packageDigest: "abc123", summary: "", findingCount: 0,
+	truncated: false, cancelRequested: false, createdAt: new Date().toISOString(),
+	...extra,
+});
+
+const startedRun = { data: { run: runSummary("queued"), created: true } };
+
+const succeededDetail = (report: unknown) => ({
+	run: runSummary("succeeded", { reportSha256: "f00d", durationMs: 1200 }),
+	findings: [],
+	report,
+	integrity: "verified",
+});
 
 const enabledActivation = {
 	skillId: "security-audit",
@@ -291,28 +319,25 @@ describe("ProjectSkillsSettingsSection — running", () => {
 	});
 
 	it("renders coverage before findings, and names the bytes that ran", async () => {
-		mockSkills({ permissions: ["project.read", "project.manage"], activations: [enabledActivation] });
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: succeededDetail({
+			imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
+			coverage: {
+				filesStaged: 12, filesVisible: 12, filesScanned: 10,
+				skipped: [{ path: "vendor/big.bin", reason: "binary" }],
+				limitations: ["This is a pattern scanner, not a static analyzer."],
+			},
+			findings: [{
+				ruleId: "hardcoded-secret", severity: "high", category: "secrets",
+				title: "Possible hardcoded credential", path: "src/db.go", line: 42,
+				recommendation: "Move it to a secret store.", confidence: "possible",
+			}],
+		}),
+		});
 		const post = vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
 			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
-			return {
-				data: {
-					skillId: "security-audit", version: "0.1.0", modeId: "static-code",
-					tool: "ao.static-scan/v1",
-					report: {
-						imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
-						coverage: {
-							filesStaged: 12, filesVisible: 12, filesScanned: 10,
-							skipped: [{ path: "vendor/big.bin", reason: "binary" }],
-							limitations: ["This is a pattern scanner, not a static analyzer."],
-						},
-						findings: [{
-							ruleId: "hardcoded-secret", severity: "high", category: "secrets",
-							title: "Possible hardcoded credential", path: "src/db.go", line: 42,
-							recommendation: "Move it to a secret store.", confidence: "possible",
-						}],
-					},
-				},
-			} as never;
+			return startedRun as never;
 		}) as never);
 		renderSection();
 
@@ -342,20 +367,17 @@ describe("ProjectSkillsSettingsSection — running", () => {
 
 	// The failure this panel exists to prevent.
 	it("says an empty scan is not a clean result", async () => {
-		mockSkills({ permissions: ["project.read", "project.manage"], activations: [enabledActivation] });
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: succeededDetail({
+			imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
+			coverage: { filesStaged: 0, filesVisible: 0, filesScanned: 0 },
+			findings: [],
+		}),
+		});
 		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
 			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
-			return {
-				data: {
-					skillId: "security-audit", version: "0.1.0", modeId: "static-code",
-					tool: "ao.static-scan/v1",
-					report: {
-						imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
-						coverage: { filesStaged: 0, filesVisible: 0, filesScanned: 0 },
-						findings: [],
-					},
-				},
-			} as never;
+			return startedRun as never;
 		}) as never);
 		renderSection();
 
@@ -370,21 +392,18 @@ describe("ProjectSkillsSettingsSection — running", () => {
 	// AO does not stop a running container, so a revocation mid-run is a fact
 	// about the results and has to reach the reader.
 	it("reports an approval revoked while the run was in flight", async () => {
-		mockSkills({ permissions: ["project.read", "project.manage"], activations: [enabledActivation] });
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: succeededDetail({
+			imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
+			approvalRevokedDuringRun: true,
+			coverage: { filesStaged: 3, filesVisible: 3, filesScanned: 3 },
+			findings: [],
+		}),
+		});
 		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
 			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
-			return {
-				data: {
-					skillId: "security-audit", version: "0.1.0", modeId: "static-code",
-					tool: "ao.static-scan/v1",
-					report: {
-						imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
-						approvalRevokedDuringRun: true,
-						coverage: { filesStaged: 3, filesVisible: 3, filesScanned: 3 },
-						findings: [],
-					},
-				},
-			} as never;
+			return startedRun as never;
 		}) as never);
 		renderSection();
 
@@ -412,5 +431,89 @@ describe("ProjectSkillsSettingsSection — running", () => {
 			expect(screen.getByText(/no image is approved for this scope/)).toBeInTheDocument(),
 		);
 		expect(screen.queryByTestId("project-skill-run-report")).not.toBeInTheDocument();
+	});
+
+	it("follows a run in progress and offers to cancel it", async () => {
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: { run: runSummary("running"), findings: [], integrity: "none" },
+		});
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			if (path.endsWith("/cancel")) return { data: runSummary("running", { cancelRequested: true }) } as never;
+			return startedRun as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		expect(await screen.findByTestId("project-skill-run-progress")).toHaveTextContent("skr-1");
+		expect(screen.queryByTestId("project-skill-run-report")).not.toBeInTheDocument();
+		await userEvent.click(screen.getByTestId("project-skill-run-cancel"));
+		await waitFor(() =>
+			expect(apiClient.POST).toHaveBeenCalledWith(
+				"/api/v1/projects/{id}/skills/runs/{runId}/cancel",
+				expect.objectContaining({ params: { path: { id: "medusa", runId: "skr-1" } } }),
+			),
+		);
+	});
+
+	// A run that ended without a report says how it ended, with the code.
+	it("says how an unsuccessful run ended", async () => {
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: {
+				run: runSummary("refused", { errorCode: "SKILL_IMAGE_NOT_APPROVED", errorMessage: "no image is approved" }),
+				findings: [], integrity: "none",
+			},
+		});
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return startedRun as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		expect(await screen.findByTestId("project-skill-run-ended")).toHaveTextContent("SKILL_IMAGE_NOT_APPROVED");
+		expect(screen.queryByTestId("project-skill-run-report")).not.toBeInTheDocument();
+	});
+
+	// A report whose stored bytes no longer match their digest is never shown.
+	it("does not show a report that failed verification", async () => {
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: { run: runSummary("succeeded", { reportSha256: "f00d" }), findings: [], integrity: "mismatch" },
+		});
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return startedRun as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		expect(await screen.findByTestId("project-skill-run-unverified")).toBeInTheDocument();
+		expect(screen.queryByTestId("project-skill-run-report")).not.toBeInTheDocument();
+	});
+
+	it("lists the project's run history, including runs that did not succeed", async () => {
+		mockSkills({
+			permissions: ["project.read"], activations: [enabledActivation],
+			runs: [
+				runSummary("succeeded", { id: "skr-2", summary: "scanned 2 of 3 staged files, 1 findings", durationMs: 1500 }),
+				runSummary("failed", { id: "skr-1", errorCode: "SKILL_RUN_INTERRUPTED", errorMessage: "the daemon stopped" }),
+			],
+		});
+		renderSection();
+
+		const history = await screen.findByTestId("project-skill-runs");
+		await waitFor(() => expect(screen.getAllByTestId("project-skill-run-row")).toHaveLength(2));
+		expect(history).toHaveTextContent("scanned 2 of 3 staged files");
+		expect(history).toHaveTextContent("SKILL_RUN_INTERRUPTED");
+		expect(history).toHaveTextContent("1.5s");
 	});
 });

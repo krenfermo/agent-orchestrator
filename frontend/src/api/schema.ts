@@ -1195,8 +1195,59 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skills: execute one authorized mode of an activated skill. Requires project.manage -- the dry run reports what WOULD happen, this makes it happen. Refused unless the skill is installed and enabled, the version is pinned, an administrator has approved an image digest for this exact scope, every capability the mode declares is granted, and the runtime attests every control the mode needs. The caller contributes no image, no command and no argv. Only ao.static-scan/v1 is implemented; every other tool is refused with the missing control named. */
+        /** Skills: accept one authorized mode of an activated skill for execution and return the durable run (202). Requires project.manage -- the dry run reports what WOULD happen, this makes it happen. Refused (4xx, no run created) unless the skill is installed and enabled, the version is pinned, every capability the mode declares is granted, the runtime attests every control the mode needs, and the mode is implemented. The image approval for this exact scope is checked when the run executes: a run without one ends refused. The caller contributes no image, no command and no argv. Only ao.static-scan/v1 is implemented. The same idempotencyKey, or any request while a run for this project, skill and mode is queued or running, returns THAT run with created=false. */
         post: operations["runProjectSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: the project's run history, newest first. Each run records the skill version, mode, the capabilities its authorization granted, the runner's attested controls, the approved image, and how it ended. Reports are not included; read one run for its verified report. Requires project.read. */
+        get: operations["listProjectSkillRuns"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: one run of this project with its findings. The report is served only when its stored bytes still hash to reportSha256 (integrity "verified"); a mismatch is reported, never served. A run id from another project is 404. Requires project.read. */
+        get: operations["getProjectSkillRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/runs/{runId}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: ask a queued or running run to stop. A running run's container is stopped and removed and the run ends cancelled; a result that completes in the same instant is discarded rather than recorded as a success the caller asked not to have. 409 when the run already ended. Requires project.manage. */
+        post: operations["cancelProjectSkillRun"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5379,17 +5430,71 @@ export interface components {
         ControllersSetupStatusResponse: {
             setupRequired: boolean;
         };
+        ControllersSkillRunDetailView: {
+            findings: components["schemas"]["ControllersSkillRunFindingView"][];
+            /** @enum {string} */
+            integrity: "verified" | "mismatch" | "none";
+            report?: unknown;
+            run: components["schemas"]["ControllersSkillRunSummaryView"];
+        };
+        ControllersSkillRunFindingView: {
+            category: string;
+            confidence: string;
+            line: number;
+            ordinal: number;
+            path: string;
+            recommendation: string;
+            ruleId: string;
+            severity: string;
+            title: string;
+        };
+        ControllersSkillRunListResponse: {
+            runs: components["schemas"]["ControllersSkillRunSummaryView"][];
+        };
         ControllersSkillRunRequest: {
+            idempotencyKey?: string;
             inputs?: {
                 [key: string]: string;
             };
             modeId?: string;
         };
-        ControllersSkillRunView: {
+        ControllersSkillRunStartView: {
+            created: boolean;
+            run: components["schemas"]["ControllersSkillRunSummaryView"];
+        };
+        ControllersSkillRunSummaryView: {
+            approvalId?: string;
+            approvedBy?: string;
+            cancelRequested: boolean;
+            capabilities: string[];
+            /** Format: date-time */
+            createdAt: string;
+            durationMs?: null | number;
+            errorCode?: string;
+            errorMessage?: string;
+            findingCount: number;
+            /** Format: date-time */
+            finishedAt?: null | string;
+            id: string;
+            imageDigest?: string;
+            inputs: {
+                [key: string]: string;
+            } | null;
             modeId: string;
-            report: unknown;
+            packageDigest: string;
+            projectId: string;
+            reportSha256?: string;
+            requestedBy: string;
+            runnerControls: string[];
+            runnerId: string;
             skillId: string;
+            /** Format: date-time */
+            startedAt?: null | string;
+            /** @enum {string} */
+            state: "queued" | "running" | "succeeded" | "failed" | "refused" | "cancelled";
+            summary: string;
             tool: string;
+            truncated: boolean;
             version: string;
         };
         ControllersStartProviderSetupResponse: {
@@ -13269,13 +13374,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description OK */
-            200: {
+            /** @description Accepted */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ControllersSkillRunView"];
+                    "application/json": components["schemas"]["ControllersSkillRunStartView"];
                 };
             };
             /** @description Bad Request */
@@ -13285,6 +13390,190 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectSkillRuns: {
+        parameters: {
+            query?: {
+                /** @description Maximum runs to return, newest first. Defaults to 50. */
+                limit?: null | number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSkillRunListResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectSkillRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill run identifier (skr-...). */
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSkillRunDetailView"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cancelProjectSkillRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill run identifier (skr-...). */
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSkillRunSummaryView"];
                 };
             };
             /** @description Unauthorized */

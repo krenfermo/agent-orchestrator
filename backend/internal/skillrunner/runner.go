@@ -24,6 +24,25 @@ import (
 // worker session and must not be swept by the session reaper.
 const RunLabel = "ao.skillrun"
 
+// RunIDLabel names the durable skill run a container belongs to, when the
+// caller has one. It carries no authority -- isolation is decided entirely by
+// the fixed flags in containerArgs -- and exists so a daemon that restarts
+// after a crash can remove exactly the container of the run it lost, and
+// nothing another installation sharing the same runtime started.
+const RunIDLabel = "ao.skillrun.id"
+
+// runIDRe is the only shape a run id may take on a command line or as a
+// staging directory name: no path separators, no leading dash, bounded.
+var runIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,79}$`)
+
+// ErrBoundaryNotDemonstrated is returned when a run's own evidence does not
+// show a control the runner attested. The output of such a run is not trusted.
+var ErrBoundaryNotDemonstrated = errors.New("skillrunner: the run did not demonstrate")
+
+// ValidRunID reports whether id may name a container label and a staging
+// directory.
+func ValidRunID(id string) bool { return runIDRe.MatchString(id) }
+
 // nobodyUser is the uid:gid the container runs as. Not root, and not a uid
 // that maps onto anything AO owns.
 const nobodyUser = "65534:65534"
@@ -75,6 +94,10 @@ type Request struct {
 	// checkout is never mounted writable -- or at all.
 	Workspace *Workspace
 	Limits    Limits
+	// RunID, when set, labels the container with RunIDLabel so a restarted
+	// daemon can find it. It must satisfy ValidRunID. Empty means an
+	// unlabelled run, which is what every caller before durable runs made.
+	RunID string
 }
 
 // BoundaryEvidence is what AO observed about the boundary, collected from the
@@ -342,6 +365,9 @@ func validateRequest(req Request) error {
 	if len(req.Argv) == 0 {
 		return errors.New("skillrunner: a command is required")
 	}
+	if req.RunID != "" && !ValidRunID(req.RunID) {
+		return fmt.Errorf("skillrunner: run id %q is not a valid run id", req.RunID)
+	}
 	if strings.TrimSpace(req.InputDir) == "" {
 		return errors.New("skillrunner: an input directory is required")
 	}
@@ -387,6 +413,11 @@ func (r *Runner) containerArgs(name string, req Request, limits Limits) []string
 	args := []string{
 		"run", "--rm", "--name", name,
 		"--label", RunLabel + "=1",
+	}
+	if req.RunID != "" {
+		args = append(args, "--label", RunIDLabel+"="+req.RunID)
+	}
+	args = append(args,
 		// AO never fetches an image. The approved digest must already be on
 		// this host; an absent one is a refusal, not a download. Without this
 		// flag a run could quietly pull whatever a registry currently serves
@@ -409,8 +440,8 @@ func (r *Runner) containerArgs(name string, req Request, limits Limits) []string
 		"--cpus", strconv.FormatFloat(limits.CPUs, 'f', -1, 64),
 		"--pids-limit", strconv.Itoa(limits.MaxPIDs),
 		"--workdir", "/work",
-		"-v", req.InputDir + ":/work:ro",
-	}
+		"-v", req.InputDir+":/work:ro",
+	)
 	// The secrets mount is read-only, and the workspace pair is the only
 	// writable thing a run ever gets. There is no code path here that mounts a
 	// home directory, a credential file, AO's data dir or the container
@@ -529,7 +560,7 @@ func (e BoundaryEvidence) Verify(claimed []skillcatalog.Control) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("skillrunner: the run did not demonstrate %s", strings.Join(missing, ", "))
+		return fmt.Errorf("%w %s", ErrBoundaryNotDemonstrated, strings.Join(missing, ", "))
 	}
 	return nil
 }
