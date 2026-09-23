@@ -2893,5 +2893,17 @@
 	"cc.fact.notApplicable": "Not applicable: no step in progress",
 	"cc.incident.verify_failed.evidenceNoChecks": "the Verify step failed; no check result is recorded.",
 	"cc.usage.costPartial": "{{amount}} (partial: unpriced models excluded)",
-	"cc.objective.full": "Full specification"
+	"cc.objective.full": "Full specification",
+	"settings.project.skills.history": "运行历史",
+	"settings.project.skills.historyEmpty": "此项目尚未记录任何技能运行。",
+	"settings.project.skills.runInProgress": "运行 {{id}}：{{state}}。",
+	"settings.project.skills.runEnded": "运行 {{id}} 已结束（{{state}}）：{{code}} {{message}}",
+	"settings.project.skills.reportUnverified": "运行 {{id}} 已成功，但其存储的报告与摘要不再匹配，因此不予显示。",
+	"settings.project.skills.cancelRun": "取消",
+	"settings.project.skills.runState.queued": "排队中",
+	"settings.project.skills.runState.running": "运行中",
+	"settings.project.skills.runState.succeeded": "成功",
+	"settings.project.skills.runState.failed": "失败",
+	"settings.project.skills.runState.refused": "已拒绝",
+	"settings.project.skills.runState.cancelled": "已取消"
 }

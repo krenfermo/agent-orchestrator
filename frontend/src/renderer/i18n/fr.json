@@ -2929,5 +2929,17 @@
 	"cc.fact.notApplicable": "Not applicable: no step in progress",
 	"cc.incident.verify_failed.evidenceNoChecks": "the Verify step failed; no check result is recorded.",
 	"cc.usage.costPartial": "{{amount}} (partial: unpriced models excluded)",
-	"cc.objective.full": "Full specification"
+	"cc.objective.full": "Full specification",
+	"settings.project.skills.history": "Historique des exécutions",
+	"settings.project.skills.historyEmpty": "Aucune exécution de skill n’a encore été enregistrée pour ce projet.",
+	"settings.project.skills.runInProgress": "L’exécution {{id}} est {{state}}.",
+	"settings.project.skills.runEnded": "L’exécution {{id}} s’est terminée ({{state}}) : {{code}} {{message}}",
+	"settings.project.skills.reportUnverified": "L’exécution {{id}} a réussi, mais son rapport enregistré ne correspond plus à son empreinte ; il n’est donc pas affiché.",
+	"settings.project.skills.cancelRun": "Annuler",
+	"settings.project.skills.runState.queued": "en file d’attente",
+	"settings.project.skills.runState.running": "en cours",
+	"settings.project.skills.runState.succeeded": "réussie",
+	"settings.project.skills.runState.failed": "échouée",
+	"settings.project.skills.runState.refused": "refusée",
+	"settings.project.skills.runState.cancelled": "annulée"
 }

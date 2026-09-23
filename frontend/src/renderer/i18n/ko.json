@@ -2911,5 +2911,17 @@
 	"cc.fact.notApplicable": "Not applicable: no step in progress",
 	"cc.incident.verify_failed.evidenceNoChecks": "the Verify step failed; no check result is recorded.",
 	"cc.usage.costPartial": "{{amount}} (partial: unpriced models excluded)",
-	"cc.objective.full": "Full specification"
+	"cc.objective.full": "Full specification",
+	"settings.project.skills.history": "실행 기록",
+	"settings.project.skills.historyEmpty": "이 프로젝트에 기록된 스킬 실행이 아직 없습니다.",
+	"settings.project.skills.runInProgress": "실행 {{id}}: {{state}}.",
+	"settings.project.skills.runEnded": "실행 {{id}} 종료({{state}}): {{code}} {{message}}",
+	"settings.project.skills.reportUnverified": "실행 {{id}}은(는) 성공했지만 저장된 보고서가 다이제스트와 일치하지 않아 표시하지 않습니다.",
+	"settings.project.skills.cancelRun": "취소",
+	"settings.project.skills.runState.queued": "대기 중",
+	"settings.project.skills.runState.running": "실행 중",
+	"settings.project.skills.runState.succeeded": "성공",
+	"settings.project.skills.runState.failed": "실패",
+	"settings.project.skills.runState.refused": "거부됨",
+	"settings.project.skills.runState.cancelled": "취소됨"
 }

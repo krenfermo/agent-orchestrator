@@ -2911,5 +2911,17 @@
 	"cc.fact.notApplicable": "Not applicable: no step in progress",
 	"cc.incident.verify_failed.evidenceNoChecks": "the Verify step failed; no check result is recorded.",
 	"cc.usage.costPartial": "{{amount}} (partial: unpriced models excluded)",
-	"cc.objective.full": "Full specification"
+	"cc.objective.full": "Full specification",
+	"settings.project.skills.history": "Ausführungsverlauf",
+	"settings.project.skills.historyEmpty": "Für dieses Projekt wurden noch keine Skill-Ausführungen aufgezeichnet.",
+	"settings.project.skills.runInProgress": "Ausführung {{id}}: {{state}}.",
+	"settings.project.skills.runEnded": "Ausführung {{id}} beendet ({{state}}): {{code}} {{message}}",
+	"settings.project.skills.reportUnverified": "Ausführung {{id}} war erfolgreich, aber der gespeicherte Bericht stimmt nicht mehr mit seinem Digest überein und wird daher nicht angezeigt.",
+	"settings.project.skills.cancelRun": "Abbrechen",
+	"settings.project.skills.runState.queued": "in der Warteschlange",
+	"settings.project.skills.runState.running": "läuft",
+	"settings.project.skills.runState.succeeded": "erfolgreich",
+	"settings.project.skills.runState.failed": "fehlgeschlagen",
+	"settings.project.skills.runState.refused": "abgelehnt",
+	"settings.project.skills.runState.cancelled": "abgebrochen"
 }
