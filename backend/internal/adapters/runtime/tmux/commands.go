@@ -401,6 +401,14 @@ func killSessionInstanceArgs(instanceID string) []string {
 // returned only names would hand every later decision back to whatever holds
 // the name at the moment it is used, which is the ABA this whole adapter is
 // built to exclude.
+//
+// The separator is a SPACE, not a tab. tmux sanitizes control characters in
+// format output unless the client runs under a UTF-8 locale: with no locale
+// variables at all -- the ordinary environment of a daemon started by launchd
+// or by the desktop app -- or with LANG=C, the tab comes back as `_`, every
+// line fails to split, and the inventory is silently empty. A session id is
+// always `$` followed by digits, so the first space is unambiguous whatever
+// the name holds.
 func listSessionsArgs() []string {
-	return []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}
+	return []string{"list-sessions", "-F", "#{session_id} #{session_name}"}
 }

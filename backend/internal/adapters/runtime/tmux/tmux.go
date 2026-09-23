@@ -2303,7 +2303,8 @@ func (r *Runtime) ListSessions(ctx context.Context) ([]ports.RuntimeSessionSumma
 		if line == "" {
 			continue
 		}
-		instance, name, ok := strings.Cut(line, "\t")
+		// Split at the first space: see listSessionsArgs for why not a tab.
+		instance, name, ok := strings.Cut(line, " ")
 		if !ok || !isSessionInstanceID(instance) {
 			// A line AO cannot parse into an incarnation is not a session it
 			// may act on. Skipped rather than guessed at.
