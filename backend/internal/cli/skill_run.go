@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -88,15 +92,71 @@ type skillRunDTO struct {
 }
 
 type runSkillBodyDTO struct {
-	ModeID string            `json:"modeId,omitempty"`
-	Inputs map[string]string `json:"inputs,omitempty"`
+	ModeID         string            `json:"modeId,omitempty"`
+	Inputs         map[string]string `json:"inputs,omitempty"`
+	IdempotencyKey string            `json:"idempotencyKey,omitempty"`
+}
+
+// skillRunSummaryDTO mirrors controllers.SkillRunSummaryView.
+type skillRunSummaryDTO struct {
+	ID           string   `json:"id"`
+	SkillID      string   `json:"skillId"`
+	Version      string   `json:"version"`
+	ModeID       string   `json:"modeId"`
+	Tool         string   `json:"tool"`
+	State        string   `json:"state"`
+	RequestedBy  string   `json:"requestedBy"`
+	Capabilities []string `json:"capabilities"`
+	Summary      string   `json:"summary"`
+	FindingCount int      `json:"findingCount"`
+	ReportSHA256 string   `json:"reportSha256"`
+	ErrorCode    string   `json:"errorCode"`
+	ErrorMessage string   `json:"errorMessage"`
+	CreatedAt    string   `json:"createdAt"`
+	DurationMs   *int64   `json:"durationMs"`
+}
+
+type skillRunStartDTO struct {
+	Run     skillRunSummaryDTO `json:"run"`
+	Created bool               `json:"created"`
+}
+
+type skillRunDetailDTO struct {
+	Run       skillRunSummaryDTO `json:"run"`
+	Report    json.RawMessage    `json:"report"`
+	Integrity string             `json:"integrity"`
+}
+
+type skillRunListDTO struct {
+	Runs []skillRunSummaryDTO `json:"runs"`
+}
+
+func skillRunTerminal(state string) bool {
+	switch state {
+	case "succeeded", "failed", "refused", "cancelled":
+		return true
+	}
+	return false
+}
+
+// skillRunPath builds a project-scoped runs path with every segment escaped.
+func skillRunPath(project string, rest ...string) string {
+	parts := []string{"projects", url.PathEscape(project), "skills"}
+	for _, r := range rest {
+		parts = append(parts, url.PathEscape(r))
+	}
+	return strings.Join(parts, "/")
 }
 
 func newSkillsRunCommand(ctx *commandContext) *cobra.Command {
 	var (
-		project string
-		mode    string
-		inputs  map[string]string
+		project        string
+		mode           string
+		inputs         map[string]string
+		idempotencyKey string
+		noWait         bool
+		waitTimeout    time.Duration
+		pollInterval   time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "run <skill-id>",
@@ -106,6 +166,9 @@ func newSkillsRunCommand(ctx *commandContext) *cobra.Command {
 			"this exact scope, every capability the mode declares is granted, and the runtime " +
 			"attests every control the mode needs.\n\n" +
 			"You contribute no image, no command and no argv. AO authors what runs.\n\n" +
+			"The run is durable: AO records it, executes it in the background and keeps the " +
+			"result. This command waits for it and prints the verified report; with --no-wait " +
+			"it prints the run id and returns (see `ao skills runs`).\n\n" +
 			"Only the static, read-only scan is implemented. Use `ao skills dry-run` first to " +
 			"see what a run would need; it starts nothing.",
 		Args: cobra.ExactArgs(1),
@@ -117,20 +180,156 @@ func newSkillsRunCommand(ctx *commandContext) *cobra.Command {
 			if strings.TrimSpace(project) == "" {
 				return usageError{fmt.Errorf("--project is required")}
 			}
-			var res skillRunDTO
-			if err := ctx.postJSON(cmd.Context(),
-				"projects/"+project+"/skills/"+skill+"/run",
-				runSkillBodyDTO{ModeID: strings.TrimSpace(mode), Inputs: inputs},
-				&res); err != nil {
+			var start skillRunStartDTO
+			if err := ctx.postJSON(cmd.Context(), skillRunPath(project, skill, "run"),
+				runSkillBodyDTO{ModeID: strings.TrimSpace(mode), Inputs: inputs,
+					IdempotencyKey: strings.TrimSpace(idempotencyKey)},
+				&start); err != nil {
 				return err
 			}
-			return renderSkillRun(cmd, res)
+			out := cmd.OutOrStdout()
+			verb := "accepted"
+			if !start.Created {
+				verb = "already exists (idempotent or in flight)"
+			}
+			if _, err := fmt.Fprintf(out, "run %s %s: %s@%s mode=%s\n",
+				start.Run.ID, verb, start.Run.SkillID, start.Run.Version, start.Run.ModeID); err != nil {
+				return err
+			}
+			if noWait {
+				return nil
+			}
+			detail, err := waitForSkillRun(cmd, ctx, project, start.Run.ID, waitTimeout, pollInterval)
+			if err != nil {
+				return err
+			}
+			return renderSkillRunOutcome(cmd, detail)
 		},
 	}
 	f := cmd.Flags()
 	f.StringVar(&project, "project", "", "Project to run in (required)")
 	f.StringVar(&mode, "mode", "", "Mode id; required unless the skill declares exactly one")
 	f.StringToStringVar(&inputs, "input", nil, "Declared input, repeatable: --input key=value")
+	f.StringVar(&idempotencyKey, "idempotency-key", "", "Retry-safe key: the same key returns the run it created")
+	f.BoolVar(&noWait, "no-wait", false, "Print the run id and return without waiting for the result")
+	f.DurationVar(&waitTimeout, "wait-timeout", 15*time.Minute, "How long to wait for the run to end")
+	f.DurationVar(&pollInterval, "poll-interval", time.Second, "How often to check the run while waiting")
+	return cmd
+}
+
+func waitForSkillRun(cmd *cobra.Command, ctx *commandContext, project, runID string,
+	timeout, interval time.Duration,
+) (skillRunDetailDTO, error) {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		var detail skillRunDetailDTO
+		if err := ctx.getJSON(cmd.Context(), skillRunPath(project, "runs", runID), &detail); err != nil {
+			return skillRunDetailDTO{}, err
+		}
+		if skillRunTerminal(detail.Run.State) {
+			return detail, nil
+		}
+		if detail.Run.State != "queued" && detail.Run.State != "running" {
+			return skillRunDetailDTO{}, fmt.Errorf("the daemon reported run %s in state %q, which is not "+
+				"a skill run state; not waiting on it", runID, detail.Run.State)
+		}
+		if time.Now().After(deadline) {
+			return skillRunDetailDTO{}, fmt.Errorf("run %s is still %s after %s; it keeps running -- "+
+				"check it with `ao skills runs --project %s %s`", runID, detail.Run.State, timeout, project, runID)
+		}
+		select {
+		case <-cmd.Context().Done():
+			return skillRunDetailDTO{}, cmd.Context().Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+// renderSkillRunOutcome prints a finished run: the verified report for a
+// success, the reason for anything else -- which is also a non-zero exit.
+func renderSkillRunOutcome(cmd *cobra.Command, detail skillRunDetailDTO) error {
+	r := detail.Run
+	if r.State != "succeeded" {
+		return fmt.Errorf("run %s ended %s: %s: %s", r.ID, r.State, r.ErrorCode, r.ErrorMessage)
+	}
+	if detail.Integrity != "verified" || len(detail.Report) == 0 {
+		return fmt.Errorf("run %s succeeded but its stored report did not verify (integrity %q); "+
+			"it is not shown", r.ID, detail.Integrity)
+	}
+	res := skillRunDTO{SkillID: r.SkillID, Version: r.Version, ModeID: r.ModeID, Tool: r.Tool}
+	if err := json.Unmarshal(detail.Report, &res.Report); err != nil {
+		return fmt.Errorf("decode run %s report: %w", r.ID, err)
+	}
+	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "report sha256 %s (verified)\n", r.ReportSHA256); err != nil {
+		return err
+	}
+	return renderSkillRun(cmd, res)
+}
+
+func newSkillsRunsCommand(ctx *commandContext) *cobra.Command {
+	var (
+		project string
+		limit   int
+	)
+	cmd := &cobra.Command{
+		Use:   "runs [run-id]",
+		Short: "List a project's skill runs, or show one with its verified report",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(project) == "" {
+				return usageError{fmt.Errorf("--project is required")}
+			}
+			out := cmd.OutOrStdout()
+			if len(args) == 1 {
+				var detail skillRunDetailDTO
+				if err := ctx.getJSON(cmd.Context(), skillRunPath(project, "runs", args[0]), &detail); err != nil {
+					return err
+				}
+				r := detail.Run
+				if _, err := fmt.Fprintf(out, "run %s  %s  %s@%s mode=%s  requested by %s at %s\n",
+					r.ID, r.State, r.SkillID, r.Version, r.ModeID, r.RequestedBy, r.CreatedAt); err != nil {
+					return err
+				}
+				if !skillRunTerminal(r.State) {
+					_, err := fmt.Fprintln(out, "still in progress")
+					return err
+				}
+				return renderSkillRunOutcome(cmd, detail)
+			}
+			path := skillRunPath(project, "runs")
+			if limit > 0 {
+				path += "?limit=" + strconv.Itoa(limit)
+			}
+			var list skillRunListDTO
+			if err := ctx.getJSON(cmd.Context(), path, &list); err != nil {
+				return err
+			}
+			if len(list.Runs) == 0 {
+				_, err := fmt.Fprintln(out, "no skill runs recorded for this project")
+				return err
+			}
+			for _, r := range list.Runs {
+				dur := "-"
+				if r.DurationMs != nil {
+					dur = (time.Duration(*r.DurationMs) * time.Millisecond).String()
+				}
+				detail := r.Summary
+				if r.ErrorCode != "" {
+					detail = r.ErrorCode + ": " + r.ErrorMessage
+				}
+				if _, err := fmt.Fprintf(out, "%s  %-9s  %s@%s  %-11s  %s  %s  %s\n",
+					r.ID, r.State, r.SkillID, r.Version, r.ModeID, r.CreatedAt, dur, detail); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&project, "project", "", "Project whose runs to show (required)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum runs to list (1-500; default 50)")
 	return cmd
 }
 

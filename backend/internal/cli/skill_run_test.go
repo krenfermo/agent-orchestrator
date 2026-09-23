@@ -2,10 +2,92 @@ package cli
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// runRequestLog records every request the fake daemon saw, in order.
+type runRequestLog struct {
+	mu   sync.Mutex
+	reqs []skillsCapture
+}
+
+func (l *runRequestLog) all() []skillsCapture {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]skillsCapture(nil), l.reqs...)
+}
+
+// skillRunCLI is a fake daemon for the durable run flow: POST .../run answers
+// startStatus/startBody, and each GET of the run answers the next of details
+// (the last one repeats), which is how a test walks a run through its states.
+func skillRunCLI(t *testing.T, startStatus int, startBody string, details ...string) (*runRequestLog, Deps) {
+	t.Helper()
+	cfg := setConfigEnv(t)
+	log := &runRequestLog{}
+	var mu sync.Mutex
+	next := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if strings.HasPrefix(r.URL.Path, "/internal/") {
+			// The CLI's own invocation telemetry is not part of the run flow.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		log.mu.Lock()
+		log.reqs = append(log.reqs, skillsCapture{method: r.Method, path: r.URL.RequestURI(), body: string(raw)})
+		log.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(startStatus)
+			_, _ = io.WriteString(w, startBody)
+			return
+		}
+		mu.Lock()
+		body := `{}`
+		if len(details) > 0 {
+			i := next
+			if i >= len(details) {
+				i = len(details) - 1
+			}
+			body = details[i]
+			next++
+		}
+		mu.Unlock()
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+	return log, Deps{ProcessAlive: func(int) bool { return true }}
+}
+
+const startAccepted = `{"run":{"id":"skr-1","skillId":"security-audit","version":"1.2.0",
+ "modeId":"static-code","tool":"ao.static-scan/v1","state":"queued"},"created":true}`
+
+// runDetail wraps a report (taken from a legacy SkillRunView body) as the detail
+// of a run in the given state.
+func runDetail(t *testing.T, legacyViewBody, state, integrity string) string {
+	t.Helper()
+	var legacy map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(legacyViewBody), &legacy); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	detail := map[string]any{
+		"run": map[string]any{"id": "skr-1", "skillId": "security-audit", "version": "1.2.0",
+			"modeId": "static-code", "tool": "ao.static-scan/v1", "state": state,
+			"reportSha256": "abc123"},
+		"integrity": integrity,
+	}
+	if state == "succeeded" && integrity == "verified" {
+		detail["report"] = legacy["report"]
+	}
+	b, _ := json.Marshal(detail)
+	return string(b)
+}
 
 // `ao skills run`. The assertions are about two things: the request AO sends
 // (the caller contributes no command), and the ORDER the report is rendered in.
@@ -36,17 +118,21 @@ const staticRunBody = `{"skillId":"security-audit","version":"1.2.0","modeId":"s
    "recommendation":"Move it to a secret store.","confidence":"possible"}]}}`
 
 func TestSkillsRun_SendsNoCommandAndRendersCoverageFirst(t *testing.T) {
-	capture, deps := skillImagesCLI(t, http.StatusOK, staticRunBody)
+	log, deps := skillRunCLI(t, http.StatusAccepted, startAccepted,
+		runDetail(t, staticRunBody, "succeeded", "verified"))
 
 	out, errOut, err := executeCLI(t, deps, "skills", "run", "security-audit",
 		"--project", "medusa", "--mode", "static-code", "--input", "depth=2")
 	if err != nil {
 		t.Fatalf("run: %v (%s)", err, errOut)
 	}
-	if capture.method != http.MethodPost ||
-		capture.path != "/api/v1/projects/medusa/skills/security-audit/run" {
-		t.Fatalf("%s %s", capture.method, capture.path)
+	reqs := log.all()
+	if len(reqs) < 2 || reqs[0].method != http.MethodPost ||
+		reqs[0].path != "/api/v1/projects/medusa/skills/security-audit/run" ||
+		reqs[1].path != "/api/v1/projects/medusa/skills/runs/skr-1" {
+		t.Fatalf("requests: %+v", reqs)
 	}
+	capture := reqs[0]
 
 	// The body carries the mode and the declared inputs, and NOTHING that could
 	// contribute to a command line.
@@ -96,11 +182,11 @@ func TestSkillsRun_SendsNoCommandAndRendersCoverageFirst(t *testing.T) {
 // The failure this rendering exists to prevent: an empty report read as a clean
 // one. Nothing scanned and nothing found must say so in words.
 func TestSkillsRun_AnEmptyScanDoesNotReadAsClean(t *testing.T) {
-	_, deps := skillImagesCLI(t, http.StatusOK,
-		`{"skillId":"security-audit","version":"1.2.0","modeId":"static-code",
+	_, deps := skillRunCLI(t, http.StatusAccepted, startAccepted,
+		runDetail(t, `{"skillId":"security-audit","version":"1.2.0","modeId":"static-code",
 		  "tool":"ao.static-scan/v1","report":{"imageDigest":"sha256:dddd",
 		  "approvalId":"skimg-9","approvedBy":"admin",
-		  "coverage":{"filesStaged":0,"filesVisible":0,"filesScanned":0},"findings":[]}}`)
+		  "coverage":{"filesStaged":0,"filesVisible":0,"filesScanned":0},"findings":[]}}`, "succeeded", "verified"))
 
 	out, _, err := executeCLI(t, deps, "skills", "run", "security-audit", "--project", "medusa")
 	if err != nil {
@@ -114,11 +200,11 @@ func TestSkillsRun_AnEmptyScanDoesNotReadAsClean(t *testing.T) {
 // An approval withdrawn mid-run is a fact about the results, and AO does not
 // kill a running container. It must reach the reader.
 func TestSkillsRun_SurfacesAnApprovalRevokedDuringTheRun(t *testing.T) {
-	_, deps := skillImagesCLI(t, http.StatusOK,
-		`{"skillId":"security-audit","version":"1.2.0","modeId":"static-code",
+	_, deps := skillRunCLI(t, http.StatusAccepted, startAccepted,
+		runDetail(t, `{"skillId":"security-audit","version":"1.2.0","modeId":"static-code",
 		  "tool":"ao.static-scan/v1","report":{"imageDigest":"sha256:dddd",
 		  "approvalId":"skimg-9","approvedBy":"admin","approvalRevokedDuringRun":true,
-		  "coverage":{"filesStaged":3,"filesVisible":3,"filesScanned":3},"findings":[]}}`)
+		  "coverage":{"filesStaged":3,"filesVisible":3,"filesScanned":3},"findings":[]}}`, "succeeded", "verified"))
 
 	out, _, err := executeCLI(t, deps, "skills", "run", "security-audit", "--project", "medusa")
 	if err != nil {
@@ -152,5 +238,96 @@ func TestSkillsRun_SurfacesTheDaemonsRefusal(t *testing.T) {
 	}
 	if !strings.Contains(err.Error()+errOut, "no skill runner") {
 		t.Fatalf("the refusal must reach the operator: %v %s", err, errOut)
+	}
+}
+
+// The CLI waits through the run's states and only then renders the result.
+func TestSkillsRun_WaitsForTheDurableRunToEnd(t *testing.T) {
+	log, deps := skillRunCLI(t, http.StatusAccepted, startAccepted,
+		`{"run":{"id":"skr-1","state":"queued"}}`,
+		`{"run":{"id":"skr-1","state":"running"}}`,
+		runDetail(t, staticRunBody, "succeeded", "verified"))
+	out, _, err := executeCLI(t, deps, "skills", "run", "security-audit", "--project", "medusa",
+		"--poll-interval", "1ms")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if n := len(log.all()); n != 4 {
+		t.Fatalf("expected 1 start + 3 polls, got %d requests", n)
+	}
+	for _, want := range []string{"run skr-1 accepted", "report sha256 abc123 (verified)", "coverage"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A run that did not succeed is a non-zero exit that names the code.
+func TestSkillsRun_AnUnsuccessfulRunFailsWithItsCode(t *testing.T) {
+	_, deps := skillRunCLI(t, http.StatusAccepted, startAccepted,
+		`{"run":{"id":"skr-1","state":"refused","errorCode":"SKILL_IMAGE_NOT_APPROVED",
+		  "errorMessage":"no image is approved for this scope"},"integrity":"none"}`)
+	_, _, err := executeCLI(t, deps, "skills", "run", "security-audit", "--project", "medusa")
+	if err == nil || !strings.Contains(err.Error(), "SKILL_IMAGE_NOT_APPROVED") {
+		t.Fatalf("a refused run must fail with its code: %v", err)
+	}
+}
+
+// A report whose stored bytes no longer verify is never rendered.
+func TestSkillsRun_AnUnverifiedReportIsNotShown(t *testing.T) {
+	_, deps := skillRunCLI(t, http.StatusAccepted, startAccepted,
+		runDetail(t, staticRunBody, "succeeded", "mismatch"))
+	out, _, err := executeCLI(t, deps, "skills", "run", "security-audit", "--project", "medusa")
+	if err == nil || !strings.Contains(err.Error(), "did not verify") || strings.Contains(out, "coverage") {
+		t.Fatalf("an unverified report was rendered: err=%v\n%s", err, out)
+	}
+}
+
+// The project id is a path segment and is escaped like one.
+func TestSkillsRun_EscapesTheProjectID(t *testing.T) {
+	log, deps := skillRunCLI(t, http.StatusAccepted, startAccepted)
+	if _, _, err := executeCLI(t, deps, "skills", "run", "security-audit",
+		"--project", "team a/b?x", "--no-wait"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	reqs := log.all()
+	if len(reqs) != 1 || reqs[0].path != "/api/v1/projects/team%20a%2Fb%3Fx/skills/security-audit/run" {
+		t.Fatalf("requests: %+v", reqs)
+	}
+}
+
+// --no-wait returns after the start and sends the idempotency key.
+func TestSkillsRun_NoWaitSendsTheKeyAndReturns(t *testing.T) {
+	log, deps := skillRunCLI(t, http.StatusAccepted, startAccepted)
+	out, _, err := executeCLI(t, deps, "skills", "run", "security-audit", "--project", "medusa",
+		"--no-wait", "--idempotency-key", "ci-42")
+	if err != nil || !strings.Contains(out, "skr-1") {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	reqs := log.all()
+	if len(reqs) != 1 || !strings.Contains(reqs[0].body, `"idempotencyKey":"ci-42"`) {
+		t.Fatalf("requests: %+v", reqs)
+	}
+}
+
+func TestSkillsRuns_ListsTheHistory(t *testing.T) {
+	capture, deps := skillImagesCLI(t, http.StatusOK,
+		`{"runs":[{"id":"skr-2","state":"succeeded","skillId":"security-audit","version":"1.2.0",
+		  "modeId":"static-code","createdAt":"2026-09-23T10:00:00Z","durationMs":1500,
+		  "summary":"ao.static-scan/v1 scanned 2 of 3 staged files, 1 findings"},
+		 {"id":"skr-1","state":"failed","skillId":"security-audit","version":"1.2.0",
+		  "modeId":"static-code","createdAt":"2026-09-23T09:00:00Z",
+		  "errorCode":"SKILL_RUN_INTERRUPTED","errorMessage":"the daemon stopped"}]}`)
+	out, _, err := executeCLI(t, deps, "skills", "runs", "--project", "medusa", "--limit", "5")
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if capture.path != "/api/v1/projects/medusa/skills/runs?limit=5" {
+		t.Fatalf("path %s", capture.path)
+	}
+	for _, want := range []string{"skr-2", "succeeded", "1.5s", "skr-1", "SKILL_RUN_INTERRUPTED"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("history is missing %q:\n%s", want, out)
+		}
 	}
 }

@@ -3449,12 +3449,12 @@ paths:
               $ref: '#/components/schemas/ControllersSkillRunRequest'
         required: true
       responses:
-        "200":
+        "202":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ControllersSkillRunView'
-          description: OK
+                $ref: '#/components/schemas/ControllersSkillRunStartView'
+          description: Accepted
         "400":
           content:
             application/json:
@@ -3491,14 +3491,184 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
-      summary: 'Skills: execute one authorized mode of an activated skill. Requires
-        project.manage -- the dry run reports what WOULD happen, this makes it happen.
-        Refused unless the skill is installed and enabled, the version is pinned,
-        an administrator has approved an image digest for this exact scope, every
-        capability the mode declares is granted, and the runtime attests every control
-        the mode needs. The caller contributes no image, no command and no argv. Only
-        ao.static-scan/v1 is implemented; every other tool is refused with the missing
-        control named.'
+      summary: 'Skills: accept one authorized mode of an activated skill for execution
+        and return the durable run (202). Requires project.manage -- the dry run reports
+        what WOULD happen, this makes it happen. Refused (4xx, no run created) unless
+        the skill is installed and enabled, the version is pinned, every capability
+        the mode declares is granted, the runtime attests every control the mode needs,
+        and the mode is implemented. The image approval for this exact scope is checked
+        when the run executes: a run without one ends refused. The caller contributes
+        no image, no command and no argv. Only ao.static-scan/v1 is implemented. The
+        same idempotencyKey, or any request while a run for this project, skill and
+        mode is queued or running, returns THAT run with created=false.'
+      tags:
+      - skills
+  /api/v1/projects/{id}/skills/runs:
+    get:
+      operationId: listProjectSkillRuns
+      parameters:
+      - description: Maximum runs to return, newest first. Defaults to 50.
+        in: query
+        name: limit
+        schema:
+          description: Maximum runs to return, newest first. Defaults to 50.
+          maximum: 500
+          minimum: 1
+          type:
+          - "null"
+          - integer
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersSkillRunListResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: the project''s run history, newest first. Each run records
+        the skill version, mode, the capabilities its authorization granted, the runner''s
+        attested controls, the approved image, and how it ended. Reports are not included;
+        read one run for its verified report. Requires project.read.'
+      tags:
+      - skills
+  /api/v1/projects/{id}/skills/runs/{runId}:
+    get:
+      operationId: getProjectSkillRun
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Skill run identifier (skr-...).
+        in: path
+        name: runId
+        required: true
+        schema:
+          description: Skill run identifier (skr-...).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersSkillRunDetailView'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: one run of this project with its findings. The report is served
+        only when its stored bytes still hash to reportSha256 (integrity "verified");
+        a mismatch is reported, never served. A run id from another project is 404.
+        Requires project.read.'
+      tags:
+      - skills
+  /api/v1/projects/{id}/skills/runs/{runId}/cancel:
+    post:
+      operationId: cancelProjectSkillRun
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Skill run identifier (skr-...).
+        in: path
+        name: runId
+        required: true
+        schema:
+          description: Skill run identifier (skr-...).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersSkillRunSummaryView'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: ask a queued or running run to stop. A running run''s container
+        is stopped and removed and the run ends cancelled; a result that completes
+        in the same instant is discarded rather than recorded as a success the caller
+        asked not to have. 409 when the run already ended. Requires project.manage.'
       tags:
       - skills
   /api/v1/projects/{id}/workitems:
@@ -16064,8 +16234,70 @@ components:
       required:
       - setupRequired
       type: object
+    ControllersSkillRunDetailView:
+      properties:
+        findings:
+          items:
+            $ref: '#/components/schemas/ControllersSkillRunFindingView'
+          type: array
+        integrity:
+          enum:
+          - verified
+          - mismatch
+          - none
+          type: string
+        report: {}
+        run:
+          $ref: '#/components/schemas/ControllersSkillRunSummaryView'
+      required:
+      - run
+      - findings
+      - integrity
+      type: object
+    ControllersSkillRunFindingView:
+      properties:
+        category:
+          type: string
+        confidence:
+          type: string
+        line:
+          type: integer
+        ordinal:
+          type: integer
+        path:
+          type: string
+        recommendation:
+          type: string
+        ruleId:
+          type: string
+        severity:
+          type: string
+        title:
+          type: string
+      required:
+      - ordinal
+      - ruleId
+      - severity
+      - category
+      - title
+      - path
+      - line
+      - recommendation
+      - confidence
+      type: object
+    ControllersSkillRunListResponse:
+      properties:
+        runs:
+          items:
+            $ref: '#/components/schemas/ControllersSkillRunSummaryView'
+          type: array
+      required:
+      - runs
+      type: object
     ControllersSkillRunRequest:
       properties:
+        idempotencyKey:
+          type: string
         inputs:
           additionalProperties:
             type: string
@@ -16073,23 +16305,115 @@ components:
         modeId:
           type: string
       type: object
-    ControllersSkillRunView:
+    ControllersSkillRunStartView:
       properties:
+        created:
+          type: boolean
+        run:
+          $ref: '#/components/schemas/ControllersSkillRunSummaryView'
+      required:
+      - run
+      - created
+      type: object
+    ControllersSkillRunSummaryView:
+      properties:
+        approvalId:
+          type: string
+        approvedBy:
+          type: string
+        cancelRequested:
+          type: boolean
+        capabilities:
+          items:
+            type: string
+          type: array
+        createdAt:
+          format: date-time
+          type: string
+        durationMs:
+          type:
+          - "null"
+          - integer
+        errorCode:
+          type: string
+        errorMessage:
+          type: string
+        findingCount:
+          type: integer
+        finishedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        id:
+          type: string
+        imageDigest:
+          type: string
+        inputs:
+          additionalProperties:
+            type: string
+          type:
+          - object
+          - "null"
         modeId:
           type: string
-        report: {}
+        packageDigest:
+          type: string
+        projectId:
+          type: string
+        reportSha256:
+          type: string
+        requestedBy:
+          type: string
+        runnerControls:
+          items:
+            type: string
+          type: array
+        runnerId:
+          type: string
         skillId:
+          type: string
+        startedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        state:
+          enum:
+          - queued
+          - running
+          - succeeded
+          - failed
+          - refused
+          - cancelled
+          type: string
+        summary:
           type: string
         tool:
           type: string
+        truncated:
+          type: boolean
         version:
           type: string
       required:
+      - id
+      - projectId
       - skillId
       - version
       - modeId
       - tool
-      - report
+      - state
+      - requestedBy
+      - inputs
+      - capabilities
+      - runnerId
+      - runnerControls
+      - packageDigest
+      - summary
+      - findingCount
+      - truncated
+      - cancelRequested
+      - createdAt
       type: object
     ControllersStartProviderSetupResponse:
       properties:

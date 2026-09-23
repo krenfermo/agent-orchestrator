@@ -334,7 +334,32 @@ func RunWithConfig(cfg config.Config) error {
 		// Provenance for installed versions, read from AO's own table. It is
 		// what lets a settings screen say whether an installed package is
 		// merely verified or actually trusted, without opening a socket.
-		skills.WithOriginSource(store))
+		skills.WithOriginSource(store),
+		// Frente 2 / 2B: runs are durable records owned by THIS daemon
+		// instance. The runner doubles as the reaper for a run a previous
+		// instance left behind (its container and staged copy, by run id).
+		skills.WithDurableRuns(store, cfg.DaemonInstanceID, skillRunner, log))
+	// Registered after the store's own deferred Close, so it runs BEFORE it:
+	// every in-flight run records its terminal state while the store is open.
+	defer skillsSvc.CloseRuns(10 * time.Second)
+	// Builtins are made AVAILABLE, never enabled: no project gains a capability
+	// because AO was upgraded.
+	for _, b := range skillsSvc.EnsureBuiltins(context.Background()) {
+		switch b.Action {
+		case "installed", "present":
+			log.Info("skills: builtin package", "skill", b.SkillID, "version", b.Version, "action", b.Action)
+		default:
+			log.Warn("skills: builtin package not installed", "skill", b.SkillID, "version", b.Version,
+				"action", b.Action, "detail", b.Detail)
+		}
+	}
+	// Runs a previous daemon left non-terminal cannot be proven either way;
+	// they end failed (SKILL_RUN_INTERRUPTED) and their leftovers are reaped.
+	if n, err := skillsSvc.ReconcileRuns(context.Background()); err != nil {
+		log.Error("skills: could not reconcile interrupted runs", "err", err)
+	} else if n > 0 {
+		log.Warn("skills: ended runs interrupted by a previous daemon", "count", n)
+	}
 	// Phase 10: the registry / marketplace. It ships with NO registry
 	// configured and no default endpoint, so an installation that configures
 	// nothing can install nothing from one.
@@ -382,10 +407,18 @@ func RunWithConfig(cfg config.Config) error {
 	// all three are "what an administrator here decided") and the marketplace
 	// (the tag ledger).
 	skillExternal := skills.NewExternalAuthority(skillTrust, skillMarketplace)
-	log.Info("skills: execution environment probed",
+	probeAttrs := []any{
 		"runtime", skillRunner.Runtime().Describe(),
 		"available", skillRunner.Available(),
-		"controls", len(skillRunner.Attestation().Controls))
+		"controls", len(skillRunner.Attestation().Controls),
+	}
+	// Why the runner is unavailable used to reach only a refused run's message.
+	// It is the runtime's own probe error (e.g. docker not on the daemon's PATH,
+	// no reachable daemon, not linux/cgroup v2) and carries no credential.
+	if !skillRunner.Available() {
+		probeAttrs = append(probeAttrs, "reason", skillRunner.Unavailable())
+	}
+	log.Info("skills: execution environment probed", probeAttrs...)
 
 	telemetrySink.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.daemon.started",

@@ -378,10 +378,14 @@ type Manifest struct {
 // reservedIDs are names skillcatalog must not own. using-ao belongs to
 // internal/skillassets, which clobbers its directory on every daemon boot; a
 // catalog entry by that name would be silently overwritten.
+//
+// runs is reserved because /projects/{id}/skills/runs is the run history: a
+// skill with that id could never be enabled or disabled by its own route.
 var reservedIDs = map[string]bool{
 	"using-ao": true,
 	"catalog":  true,
 	"registry": true,
+	"runs":     true,
 }
 
 var (

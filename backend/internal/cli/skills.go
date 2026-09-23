@@ -169,6 +169,7 @@ func newSkillsCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSkillsDisableCommand(ctx))
 	cmd.AddCommand(newSkillsDryRunCommand(ctx))
 	cmd.AddCommand(newSkillsRunCommand(ctx))
+	cmd.AddCommand(newSkillsRunsCommand(ctx))
 	cmd.AddCommand(newSkillsAuditCommand(ctx))
 	cmd.AddCommand(newSkillImagesCommand(ctx))
 	cmd.AddCommand(newSkillRegistryCommand(ctx))

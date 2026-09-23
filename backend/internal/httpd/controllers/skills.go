@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,10 +28,11 @@ import (
 //                           administrator activates a skill on their own
 //                           project without holding installation authority.
 //
-// No route here executes a skill, and none is reachable by a worker: an agent
-// credential carries a role capped below settings.manage and has no project
-// grant that includes project.manage, so the same gates that stop a member
-// stop an agent.
+// One route here executes a skill: POST /projects/{id}/skills/{skillId}/run,
+// which accepts a durable run of one authorized mode (static-code) and returns
+// 202. None is reachable by a worker: an agent credential carries a role capped
+// below settings.manage and has no project grant that includes project.manage,
+// so the same gates that stop a member stop an agent.
 
 // SkillCatalog is the service surface this controller needs. It is an
 // interface so the controller depends on the operations rather than on the
@@ -46,14 +48,19 @@ type SkillCatalog interface {
 	EnableSkill(ctx context.Context, in EnableSkillInput) (SkillActivationView, error)
 	DisableSkill(ctx context.Context, projectID domain.ProjectID, skillID, actor string) error
 	DrySkillRun(ctx context.Context, in SkillDryRunInput) (SkillDryRunView, error)
-	// ExecuteSkill runs one authorized mode. It is a separate method from
-	// DrySkillRun on purpose: the dry run answers "would this be allowed",
-	// this one acts, and a single method with a boolean would let a caller
-	// flip a read into an execution by changing one field.
-	//
-	// Named for the boundary rather than for the service method it adapts to,
-	// which keeps skills.Service.RunSkill free to take the domain request.
-	ExecuteSkill(ctx context.Context, in SkillRunInput) (SkillRunView, error)
+	// StartSkillRun accepts one authorized mode for execution and returns the
+	// durable run. It is a separate method from DrySkillRun on purpose: the dry
+	// run answers "would this be allowed", this one acts, and a single method
+	// with a boolean would let a caller flip a read into an execution by
+	// changing one field.
+	StartSkillRun(ctx context.Context, in SkillRunInput) (SkillRunStartView, error)
+	// ListSkillRuns is a project's run history, newest first.
+	ListSkillRuns(ctx context.Context, projectID domain.ProjectID, limit int) ([]SkillRunSummaryView, error)
+	// GetSkillRun is one run of this project with its findings and its report,
+	// the report only when its stored bytes still hash to the recorded digest.
+	GetSkillRun(ctx context.Context, projectID domain.ProjectID, runID string) (SkillRunDetailView, error)
+	// CancelSkillRun asks a queued or running run of this project to stop.
+	CancelSkillRun(ctx context.Context, projectID domain.ProjectID, runID string) (SkillRunSummaryView, error)
 }
 
 // EnableSkillInput carries an activation from the controller to the service,
@@ -182,6 +189,18 @@ type ProjectSkillParams struct {
 	SkillID string `path:"skillId" description:"Skill identifier (kebab-case)."`
 }
 
+// ProjectSkillRunsParams addresses a project's run history.
+type ProjectSkillRunsParams struct {
+	ID    string `path:"id" description:"Project identifier (registry key)."`
+	Limit *int64 `query:"limit,omitempty" minimum:"1" maximum:"500" description:"Maximum runs to return, newest first. Defaults to 50."`
+}
+
+// ProjectSkillRunParams addresses one run of a project.
+type ProjectSkillRunParams struct {
+	ID    string `path:"id" description:"Project identifier (registry key)."`
+	RunID string `path:"runId" description:"Skill run identifier (skr-...)."`
+}
+
 // SkillAuditView is one row of the catalog's audit trail.
 type SkillAuditView struct {
 	ID         string    `json:"id"`
@@ -262,12 +281,81 @@ type SkillDryRunRequest struct {
 // caller that could contribute any part of the command line would be the
 // arbitrary-execution capability this phase does not have.
 type SkillRunInput struct {
-	ProjectID        domain.ProjectID
-	SkillID          string
-	ModeID           string
-	Inputs           map[string]string
+	ProjectID domain.ProjectID
+	SkillID   string
+	ModeID    string
+	Inputs    map[string]string
+	// IdempotencyKey, when set, makes a retry return the run it created.
+	IdempotencyKey   string
 	Actor            string
 	ActorPermissions []domain.Permission
+}
+
+// SkillRunSummaryView is one durable run, as a history row or a start reply.
+// It never carries the report; the detail view does, verified.
+type SkillRunSummaryView struct {
+	ID              string            `json:"id"`
+	ProjectID       string            `json:"projectId"`
+	SkillID         string            `json:"skillId"`
+	Version         string            `json:"version"`
+	ModeID          string            `json:"modeId"`
+	Tool            string            `json:"tool"`
+	State           string            `json:"state" enum:"queued,running,succeeded,failed,refused,cancelled"`
+	RequestedBy     string            `json:"requestedBy"`
+	Inputs          map[string]string `json:"inputs"`
+	Capabilities    []string          `json:"capabilities"`
+	RunnerID        string            `json:"runnerId"`
+	RunnerControls  []string          `json:"runnerControls"`
+	PackageDigest   string            `json:"packageDigest"`
+	ImageDigest     string            `json:"imageDigest,omitempty"`
+	ApprovalID      string            `json:"approvalId,omitempty"`
+	ApprovedBy      string            `json:"approvedBy,omitempty"`
+	Summary         string            `json:"summary"`
+	FindingCount    int               `json:"findingCount"`
+	Truncated       bool              `json:"truncated"`
+	ReportSHA256    string            `json:"reportSha256,omitempty"`
+	ErrorCode       string            `json:"errorCode,omitempty"`
+	ErrorMessage    string            `json:"errorMessage,omitempty"`
+	CancelRequested bool              `json:"cancelRequested"`
+	CreatedAt       time.Time         `json:"createdAt"`
+	StartedAt       *time.Time        `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time        `json:"finishedAt,omitempty"`
+	// DurationMs is finishedAt - startedAt, when both exist.
+	DurationMs *int64 `json:"durationMs,omitempty"`
+}
+
+// SkillRunStartView is the reply to a start: the run, and whether this request
+// created it (false: it matched an idempotency key or an in-flight run).
+type SkillRunStartView struct {
+	Run     SkillRunSummaryView `json:"run"`
+	Created bool                `json:"created"`
+}
+
+// SkillRunFindingView is one persisted finding. It carries the rule and the
+// location, never matched text.
+type SkillRunFindingView struct {
+	Ordinal        int    `json:"ordinal"`
+	RuleID         string `json:"ruleId"`
+	Severity       string `json:"severity"`
+	Category       string `json:"category"`
+	Title          string `json:"title"`
+	Path           string `json:"path"`
+	Line           int    `json:"line"`
+	Recommendation string `json:"recommendation"`
+	Confidence     string `json:"confidence"`
+}
+
+// SkillRunDetailView is one run with its findings and verified report.
+type SkillRunDetailView struct {
+	Run      SkillRunSummaryView   `json:"run"`
+	Findings []SkillRunFindingView `json:"findings"`
+	// Report is the tool's structured output, present only when the stored
+	// bytes hash to reportSha256. Coverage first, then findings: a scan that
+	// read nothing and found nothing must not read like a clean bill of health.
+	Report json.RawMessage `json:"report,omitempty"`
+	// Integrity is "verified", "mismatch" (the stored report no longer matches
+	// its digest and is NOT served) or "none" (the run has no report).
+	Integrity string `json:"integrity" enum:"verified,mismatch,none"`
 }
 
 // SkillRunView is one completed execution, as the wire sees it.
@@ -282,13 +370,21 @@ type SkillRunView struct {
 	Report json.RawMessage `json:"report"`
 }
 
-// SkillRunResponse is the body of a completed execution.
-type SkillRunResponse = SkillRunView
+// SkillRunResponse is the body of an accepted execution.
+type SkillRunResponse = SkillRunStartView
 
 // SkillRunRequest is the wire body for an execution.
 type SkillRunRequest struct {
 	ModeID string            `json:"modeId,omitempty"`
 	Inputs map[string]string `json:"inputs,omitempty"`
+	// IdempotencyKey makes a retry of the same request return the run it
+	// created instead of starting a second one. 1-128 of [A-Za-z0-9-_.:].
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+}
+
+// SkillRunListResponse is a project's run history, newest first.
+type SkillRunListResponse struct {
+	Runs []SkillRunSummaryView `json:"runs"`
 }
 
 // SkillCapabilityDecisionView is one capability's outcome in a dry run.
@@ -416,6 +512,9 @@ func (c *SkillsController) Register(r chi.Router) {
 	r.Delete("/projects/{id}/skills/{skillId}", c.disable)
 	r.Post("/projects/{id}/skills/{skillId}/dry-run", c.dryRun)
 	r.Post("/projects/{id}/skills/{skillId}/run", c.runSkill)
+	r.Get("/projects/{id}/skills/runs", c.listSkillRuns)
+	r.Get("/projects/{id}/skills/runs/{runId}", c.getSkillRun)
+	r.Post("/projects/{id}/skills/runs/{runId}/cancel", c.cancelSkillRun)
 }
 
 func (c *SkillsController) list(w http.ResponseWriter, r *http.Request) {
@@ -636,14 +735,83 @@ func (c *SkillsController) runSkill(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
 		return
 	}
-	view, err := c.Catalog.ExecuteSkill(r.Context(), SkillRunInput{
+	view, err := c.Catalog.StartSkillRun(r.Context(), SkillRunInput{
 		ProjectID:        id,
 		SkillID:          chi.URLParam(r, "skillId"),
 		ModeID:           in.ModeID,
 		Inputs:           in.Inputs,
+		IdempotencyKey:   in.IdempotencyKey,
 		Actor:            c.actor(r),
 		ActorPermissions: c.callerProjectPermissions(r, id),
 	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	// 202: accepted for execution. The run is durable and is read back with
+	// GET /projects/{id}/skills/runs/{runId}; the request does not wait for it.
+	envelope.WriteJSON(w, http.StatusAccepted, view)
+}
+
+// listSkillRuns is the project's run history. Reading it needs project.read,
+// like every other read of the project's skills.
+func (c *SkillsController) listSkillRuns(w http.ResponseWriter, r *http.Request) {
+	if c.Catalog == nil {
+		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/projects/{id}/skills/runs")
+		return
+	}
+	id := projectID(r)
+	if !c.Guard.AllowProject(w, r, domain.PermProjectRead, id, "PROJECT_NOT_FOUND", "project not found") {
+		return
+	}
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 500 {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_LIMIT",
+				"limit must be an integer between 1 and 500", nil)
+			return
+		}
+		limit = n
+	}
+	runs, err := c.Catalog.ListSkillRuns(r.Context(), id, limit)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, SkillRunListResponse{Runs: runs})
+}
+
+// getSkillRun is one run of this project. A run id from another project is
+// "not found": the project gate is the only authorization a run has.
+func (c *SkillsController) getSkillRun(w http.ResponseWriter, r *http.Request) {
+	if c.Catalog == nil {
+		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/projects/{id}/skills/runs/{runId}")
+		return
+	}
+	id := projectID(r)
+	if !c.Guard.AllowProject(w, r, domain.PermProjectRead, id, "PROJECT_NOT_FOUND", "project not found") {
+		return
+	}
+	view, err := c.Catalog.GetSkillRun(r.Context(), id, chi.URLParam(r, "runId"))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, view)
+}
+
+// cancelSkillRun asks a run to stop. It needs project.manage, like starting one.
+func (c *SkillsController) cancelSkillRun(w http.ResponseWriter, r *http.Request) {
+	if c.Catalog == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/projects/{id}/skills/runs/{runId}/cancel")
+		return
+	}
+	id := projectID(r)
+	if !c.Guard.AllowProject(w, r, domain.PermProjectManage, id, "PROJECT_NOT_FOUND", "project not found") {
+		return
+	}
+	view, err := c.Catalog.CancelSkillRun(r.Context(), id, chi.URLParam(r, "runId"))
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return

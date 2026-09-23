@@ -395,33 +395,90 @@ func imageApprovalView(a skillimage.Approval, now time.Time) controllers.SkillIm
 // Compile-time proof that the service satisfies the trust-root port.
 var _ controllers.SkillImageTrust = (*Service)(nil)
 
-// ExecuteSkill implements the controller's execution route.
-//
-// It is a thin adapter and nothing more: every refusal — not installed, not
-// enabled, a control the runtime does not attest, an image nobody approved —
-// belongs to RunSkill and is not re-decided here. The one thing this does own
-// is the wire shape: the report is marshalled as it stands, so what a reader
-// sees is what the tool produced.
-func (s *Service) ExecuteSkill(
-	ctx context.Context, in controllers.SkillRunInput,
-) (controllers.SkillRunView, error) {
-	res, err := s.RunSkill(ctx, RunRequest{
-		ProjectID:        in.ProjectID,
-		SkillID:          in.SkillID,
-		ModeID:           in.ModeID,
-		Inputs:           in.Inputs,
-		Actor:            in.Actor,
-		ActorPermissions: in.ActorPermissions,
+// StartSkillRun implements the controller's execution route: it accepts a
+// durable run (StartRun) and reports it. Every refusal belongs to StartRun.
+func (s *Service) StartSkillRun(ctx context.Context, in controllers.SkillRunInput) (controllers.SkillRunStartView, error) {
+	run, created, err := s.StartRun(ctx, StartRunRequest{
+		RunRequest: RunRequest{
+			ProjectID:        in.ProjectID,
+			SkillID:          in.SkillID,
+			ModeID:           in.ModeID,
+			Inputs:           in.Inputs,
+			Actor:            in.Actor,
+			ActorPermissions: in.ActorPermissions,
+		},
+		IdempotencyKey: in.IdempotencyKey,
 	})
 	if err != nil {
-		return controllers.SkillRunView{}, err
+		return controllers.SkillRunStartView{}, err
 	}
-	report, err := json.Marshal(res.Report)
+	return controllers.SkillRunStartView{Run: skillRunSummaryView(run), Created: created}, nil
+}
+
+// ListSkillRuns implements the controller's history route.
+func (s *Service) ListSkillRuns(ctx context.Context, projectID domain.ProjectID, limit int) ([]controllers.SkillRunSummaryView, error) {
+	runs, err := s.ListRuns(ctx, projectID, limit)
 	if err != nil {
-		return controllers.SkillRunView{}, err
+		return nil, err
 	}
-	return controllers.SkillRunView{
-		SkillID: res.SkillID, Version: res.Version, ModeID: res.ModeID,
-		Tool: res.Tool, Report: report,
-	}, nil
+	out := make([]controllers.SkillRunSummaryView, 0, len(runs))
+	for _, r := range runs {
+		out = append(out, skillRunSummaryView(r))
+	}
+	return out, nil
+}
+
+// GetSkillRun implements the controller's run-detail route.
+func (s *Service) GetSkillRun(ctx context.Context, projectID domain.ProjectID, runID string) (controllers.SkillRunDetailView, error) {
+	d, err := s.GetRun(ctx, projectID, runID)
+	if err != nil {
+		return controllers.SkillRunDetailView{}, err
+	}
+	view := controllers.SkillRunDetailView{
+		Run:       skillRunSummaryView(d.SkillRun),
+		Findings:  make([]controllers.SkillRunFindingView, 0, len(d.Findings)),
+		Integrity: d.Integrity,
+	}
+	for _, f := range d.Findings {
+		view.Findings = append(view.Findings, controllers.SkillRunFindingView{
+			Ordinal: f.Ordinal, RuleID: f.RuleID, Severity: f.Severity, Category: f.Category,
+			Title: f.Title, Path: f.Path, Line: f.Line, Recommendation: f.Recommendation,
+			Confidence: f.Confidence,
+		})
+	}
+	if d.Report != nil {
+		raw, err := json.Marshal(d.Report)
+		if err != nil {
+			return controllers.SkillRunDetailView{}, err
+		}
+		view.Report = raw
+	}
+	return view, nil
+}
+
+// CancelSkillRun implements the controller's cancel route.
+func (s *Service) CancelSkillRun(ctx context.Context, projectID domain.ProjectID, runID string) (controllers.SkillRunSummaryView, error) {
+	run, err := s.CancelRun(ctx, projectID, runID)
+	if err != nil {
+		return controllers.SkillRunSummaryView{}, err
+	}
+	return skillRunSummaryView(run), nil
+}
+
+func skillRunSummaryView(r SkillRun) controllers.SkillRunSummaryView {
+	v := controllers.SkillRunSummaryView{
+		ID: r.ID, ProjectID: string(r.ProjectID), SkillID: r.SkillID, Version: r.SkillVersion,
+		ModeID: r.ModeID, Tool: r.Tool, State: string(r.State), RequestedBy: r.RequestedBy,
+		Inputs: r.Inputs, Capabilities: r.Capabilities, RunnerID: r.RunnerID, RunnerControls: r.Controls,
+		PackageDigest: r.PackageDigest, ImageDigest: r.ImageDigest, ApprovalID: r.ApprovalID,
+		ApprovedBy: r.ApprovedBy, Summary: r.Summary, FindingCount: r.FindingCount,
+		Truncated: r.Truncated, ReportSHA256: r.ReportSHA256, ErrorCode: r.ErrorCode,
+		ErrorMessage: r.ErrorMessage, CancelRequested: r.CancelRequested, CreatedAt: r.CreatedAt,
+		StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
+	}
+	if r.StartedAt != nil && r.FinishedAt != nil {
+		ms := r.FinishedAt.Sub(*r.StartedAt).Milliseconds()
+		v.DurationMs = &ms
+	}
+	return v
 }

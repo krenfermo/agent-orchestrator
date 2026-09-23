@@ -74,7 +74,7 @@ func confinedReport() skillrunner.StaticScanReport {
 }
 
 func TestSkillsRun_RendersTheBoundaryTheRunDemonstrated(t *testing.T) {
-	_, deps := skillImagesCLI(t, http.StatusOK, runEnvelope(t, confinedReport()))
+	_, deps := skillRunCLI(t, http.StatusAccepted, startAccepted, runDetail(t, runEnvelope(t, confinedReport()), "succeeded", "verified"))
 
 	out, errOut, err := executeCLI(t, deps, "skills", "run", "security-audit",
 		"--project", "ao-pilot-2", "--mode", "static-code")
@@ -116,7 +116,7 @@ func TestSkillsRun_AnUndemonstratedControlIsPrintedNotOmitted(t *testing.T) {
 		skillcatalog.ControlNoCredentialInheritance,
 	}
 
-	_, deps := skillImagesCLI(t, http.StatusOK, runEnvelope(t, report))
+	_, deps := skillRunCLI(t, http.StatusAccepted, startAccepted, runDetail(t, runEnvelope(t, report), "succeeded", "verified"))
 	out, errOut, err := executeCLI(t, deps, "skills", "run", "security-audit",
 		"--project", "ao-pilot-2", "--mode", "static-code")
 	if err != nil {
@@ -147,7 +147,7 @@ func TestSkillsRun_UnreconciledCoverageIsAnnounced(t *testing.T) {
 	report.Coverage.Reconciled = false
 	report.Coverage.ReconciliationNote = "discovered 4 != staged 3 + skipped-before-staging 0"
 
-	_, deps := skillImagesCLI(t, http.StatusOK, runEnvelope(t, report))
+	_, deps := skillRunCLI(t, http.StatusAccepted, startAccepted, runDetail(t, runEnvelope(t, report), "succeeded", "verified"))
 	out, _, err := executeCLI(t, deps, "skills", "run", "security-audit",
 		"--project", "ao-pilot-2", "--mode", "static-code")
 	if err != nil {
