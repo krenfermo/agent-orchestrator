@@ -1399,6 +1399,8 @@
 	"settings.project.skills.noneInstalled": "Aucune compétence n'est installée sur cette installation.",
 	"settings.project.skills.nothingScanned": "Rien n'a été analysé, donc rien n'a été trouvé. Ce n'est pas un résultat propre.",
 	"settings.project.skills.ranImage": "A exécuté {{digest}}, approuvée par {{actor}}",
+	"settings.project.skills.ranAgent": "Lu par {{runner}} sur une copie préparée en lecture seule du projet. Un agent sur l'hôte, pas un conteneur : seuls les skills intégrés ou de confiance s'exécutent ainsi.",
+	"settings.project.skills.agentCoverage": "Couverture : {{examined}} examinés, {{skipped}} exclus",
 	"settings.project.skills.revokedDuringRun": "L'approbation a été révoquée pendant l'exécution. AO n'arrête pas un conteneur en cours, ces résultats ont donc été produits sous une autorisation retirée.",
 	"settings.project.skills.risk.critical": "Critique",
 	"settings.project.skills.risk.high": "Élevé",

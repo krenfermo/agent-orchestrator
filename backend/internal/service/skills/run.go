@@ -39,11 +39,15 @@ import (
 //
 // # What is deliberately NOT enabled here
 //
-// One mode: static-code, the one with a live boundary test. process.exec,
+// One TOOL mode: static-code, the one with a live boundary test. process.exec,
 // repo.write, net.egress, net.active_scan and secrets.read are refused by the
 // capability table exactly as before -- this file adds no surface that could
 // reach them, and a mode requiring any of them fails authorization before a
 // container is considered.
+//
+// A mode whose executor is AGENT never reaches the container path: prepareRun
+// hands it to agentrun.go, which requires a builtin or trusted package and AO's
+// host agent executor (ADR 0010).
 
 // ErrNotExecutable is returned when a resolved mode is not one AO can run. It
 // is distinct from an authorization failure: the mode may be perfectly
@@ -138,6 +142,13 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 	if err != nil {
 		return RunResult{}, err
 	}
+	if prep.agent != nil {
+		// An agent run is long, and its result is only worth anything once it
+		// has been validated, redacted and recorded. There is no synchronous
+		// version of that.
+		return RunResult{}, apierr.Conflict("SKILL_AGENT_REQUIRES_DURABLE_RUN",
+			"agent modes run only as durable runs (POST .../run returns 202)", nil)
+	}
 	report, err := s.executeScan(ctx, prep, "")
 	if err != nil {
 		s.recordRun(ctx, store.SkillAuditRunRefused, req, prep.scope.Version, prep.mode.ID, "", err.Error())
@@ -165,6 +176,9 @@ type preparedRun struct {
 	tool         skillrunner.Tool
 	scope        skillimage.Scope
 	stagingPaths []string
+	// agent is set only for a mode whose executor is agent: the verified
+	// instruction bytes and schema the host agent run uses (agentrun.go).
+	agent *agentPlan
 }
 
 // prepareRun performs steps 1-4 of RunSkill's contract. Every refusal is
@@ -218,6 +232,13 @@ func (s *Service) prepareRun(ctx context.Context, req RunRequest) (preparedRun, 
 	inputs, err := skillcatalog.ResolveInputs(manifest, supplied)
 	if err != nil {
 		return preparedRun{}, apierr.Invalid("SKILL_INPUTS_INVALID", err.Error(), nil)
+	}
+
+	// An agent mode has its own execution environment and its own
+	// preconditions (a trusted package, the canonical schema); it never
+	// reaches the container path below, and a tool mode never reaches it.
+	if mode.EffectiveExecutor() == skillcatalog.ExecutorAgent {
+		return s.prepareAgentRun(ctx, req, resolved, mode, project, inputs)
 	}
 
 	// A missing execution environment is answered HERE, not at the top of the

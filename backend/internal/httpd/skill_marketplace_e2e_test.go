@@ -106,7 +106,7 @@ func newMarketplaceWorld(t *testing.T) *marketplaceWorld {
 func buildFixtureRegistry(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	pkgDir := filepath.Join(root, "packages", "security-audit", "0.1.0")
+	pkgDir := filepath.Join(root, "packages", "security-audit", "0.2.0")
 	if err := skillcatalog.CopyPackage("../skillcatalog/packages/security-audit", pkgDir); err != nil {
 		t.Fatalf("stage package: %v", err)
 	}
@@ -148,7 +148,7 @@ func buildFixtureRegistry(t *testing.T) string {
 			"executionModes":        modes,
 			"compatibility":         map[string]any{"aoMinVersion": pkg.Manifest.Compatibility.AOMinVersion},
 			"publishedAt":           time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
-			"artifactPath":          "packages/security-audit/0.1.0",
+			"artifactPath":          "packages/security-audit/0.2.0",
 		}},
 	}
 	b, err := json.MarshalIndent(index, "", "  ")
@@ -225,12 +225,12 @@ func TestMarketplace_WritesAreGatedOnSettingsManage(t *testing.T) {
 		w.expect(http.MethodPut, "/api/v1/skills/registries/ao-fixture", cookie, configure, http.StatusForbidden)
 		w.expect(http.MethodDelete, "/api/v1/skills/registries/ao-fixture", cookie, "", http.StatusForbidden)
 		w.expect(http.MethodPost, "/api/v1/skills/marketplace/install", cookie,
-			`{"registryId":"ao-fixture","skillId":"security-audit","version":"0.1.0"}`,
+			`{"registryId":"ao-fixture","skillId":"security-audit","version":"0.2.0"}`,
 			http.StatusForbidden)
 	}
 	w.expect(http.MethodPut, "/api/v1/skills/registries/ao-fixture", nil, configure, http.StatusUnauthorized)
 	w.expect(http.MethodPost, "/api/v1/skills/marketplace/install", nil,
-		`{"registryId":"ao-fixture","skillId":"security-audit","version":"0.1.0"}`,
+		`{"registryId":"ao-fixture","skillId":"security-audit","version":"0.2.0"}`,
 		http.StatusUnauthorized)
 }
 
@@ -308,7 +308,7 @@ func TestMarketplace_SearchOpenInstallEnablesNothing(t *testing.T) {
 	}
 
 	out := w.expect(http.MethodPost, "/api/v1/skills/marketplace/install", owner,
-		`{"registryId":"ao-fixture","skillId":"security-audit","version":"0.1.0"}`,
+		`{"registryId":"ao-fixture","skillId":"security-audit","version":"0.2.0"}`,
 		http.StatusCreated)
 	var installed struct {
 		Install struct {

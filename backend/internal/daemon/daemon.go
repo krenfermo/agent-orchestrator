@@ -328,9 +328,14 @@ func RunWithConfig(cfg config.Config) error {
 	// unless this host can show AO the exact bytes under that digest. Without
 	// it the daemon would record decisions about images nobody here has.
 	skillImages := skills.NewImageAuthority(store, store).WithImageInspector(skillRunner)
+	// Frente 2 / 2C: agent modes of builtin or signature-trusted skills run
+	// through AO's host agent executor (ADR 0010). It never carries a tool
+	// mode, and the container runner never carries an agent mode.
+	skillAgent := newSkillAgentExecutor(cfg, log)
 	skillsSvc := skills.New(store, cfg.DataDir,
 		skills.WithSkillExecutor(skillRunner, skillImages, store, cfg.SkillStagingRoot,
 			skillRunner.Unavailable()),
+		skills.WithAgentExecutor(skillAgent, nil),
 		// Provenance for installed versions, read from AO's own table. It is
 		// what lets a settings screen say whether an installed package is
 		// merely verified or actually trusted, without opening a socket.

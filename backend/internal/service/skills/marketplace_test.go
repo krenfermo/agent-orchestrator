@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -154,7 +155,8 @@ func stampPackage(t *testing.T, dir, id, version, publisher, extraFile string) {
 	}
 	body := string(b)
 	body = strings.Replace(body, "id: security-audit", "id: "+id, 1)
-	body = strings.Replace(body, "version: 0.1.0", "version: "+version, 1)
+	// The shipped version moves with the builtin; the fixture pins its own.
+	body = regexp.MustCompile(`(?m)^version: .*$`).ReplaceAllString(body, "version: "+version)
 	body = strings.Replace(body, "publisher: "+shippedPublisher, "publisher: "+publisher, 1)
 	if err := os.WriteFile(manifestPath, []byte(body), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)

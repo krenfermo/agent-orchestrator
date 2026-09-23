@@ -12,8 +12,21 @@ import (
 // provided EVERY control. Nothing AO ships can honestly return this; it exists
 // so a test can isolate one variable at a time against a fully-equipped
 // environment. internal/skillrunner's real attestation is a strict subset.
+//
+// It is a CONTAINER runner: it attests every container control and none of
+// the host-agent ones, because an environment is one or the other (ADR 0010).
 func completeRunner() RunnerAttestation {
-	return RunnerAttestation{RunnerID: "test-complete", Controls: AllControls()}
+	host := map[Control]bool{}
+	for _, c := range hostAgentControls() {
+		host[c] = true
+	}
+	var controls []Control
+	for _, c := range AllControls() {
+		if !host[c] {
+			controls = append(controls, c)
+		}
+	}
+	return RunnerAttestation{RunnerID: "test-complete", Controls: controls}
 }
 
 // confiningRunner is what internal/skillrunner's container actually attests:

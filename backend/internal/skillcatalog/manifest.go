@@ -351,6 +351,45 @@ type Mode struct {
 	Approval     ApprovalMode `yaml:"approval" json:"approval"`
 	// Guide is a package-relative Markdown file with the mode's instructions.
 	Guide string `yaml:"guide" json:"guide"`
+	// Executor is WHAT carries out the mode: an AO-authored tool in the
+	// container runner, or an agent that reads the skill's own instructions.
+	// Absent means tool, which is what every manifest meant before the field
+	// existed, so no published package changes meaning by being re-read.
+	//
+	// Declaring agent grants nothing. It selects a different execution path
+	// that is refused unless the package is builtin or trusted and AO's own
+	// agent executor attests the controls the mode's capabilities need.
+	Executor Executor `yaml:"executor,omitempty" json:"executor,omitempty"`
+}
+
+// Executor names what carries out a mode.
+type Executor string
+
+const (
+	// ExecutorTool runs an AO-authored tool in the container runner (ADR 0004).
+	ExecutorTool Executor = "tool"
+	// ExecutorAgent runs a provider agent that reads SKILL.md and the mode
+	// guide over a staged, read-only copy of the project (ADR 0010).
+	ExecutorAgent Executor = "agent"
+)
+
+// Valid reports whether e is a supported executor. The empty value is valid
+// and means tool.
+func (e Executor) Valid() bool {
+	switch e {
+	case "", ExecutorTool, ExecutorAgent:
+		return true
+	}
+	return false
+}
+
+// EffectiveExecutor is the executor a mode actually runs under: an omitted
+// field is tool.
+func (m Mode) EffectiveExecutor() Executor {
+	if m.Executor == "" {
+		return ExecutorTool
+	}
+	return m.Executor
 }
 
 // Manifest is the versioned skill contract.
@@ -731,6 +770,24 @@ func (m Manifest) validateModes() error {
 		}
 		if err := validatePackagePath(fmt.Sprintf("modes[%q].guide", mode.ID), mode.Guide); err != nil {
 			return err
+		}
+		if !mode.Executor.Valid() {
+			return invalidf("modes[%q].executor %q is not one of tool, agent", mode.ID, mode.Executor)
+		}
+		if mode.Executor == ExecutorAgent {
+			// An agent mode's only product is a report AO validates and stores.
+			// A mode that does not ask to write one has nothing for the agent to
+			// return, and one whose output is not JSON cannot be validated.
+			hasReport := false
+			for _, c := range mode.Capabilities {
+				if c == CapReportWrite {
+					hasReport = true
+				}
+			}
+			if !hasReport {
+				return invalidf("modes[%q] is executor agent and must request %q: the agent's only "+
+					"output is a report AO validates before storing", mode.ID, CapReportWrite)
+			}
 		}
 	}
 	return nil

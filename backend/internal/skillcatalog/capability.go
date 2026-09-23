@@ -55,6 +55,18 @@ type CapabilitySpec struct {
 	// "isolated": net.egress needs an allowlist that repo.write does not, and
 	// process.exec needs an image contract that neither of them does.
 	RequiresControls []Control
+	// HostAgentControls is the ONE alternative to RequiresControls, and only
+	// read capabilities have it (ADR 0010). It is the set of guarantees AO's
+	// host agent executor must attest for a builtin or trusted skill's agent
+	// mode to carry this capability without a container.
+	//
+	// It is a separate list, never a merge into RequiresControls, so the
+	// container path is exactly as strict as it was: no container runner
+	// attests a host-agent control, and no host agent attests a container
+	// one. Nil means the capability has no host-agent path at all -- every
+	// capability that writes, executes, reaches the network or reads a
+	// secret -- and a host agent is refused it with a container control named.
+	HostAgentControls []Control
 	// RequiredPermission is the AO RBAC permission a human must hold on the
 	// project before this capability may be granted there.
 	RequiredPermission domain.Permission
@@ -82,10 +94,17 @@ var capabilitySpecs = map[Capability]CapabilitySpec{
 	// The distinction that survives is which controls each needs. Reading
 	// needs the five the container prototype demonstrates; the five blocked
 	// capabilities each need one more that does not exist yet.
+	//
+	// ADR 0010 adds exactly one exception, for repo.read alone: a builtin or
+	// trusted skill's AGENT mode may read on the host when AO's agent executor
+	// attests the four host-agent controls. The package trust is checked by the
+	// service before this table is consulted; the table only says which
+	// guarantees stand in for confinement, and deps.read deliberately has none.
 	CapRepoRead: {
 		Risk:               RiskLow,
 		MinApproval:        ApprovalNone,
 		RequiresControls:   confinementControls(),
+		HostAgentControls:  hostAgentControls(),
 		RequiredPermission: domain.PermProjectRead,
 		Description:        "Read the project's source in a confined checkout.",
 	},
@@ -187,10 +206,36 @@ func confinementControls() []Control {
 	}
 }
 
+// hostAgentControls are the four a host agent executor must demonstrate before
+// it may read a project for a builtin or trusted skill (ADR 0010). They are
+// NOT confinement and are named so nobody can mistake them for it: the agent
+// is a same-user process on the host, and what bounds it is a copy it reads, a
+// CLI configuration that removes every tool but reading and confines those to
+// the copy, an environment with nothing of AO's in it, and a check afterwards
+// that nothing it could reach was changed.
+func hostAgentControls() []Control {
+	return []Control{
+		ControlStagedReadOnlyCopy,
+		ControlAgentToolConfinement,
+		ControlScrubbedEnvironment,
+		ControlTamperDetection,
+	}
+}
+
 // Spec returns the fixed policy for a capability.
 func (c Capability) Spec() (CapabilitySpec, bool) {
 	spec, ok := capabilitySpecs[c]
 	return spec, ok
+}
+
+// ControlsFor is the control set this capability is judged by in the given
+// environment: the host-agent alternative for a host agent that has one, the
+// container set otherwise. It is what a dry run shows as "requires".
+func (s CapabilitySpec) ControlsFor(runner RunnerAttestation) []Control {
+	if runner.IsHostAgent() && len(s.HostAgentControls) > 0 {
+		return s.HostAgentControls
+	}
+	return s.RequiresControls
 }
 
 // Valid reports whether the capability is in AO's vocabulary.
@@ -266,6 +311,25 @@ const (
 	// authored". It needs the skill-image contract -- what a skill may ship,
 	// how it is built, how its command is pinned -- not merely a sandbox.
 	ControlArbitraryProcessExecution Control = "arbitrary_process_execution"
+
+	// The four host-agent controls (ADR 0010). Only AO's host agent executor
+	// attests them, and only repo.read accepts them in place of confinement.
+
+	// ControlStagedReadOnlyCopy is "the agent's working directory is an
+	// AO-staged copy of the in-scope files, made read-only, never the checkout".
+	ControlStagedReadOnlyCopy Control = "staged_read_only_copy"
+	// ControlAgentToolConfinement is "the agent CLI was launched with only its
+	// read tools, confined to the working directory, with no shell, no network
+	// tool, no MCP server, no hook, no plugin and no bypass mode" -- verified
+	// against the CLI AO actually resolved, not assumed from its name.
+	ControlAgentToolConfinement Control = "agent_tool_confinement"
+	// ControlScrubbedEnvironment is "the agent receives an allowlisted
+	// environment: none of AO's variables, credentials or tokens".
+	ControlScrubbedEnvironment Control = "scrubbed_environment"
+	// ControlTamperDetection is "after the agent exits AO proves the staged copy
+	// and the source files it came from are byte-identical to what was staged,
+	// and trusts no output otherwise".
+	ControlTamperDetection Control = "tamper_detection"
 )
 
 // AllControls is every control in a stable order, for the runtime matrix and
@@ -281,6 +345,10 @@ func AllControls() []Control {
 		ControlWritableWorkspace,
 		ControlScopedSecretDelivery,
 		ControlArbitraryProcessExecution,
+		ControlStagedReadOnlyCopy,
+		ControlAgentToolConfinement,
+		ControlScrubbedEnvironment,
+		ControlTamperDetection,
 	}
 }
 
@@ -347,6 +415,11 @@ const (
 	// DenyTargetNotAuthorized is "a per-target capability was requested with
 	// no explicitly authorized target".
 	DenyTargetNotAuthorized DenialReason = "target_not_authorized"
+	// DenyPackageNotTrusted is "the environment is a host agent and the package
+	// is neither the builtin this binary embeds nor signature-trusted". A host
+	// agent follows the package's instructions outside a container, so whose
+	// instructions they are is part of the authorization (ADR 0010).
+	DenyPackageNotTrusted DenialReason = "package_not_trusted"
 )
 
 // Denial is one refused capability.
@@ -366,13 +439,48 @@ func (d Denial) String() string {
 // firstMissingControl returns the first required control the environment does
 // not attest. Controls are checked in the order the capability declares them,
 // so the reported blocker is stable rather than map-order dependent.
+//
+// A capability with a host-agent alternative is satisfied by EITHER complete
+// set, never by a mixture. When neither is complete the blocker is named from
+// the set the environment is evidently trying to provide: a host agent is told
+// which host-agent control it lacks, a container which container control.
 func firstMissingControl(spec CapabilitySpec, runner RunnerAttestation) (Control, bool) {
-	for _, need := range spec.RequiresControls {
-		if !runner.Provides(need) {
-			return need, false
+	primary, ok := firstMissingIn(spec.RequiresControls, runner)
+	if ok {
+		return "", true
+	}
+	if len(spec.HostAgentControls) == 0 {
+		return primary, false
+	}
+	alt, ok := firstMissingIn(spec.HostAgentControls, runner)
+	if ok {
+		return "", true
+	}
+	if runner.IsHostAgent() {
+		return alt, false
+	}
+	return primary, false
+}
+
+func firstMissingIn(need []Control, runner RunnerAttestation) (Control, bool) {
+	for _, c := range need {
+		if !runner.Provides(c) {
+			return c, false
 		}
 	}
 	return "", true
+}
+
+// IsHostAgent reports whether this environment is attesting host-agent
+// controls rather than container ones. It is derived from the controls, not
+// declared, so there is no field a caller could set to claim it.
+func (a RunnerAttestation) IsHostAgent() bool {
+	for _, c := range hostAgentControls() {
+		if a.Provides(c) {
+			return true
+		}
+	}
+	return false
 }
 
 func runnerName(runner RunnerAttestation) string {
@@ -434,6 +542,12 @@ type AuthorizationRequest struct {
 	// AuthorizedTargets are targets a human explicitly approved for this run.
 	// A per-target capability with no matching target is refused.
 	AuthorizedTargets []string
+	// PackageTrusted says the service verified the package is the builtin
+	// this binary embeds (byte for byte) or an install AO verified a signature
+	// for. It is consulted ONLY for a host-agent environment: a container's
+	// controls do not depend on whose package it runs, and a host agent's do.
+	// The zero value is untrusted, so a caller that forgets it is refused.
+	PackageTrusted bool
 }
 
 // Authorize resolves a run's capability request fail-closed: a capability is
@@ -461,6 +575,7 @@ func Authorize(req AuthorizationRequest) (Decision, error) {
 	}
 
 	decision := Decision{RequiredApproval: approval}
+	hostAgent := req.Runner.IsHostAgent()
 	for _, c := range requested {
 		spec, ok := c.Spec()
 		if !ok {
@@ -488,6 +603,14 @@ func Authorize(req AuthorizationRequest) (Decision, error) {
 			decision.Denials = append(decision.Denials, Denial{
 				Capability: c, Reason: DenyApprovalTooWeak,
 				Detail: fmt.Sprintf("requires approval %s, manifest asks for %s", spec.MinApproval, approval),
+			})
+			continue
+		}
+		if hostAgent && len(spec.RequiresControls) > 0 && !req.PackageTrusted {
+			decision.Denials = append(decision.Denials, Denial{
+				Capability: c, Reason: DenyPackageNotTrusted,
+				Detail: fmt.Sprintf("the execution environment (%s) is a host agent, which runs only "+
+					"builtin or signature-trusted packages", runnerName(req.Runner)),
 			})
 			continue
 		}

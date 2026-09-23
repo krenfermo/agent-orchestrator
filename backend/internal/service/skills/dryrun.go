@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -162,8 +163,30 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 	}
 
 	// The attestation comes from AO's own runner, never from the request.
-	// DryRunRequest deliberately has no attestation field.
+	// DryRunRequest deliberately has no attestation field. An agent mode is
+	// answered against the host agent executor and the package's verified
+	// trust -- the same two values a real run is authorized against.
 	runner := s.runner.Attestation()
+	unavailable := s.runnerUnavailable
+	trusted := false
+	var agentBlocker string
+	if mode.EffectiveExecutor() == skillcatalog.ExecutorAgent {
+		runner = skillcatalog.RunnerAttestation{RunnerID: "none"}
+		unavailable = "this installation has no host agent executor"
+		if s.agent != nil {
+			runner = s.agent.Attestation()
+			unavailable = s.agent.Unavailable()
+		}
+		if _, err := s.loadAgentPlan(ctx, resolved, mode); err != nil {
+			agentBlocker = err.Error()
+			var coded *apierr.Error
+			if errors.As(err, &coded) {
+				agentBlocker = coded.Code + ": " + coded.Message
+			}
+		} else {
+			trusted = true
+		}
+	}
 	decision, _ := skillcatalog.Authorize(skillcatalog.AuthorizationRequest{
 		Manifest:           manifest,
 		ModeID:             mode.ID,
@@ -171,6 +194,7 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 		SubjectPermissions: req.ActorPermissions,
 		Runner:             runner,
 		AuthorizedTargets:  req.AuthorizedTargets,
+		PackageTrusted:     trusted,
 	})
 
 	out := DryRun{
@@ -184,12 +208,15 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 		EffectiveRisk:    decision.EffectiveRisk,
 		Runner: RunnerStatus{
 			RunnerID:         runner.RunnerID,
-			Available:        runner.Isolated(),
+			Available:        runner.Isolated() || runner.IsHostAgent(),
 			Isolated:         runner.Isolated(),
 			EgressControlled: runner.EgressControlled(),
 			Controls:         append([]skillcatalog.Control(nil), runner.Controls...),
-			Unavailable:      s.runnerUnavailable,
+			Unavailable:      unavailable,
 		},
+	}
+	if agentBlocker != "" {
+		out.Reasons = append(out.Reasons, agentBlocker)
 	}
 
 	denials := map[skillcatalog.Capability]skillcatalog.Denial{}
@@ -207,8 +234,11 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 			RequiredPermission: spec.RequiredPermission,
 		}
 		if known {
-			entry.RequiresControls = append([]skillcatalog.Control(nil), spec.RequiresControls...)
-			for _, need := range spec.RequiresControls {
+			// The controls that apply are the ones THIS environment is judged
+			// by: a host agent by the host-agent set, a container by its own.
+			need := spec.ControlsFor(runner)
+			entry.RequiresControls = append([]skillcatalog.Control(nil), need...)
+			for _, need := range need {
 				if !runner.Provides(need) && !containsControl(out.Runner.MissingControls, need) {
 					out.Runner.MissingControls = append(out.Runner.MissingControls, need)
 				}
@@ -253,7 +283,7 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 	}
 
 	switch {
-	case !decision.Allowed():
+	case !decision.Allowed(), agentBlocker != "":
 		out.Verdict = DryRunBlocked
 	case out.RequiredApproval != skillcatalog.ApprovalNone &&
 		out.RequiredApproval != skillcatalog.ApprovalPerActivation:

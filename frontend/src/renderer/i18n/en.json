@@ -1368,6 +1368,8 @@
 	"settings.project.skills.noneInstalled": "No skills are installed on this installation.",
 	"settings.project.skills.nothingScanned": "Nothing was scanned, so nothing was found. This is not a clean result.",
 	"settings.project.skills.ranImage": "Ran {{digest}}, approved by {{actor}}",
+	"settings.project.skills.ranAgent": "Read by {{runner}} over a read-only staged copy of the project. A host agent, not a container: only builtin or trusted skills run this way.",
+	"settings.project.skills.agentCoverage": "Coverage: {{examined}} examined, {{skipped}} excluded",
 	"settings.project.skills.revokedDuringRun": "The approval was revoked while this was running. AO does not stop a running container, so these results were produced under a withdrawn authorization.",
 	"settings.project.skills.risk.critical": "Critical",
 	"settings.project.skills.risk.high": "High",

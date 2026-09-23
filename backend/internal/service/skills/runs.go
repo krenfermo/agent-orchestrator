@@ -17,6 +17,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillagent"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillimage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
@@ -172,6 +173,9 @@ type SkillRunDetail struct {
 	// Report is the stored report, decoded, when the run succeeded and its
 	// bytes still hash to the recorded digest.
 	Report *skillrunner.StaticScanReport
+	// AgentReport is the stored findings.v1 report of an agent run, exactly
+	// as stored, under the same condition. At most one of the two is set.
+	AgentReport json.RawMessage
 	// Integrity is "verified", "mismatch", or "none" (no report to verify).
 	Integrity string
 }
@@ -286,6 +290,10 @@ func (s *Service) execute(ctx context.Context, runID string, prep preparedRun) {
 		// already terminal and there is nothing to do.
 		s.finishUnsuccessful(wctx, runID, store.SkillRunCancelled, RunErrCancelled,
 			"cancelled before it started", store.SkillRunImage{})
+		return
+	}
+	if prep.agent != nil {
+		s.executeAgentRun(ctx, wctx, runID, prep)
 		return
 	}
 	report, err := s.executeScan(ctx, prep, runID)
@@ -497,9 +505,17 @@ func (s *Service) GetRun(ctx context.Context, projectID domain.ProjectID, runID 
 	detail := SkillRunDetail{SkillRun: toSkillRun(rec), Findings: findings, Integrity: "none"}
 	if rec.ReportJSON != nil {
 		sum := sha256.Sum256(rec.ReportJSON)
-		if hex.EncodeToString(sum[:]) != rec.ReportSHA256 {
+		switch {
+		case hex.EncodeToString(sum[:]) != rec.ReportSHA256:
 			detail.Integrity = "mismatch"
-		} else {
+		case rec.Tool == skillagent.Tool:
+			if !json.Valid(rec.ReportJSON) {
+				detail.Integrity = "mismatch"
+			} else {
+				detail.Integrity = "verified"
+				detail.AgentReport = append(json.RawMessage(nil), rec.ReportJSON...)
+			}
+		default:
 			var report skillrunner.StaticScanReport
 			if err := json.Unmarshal(rec.ReportJSON, &report); err != nil {
 				detail.Integrity = "mismatch"
@@ -532,7 +548,17 @@ func (s *Service) ReconcileRuns(ctx context.Context) (int, error) {
 		if p, ok, perr := s.project(ctx, rec.ProjectID); perr == nil && ok {
 			projectPath = p.Path
 		}
-		if e.reaper != nil && skillrunner.ValidRunID(rec.ID) {
+		if rec.Tool == skillagent.Tool && s.agent != nil {
+			// An agent a dead daemon left behind is stopped by its pid file,
+			// and only when it is still this run's agent; its copy goes too.
+			killed, removed, rerr := s.agent.Reap(rec.ID)
+			if rerr != nil {
+				e.log.Warn("skills: could not reap an interrupted agent run", "run", rec.ID, "err", rerr)
+			} else if killed || removed != "" {
+				e.log.Info("skills: removed an interrupted agent run's leftovers", "run", rec.ID,
+					"agentStopped", killed, "staging", removed != "")
+			}
+		} else if e.reaper != nil && skillrunner.ValidRunID(rec.ID) {
 			rep, rerr := e.reaper.ReapRun(ctx, rec.ID, projectPath, s.stagingRoot)
 			if rerr != nil {
 				e.log.Warn("skills: could not reap an interrupted run's leftovers", "run", rec.ID, "err", rerr)

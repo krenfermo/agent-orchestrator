@@ -1,7 +1,7 @@
 apiVersion: ao.skill/v1
 id: security-audit
 name: Security Audit
-version: 0.1.0
+version: 0.2.0
 description: >-
   On-demand security review of one selected project: static code review,
   dependency and secret scanning, authorization and API review, and — only
@@ -139,6 +139,10 @@ modes:
     capabilities: [repo.read, report.write]
     approval: per_activation
     guide: modes/authz-review.md
+    # Read by an agent, not scanned by a tool: AO's host agent executor follows
+    # SKILL.md and this guide over a read-only staged copy (ADR 0010). Only
+    # this builtin package, byte for byte, qualifies to run on the host.
+    executor: agent
 
   - id: api-infra-review
     name: API and infrastructure review

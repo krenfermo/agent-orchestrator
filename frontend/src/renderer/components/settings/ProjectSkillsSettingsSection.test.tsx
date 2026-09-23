@@ -365,6 +365,49 @@ describe("ProjectSkillsSettingsSection — running", () => {
 		expect(report).toHaveTextContent("pattern scanner");
 	});
 
+	// An agent run's report is findings.v1, not a static scan: it must render as
+	// a host agent's reading, never with container or image evidence it never had.
+	it("renders an agent run's report as the agent's reading, coverage first", async () => {
+		const detail = succeededDetail({
+			schemaVersion: "security-audit/findings/v1",
+			coverage: {
+				examined: ["api/orders.go", "api/router.go"],
+				skipped: [{ path: ".env", reason: "excluded by AO before staging: denied-by-manifest" }],
+			},
+			findings: [{
+				id: "AUTHZ-2", title: "GetOrder skips the tenant predicate", severity: "critical",
+				confidence: "confirmed", category: "idor",
+				evidence: { locations: [{ path: "api/orders.go", line: 12 }] },
+				recommendation: "Add the tenant predicate.",
+			}],
+		});
+		detail.run = { ...detail.run, tool: "ao.skill-agent/v1", runnerId: "host-agent/claude-code" };
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: detail,
+		});
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return startedRun as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		const report = await screen.findByTestId("project-skill-run-report");
+		expect(report).toHaveTextContent("Read by host-agent/claude-code over a read-only staged copy");
+		expect(report).toHaveTextContent("not a container");
+		const text = report.textContent ?? "";
+		expect(text.indexOf("Coverage: 2 examined, 1 excluded")).toBeGreaterThanOrEqual(0);
+		expect(text.indexOf("Coverage:")).toBeLessThan(text.indexOf("finding"));
+		expect(report).toHaveTextContent("Skipped .env");
+		expect(report).toHaveTextContent("[CRITICAL] GetOrder skips the tenant predicate");
+		expect(report).toHaveTextContent("api/orders.go:12 · AUTHZ-2 · confirmed");
+		expect(report).not.toHaveTextContent("Ran ");
+		expect(report).not.toHaveTextContent("staged, ");
+	});
+
 	// The failure this panel exists to prevent.
 	it("says an empty scan is not a clean result", async () => {
 		mockSkills({
