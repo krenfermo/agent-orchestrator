@@ -111,6 +111,17 @@ var approvedTools = map[Tool]ToolContract{
 		Argv:        func(p ToolParams) []string { return scanArgv(scanTools[ToolDependencyScan], p) },
 		Description: "Read-only dependency inventory over staged manifests and lockfiles. No advisory lookup, no network, no writes.",
 	},
+	// Frente 2 / 2F. The image only provides a root filesystem for the staged,
+	// AO-authored checker binary; Argv is empty because the command is the
+	// checker, not a contract argv. It runs on an internal network whose only
+	// route out is the egress proxy, which allows exactly one target. Still
+	// needs its own administrative image approval, per exact scope.
+	ToolActivePentest: {
+		Tool:        ToolActivePentest,
+		BaseImage:   "alpine:3.19",
+		Argv:        func(ToolParams) []string { return nil },
+		Description: "Active penetration test: bounded, non-destructive traffic to one explicitly authorized target, through the egress proxy, in an isolated container.",
+	},
 }
 
 // ApprovedTools lists the vocabulary in a stable order.
