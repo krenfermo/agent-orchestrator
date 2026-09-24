@@ -356,3 +356,86 @@ report (its children keep theirs); deduplication is deliberately conservative
 (same category, file and line); usage is what each mode reports (the agent's
 tokens and cost, the tools' wall clock) and is not yet in the usage ledger
 (Frente 4); the audit covers the working tree only.
+
+## 10. A stuck container runtime (runner-hang fix, before 2F)
+
+**The failure.** During the 2D/2E end-to-end runs the Colima VM's virtiofs share
+stalled under host load. Two staging-visibility probe containers blocked in
+`cat /probe/.ao-visibility-probe` and were still running 13 and 32 minutes
+later; a `dependencies` scan in the same window ran out its 2-minute wall clock.
+Confirmed from the incident's `docker inspect`: both orphans were probe
+containers labelled only `ao.skillrun=1` -- no name, no run id -- so:
+
+- `VerifyStagingVisible` killed the `docker run` CLI at its 15 s deadline and
+  never removed the container (killing the CLI does not stop a container);
+- `ReapRun` looks containers up by run id, so it could never find them;
+- a probe that timed out was reported as `ErrStagingNotVisible` (refused, "the
+  runtime cannot see the staging directory"), sending an operator to the VM's
+  share list for what was a stuck runtime.
+
+Also found while reading the path, not observed in the incident: the boot
+reconcile called `ReapRun` with `context.Background()`, so its `docker ps` had
+no deadline and a wedged runtime would hold the daemon's boot indefinitely;
+teardown ignored `docker rm -f`'s result and `ReapRun` counted a container as
+removed because the command had been issued (`docker rm -f` exits 0 for a
+container that does not exist).
+
+The root cause of the stall itself (virtiofs under memory pressure, heavy swap,
+another compose stack and another agent session on the host) is a hypothesis
+consistent with what was observed; it is outside AO and not fixed here.
+
+**What AO does now.**
+
+| Concern | Behaviour |
+|---|---|
+| Every docker CLI call | Runs in its own process group (`runBounded`). A deadline or cancel SIGKILLs the group; AO then waits at most 5 s for the process to be reaped and **stops waiting** (`ErrCommandAbandoned`, counted by `skillrunner.AbandonedCommands()`). Output pipes held by a descendant are closed after the same delay (`WaitDelay`). |
+| Visibility / egress probes | Named `ao-skillprobe-<token>`, labelled with the owner and (for a durable run) the run id. A probe that does not finish cleanly has its container removed and the removal confirmed. A probe timeout is `ErrRuntimeTimeout`, never `ErrStagingNotVisible`. |
+| Teardown | `rm -f`, then `ps` to confirm the container is gone. Only "absent" counts (`CleanupConfirmed`); anything else is `CleanupPending`, recorded, reported, and never called removed. Each step is bounded by 15 s. |
+| Ownership | Every container carries `ao.skillrun.owner=<installation id>` and `ao.skillrun.kind=run|probe` (plus `ao.skillrun.id` for a durable run). Labels grant nothing; isolation flags are unchanged. |
+| Retry | `SweepOwned` retries pending removals and removes containers with THIS installation's owner label that are not in flight here and whose run is not executing here. It never removes a container without that label -- another tool's, another AO installation's, or one from an AO build before the label. It runs at boot (in the background) and every 2 minutes, bounded to 1 minute per sweep; a sweep blocked on the runtime does not hold up shutdown. |
+| Boot reconcile | `ReapRun` bounds its own `docker ps`; after one runtime timeout the rest of the interrupted runs are ended without asking the runtime again (the sweeper retries). |
+| Terminal states | A stuck runtime is **failed** `SKILL_RUNTIME_TIMEOUT` (probe, inspect or CLI abandoned), not refused. A run that used its wall clock is **failed** `SKILL_RUN_TIMED_OUT`, judged before the input-digest check (a killed run's partial output could otherwise read as an input mismatch and be refused). A cancel or shutdown says "the container was stopped and removed" only when the runtime confirmed it; otherwise it says the container is recorded for cleanup. `image inspect` timing out is no longer reported as "image not present". |
+
+2B-2E are unchanged otherwise: the same isolation flags, image trust, per-mode
+authorization, report schemas and SHA-256, and the `partial` audit (a child
+failing `SKILL_RUNTIME_TIMEOUT` is simply a mode not verified).
+
+**Limits, stated plainly.**
+
+- SIGKILL cannot interrupt a process in uninterruptible sleep, and nothing in
+  user space can. AO's promise is that its worker is released (after the
+  deadline plus 5 s), not that the process is gone: an abandoned CLI process is
+  left to the kernel, with one goroutine waiting to reap it.
+- Killing the CLI never stops the container; that lives in the runtime's VM. If
+  the VM's filesystem is stalled, even `docker rm -f` may not complete until it
+  recovers. That is exactly the pending state: recorded and retried.
+- Pending removals are held in memory. After a restart the durable record is the
+  container's own labels, which the boot sweep reads -- for containers started
+  by this build. Containers from an older build carry no owner label and are
+  reaped only by run id, as before.
+- The egress probe's internal network is still removed best-effort (bounded) and
+  is not swept.
+
+**Operator recovery.** A warning `skills: some skill containers are not
+confirmed removed` names them. When the runtime answers again the next sweep
+removes them; nothing needs to be done by hand. To inspect:
+
+```
+docker ps -a --filter label=ao.skillrun.owner=<installation id> \
+  --format '{{.Names}} {{.Status}} {{.Label "ao.skillrun.id"}}'
+```
+
+(`installationId` is in `/readyz`.) Do not remove containers by the generic
+`ao.skillrun=1` label on a shared runtime: another installation's runs carry it.
+
+**Tests.** `skillrunner/hang_test.go` drives a fake `docker` executable (a real
+process tree) that can hang on `run`, ignore SIGTERM, or wedge `rm`/`ps`: group
+kill of a grandchild, cancel versus timeout, abandonment of a process that will
+not die, a probe that never finishes (removed, `ErrRuntimeTimeout`), wall-clock
+timeout and cancel (worker released, container removed), cleanup pending while
+the runtime is down and recovered after, a sweep that touches only this
+installation's idle containers, and `ReapRun` reporting pending rather than
+removed. `skillrunner/hang_live_test.go` does the same against real Docker.
+`service/skills/runs_cleanup_test.go`: typed terminal codes, the honest cancel
+message, a reconcile that asks a stuck runtime once, and a sweeper that runs at
+once, spares live runs and does not hold up shutdown.
