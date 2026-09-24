@@ -100,9 +100,10 @@ type skillRunDTO struct {
 }
 
 type runSkillBodyDTO struct {
-	ModeID         string            `json:"modeId,omitempty"`
-	Inputs         map[string]string `json:"inputs,omitempty"`
-	IdempotencyKey string            `json:"idempotencyKey,omitempty"`
+	ModeID                 string            `json:"modeId,omitempty"`
+	Inputs                 map[string]string `json:"inputs,omitempty"`
+	IdempotencyKey         string            `json:"idempotencyKey,omitempty"`
+	PentestAuthorizationID string            `json:"pentestAuthorizationId,omitempty"`
 }
 
 // skillRunSummaryDTO mirrors controllers.SkillRunSummaryView.
@@ -165,6 +166,8 @@ func newSkillsRunCommand(ctx *commandContext) *cobra.Command {
 		mode           string
 		inputs         map[string]string
 		idempotencyKey string
+		authorization  string
+		yes            bool
 		noWait         bool
 		waitTimeout    time.Duration
 		pollInterval   time.Duration
@@ -191,10 +194,26 @@ func newSkillsRunCommand(ctx *commandContext) *cobra.Command {
 			if strings.TrimSpace(project) == "" {
 				return usageError{fmt.Errorf("--project is required")}
 			}
+			// active-pentest is the one mode that sends offensive traffic. It
+			// requires an explicit authorization and an unambiguous confirmation
+			// showing exactly what will be tested, under what bounds.
+			if strings.TrimSpace(mode) == "active-pentest" {
+				if strings.TrimSpace(authorization) == "" {
+					return usageError{fmt.Errorf("--authorization <id> is required for active-pentest")}
+				}
+				ok, err := confirmActivePentest(cmd, inputs, authorization, yes)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return fmt.Errorf("active-pentest not confirmed; nothing was run")
+				}
+			}
 			var start skillRunStartDTO
 			if err := ctx.postJSON(cmd.Context(), skillRunPath(project, skill, "run"),
 				runSkillBodyDTO{ModeID: strings.TrimSpace(mode), Inputs: inputs,
-					IdempotencyKey: strings.TrimSpace(idempotencyKey)},
+					IdempotencyKey:         strings.TrimSpace(idempotencyKey),
+					PentestAuthorizationID: strings.TrimSpace(authorization)},
 				&start); err != nil {
 				return err
 			}
@@ -222,6 +241,8 @@ func newSkillsRunCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&mode, "mode", "", "Mode id; required unless the skill declares exactly one")
 	f.StringToStringVar(&inputs, "input", nil, "Declared input, repeatable: --input key=value")
 	f.StringVar(&idempotencyKey, "idempotency-key", "", "Retry-safe key: the same key returns the run it created")
+	f.StringVar(&authorization, "authorization", "", "Pentest authorization id (skpen-...); required for active-pentest")
+	f.BoolVarP(&yes, "yes", "y", false, "Confirm an active-pentest run without prompting (for authorized automation)")
 	f.BoolVar(&noWait, "no-wait", false, "Print the run id and return without waiting for the result")
 	f.DurationVar(&waitTimeout, "wait-timeout", 15*time.Minute, "How long to wait for the run to end")
 	f.DurationVar(&pollInterval, "poll-interval", time.Second, "How often to check the run while waiting")

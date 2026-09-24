@@ -79,6 +79,13 @@ type SkillExecutor interface {
 	skillcatalog.Runner
 	RunStaticScan(ctx context.Context, authority skillrunner.ImageAuthority,
 		req skillrunner.StaticScanRequest) (skillrunner.StaticScanReport, error)
+	// PentestAttestation is the attestation active-pentest is authorized
+	// against — it adds the egress-allowlist and arbitrary-process-execution
+	// controls the runtime's general attestation does not, and only for this
+	// mode. RunActivePentestScan executes it.
+	PentestAttestation() skillcatalog.RunnerAttestation
+	RunActivePentestScan(ctx context.Context, authority skillrunner.ImageAuthority,
+		req skillrunner.ActivePentestScanRequest) (skillrunner.PentestResult, skillrunner.ApprovedImage, error)
 }
 
 // ProjectReader resolves the project a run belongs to. The tenant comes from
@@ -110,6 +117,12 @@ type RunRequest struct {
 	// what the mode's capabilities require; nothing here re-implements that.
 	Actor            string
 	ActorPermissions []domain.Permission
+	// PentestAuthorizationID references the persisted, confirmed, expiring
+	// authorization that permits an active pentest against one target. It is
+	// required by (and only consulted for) the active-pentest mode: the run's
+	// authorized target is DERIVED from this record, never from the inputs, so
+	// the persisted authorization is the single source of truth.
+	PentestAuthorizationID string
 	// quiet suppresses run_refused audit rows. It is set only by an audit
 	// checking, before acceptance, whether its composed modes could run --
 	// a question, not a refused request.
@@ -161,6 +174,13 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 		return RunResult{}, apierr.Conflict("SKILL_AGENT_REQUIRES_DURABLE_RUN",
 			"agent modes run only as durable runs (POST .../run returns 202)", nil)
 	}
+	if prep.pentest != nil {
+		// An active pentest sends live traffic and its report must be validated
+		// and redacted before it is worth anything; like an agent run, there is
+		// no synchronous version.
+		return RunResult{}, apierr.Conflict("SKILL_PENTEST_REQUIRES_DURABLE_RUN",
+			"active-pentest runs only as a durable run (POST .../run returns 202)", nil)
+	}
 	report, err := s.executeScan(ctx, prep, "")
 	if err != nil {
 		s.recordRun(ctx, store.SkillAuditRunRefused, req, prep.scope.Version, prep.mode.ID, "", err.Error())
@@ -193,6 +213,9 @@ type preparedRun struct {
 	agent *agentPlan
 	// audit is set only for a composite mode (audit.go).
 	audit *auditPlan
+	// pentest is set only for the active-pentest mode: the persisted
+	// authorization and the derived target this run is bound to (pentestrun.go).
+	pentest *pentestPlan
 }
 
 // prepareRun performs steps 1-4 of RunSkill's contract. Every refusal is
@@ -256,6 +279,13 @@ func (s *Service) prepareRun(ctx context.Context, req RunRequest) (preparedRun, 
 	}
 	if mode.EffectiveExecutor() == skillcatalog.ExecutorComposite {
 		return s.prepareAuditRun(ctx, req, resolved, mode, project, inputs)
+	}
+	// active-pentest is a tool mode, but not a scan tool: it sends traffic to a
+	// target behind the egress proxy, gated by a persisted authorization. It
+	// has its own preparation, its own attestation, and its own execution path,
+	// and it never reaches the scan path below.
+	if mode.ID == activePentestModeID {
+		return s.preparePentestRun(ctx, req, resolved, mode, project, inputs)
 	}
 
 	// A missing execution environment is answered HERE, not at the top of the

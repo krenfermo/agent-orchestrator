@@ -71,6 +71,28 @@ var credentialUnquoted = regexp.MustCompile(
 // urlCredential is the password half of scheme://user:password@host.
 var urlCredential = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]+:)([^\s@/]+)(@)`)
 
+// authorizationHeader matches an HTTP Authorization header. An active pentest's
+// reproduction steps carry the exact request that demonstrated a finding, so a
+// bearer/basic credential can land in a report verbatim. Group 1 keeps
+// "Authorization: ", group 2 keeps the optional scheme word (Bearer/Basic/...)
+// so the finding still says what KIND of credential it was, and group 3 (the
+// credential itself) is redacted.
+var authorizationHeader = regexp.MustCompile(
+	`(?i)(authorization\s*:\s*)((?:bearer|basic|digest|negotiate|token)\s+)?(\S+)`)
+
+// setCookieHeader matches a Set-Cookie response header. Group 1+2 keep the
+// header and the cookie NAME (a cookie-flags finding needs it), group 3 is the
+// value up to the first ';', and everything after — Secure/HttpOnly/SameSite —
+// is left intact because those attributes are the evidence.
+var setCookieHeader = regexp.MustCompile(
+	`(?i)(set-cookie\s*:\s*)([^=;\r\n]+=)([^;\r\n]+)`)
+
+// cookieHeader matches a Cookie request header and redacts its whole value. The
+// leading [^-\w] / ^ guard keeps it from matching the "cookie" inside
+// "set-cookie" (RE2 has no lookbehind), which setCookieHeader handles instead.
+var cookieHeader = regexp.MustCompile(
+	`(?im)(^|[^-\w])(cookie\s*:\s*)([^\r\n]+)`)
+
 // Redactor rewrites every string of a decoded report.
 type Redactor struct {
 	literals []string
@@ -158,6 +180,30 @@ func (r *Redactor) String(s string) (string, int) {
 		}
 		n++
 		return sub[1] + Marker + sub[3]
+	})
+	s = authorizationHeader.ReplaceAllStringFunc(s, func(m string) string {
+		sub := authorizationHeader.FindStringSubmatch(m)
+		if strings.Contains(sub[3], Marker) {
+			return m
+		}
+		n++
+		return sub[1] + sub[2] + Marker
+	})
+	s = setCookieHeader.ReplaceAllStringFunc(s, func(m string) string {
+		sub := setCookieHeader.FindStringSubmatch(m)
+		if strings.Contains(sub[3], Marker) {
+			return m
+		}
+		n++
+		return sub[1] + sub[2] + Marker
+	})
+	s = cookieHeader.ReplaceAllStringFunc(s, func(m string) string {
+		sub := cookieHeader.FindStringSubmatch(m)
+		if strings.Contains(sub[3], Marker) {
+			return m
+		}
+		n++
+		return sub[1] + sub[2] + Marker
 	})
 	for _, lit := range r.literals {
 		var c int

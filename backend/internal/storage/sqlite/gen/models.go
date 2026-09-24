@@ -1066,6 +1066,23 @@ type SkillInstallOrigin struct {
 	SourceFetchedAt         sql.NullTime
 }
 
+type SkillPentestAuthorization struct {
+	ID               string
+	ProjectID        domain.ProjectID
+	SkillID          string
+	TargetScheme     string
+	TargetHost       string
+	TargetPort       int64
+	ScopePaths       string
+	PentestType      string
+	RequestedBy      string
+	AuthorizationRef string
+	Confirmed        int64
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
+	RevokedAt        sql.NullTime
+}
+
 type SkillRegistry struct {
 	ID                   string
 	DisplayName          string

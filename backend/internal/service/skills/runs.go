@@ -332,6 +332,10 @@ func (s *Service) execute(ctx context.Context, runID string, prep preparedRun) {
 		s.executeAudit(ctx, wctx, runID, prep)
 		return
 	}
+	if prep.pentest != nil {
+		s.executePentest(ctx, wctx, runID, prep)
+		return
+	}
 	report, err := s.executeScan(ctx, prep, runID)
 	if err != nil {
 		image := store.SkillRunImage{}
@@ -547,7 +551,10 @@ func (s *Service) GetRun(ctx context.Context, projectID domain.ProjectID, runID 
 		switch {
 		case hex.EncodeToString(sum[:]) != rec.ReportSHA256:
 			detail.Integrity = "mismatch"
-		case rec.Tool == skillagent.Tool || rec.Tool == AuditTool:
+		case rec.Tool == skillagent.Tool || rec.Tool == AuditTool || rec.Tool == string(skillrunner.ToolActivePentest):
+			// Agent, audit and pentest reports each have their own schema
+			// (findings.v1, ao.security-audit/v1, ao.pentest/v1) and are served
+			// as raw, verified bytes rather than decoded into StaticScanReport.
 			if !json.Valid(rec.ReportJSON) {
 				detail.Integrity = "mismatch"
 			} else {

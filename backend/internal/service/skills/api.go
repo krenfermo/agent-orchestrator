@@ -400,12 +400,13 @@ var _ controllers.SkillImageTrust = (*Service)(nil)
 func (s *Service) StartSkillRun(ctx context.Context, in controllers.SkillRunInput) (controllers.SkillRunStartView, error) {
 	run, created, err := s.StartRun(ctx, StartRunRequest{
 		RunRequest: RunRequest{
-			ProjectID:        in.ProjectID,
-			SkillID:          in.SkillID,
-			ModeID:           in.ModeID,
-			Inputs:           in.Inputs,
-			Actor:            in.Actor,
-			ActorPermissions: in.ActorPermissions,
+			ProjectID:              in.ProjectID,
+			SkillID:                in.SkillID,
+			ModeID:                 in.ModeID,
+			Inputs:                 in.Inputs,
+			Actor:                  in.Actor,
+			ActorPermissions:       in.ActorPermissions,
+			PentestAuthorizationID: in.PentestAuthorizationID,
 		},
 		IdempotencyKey: in.IdempotencyKey,
 	})

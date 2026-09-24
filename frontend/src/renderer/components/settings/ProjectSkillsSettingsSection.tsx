@@ -6,6 +6,7 @@ import { apiClient, apiErrorMessage } from "../../lib/api-client";
 import type { components } from "../../../api/schema";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import {
 	Select,
 	SelectContent,
@@ -25,6 +26,22 @@ type SkillDryRun = components["schemas"]["SkillDryRunResponse"];
 type SkillRunStart = components["schemas"]["ControllersSkillRunStartView"];
 type SkillRunSummary = components["schemas"]["ControllersSkillRunSummaryView"];
 type SkillRunDetail = components["schemas"]["ControllersSkillRunDetailView"];
+type PentestAuthorization = components["schemas"]["PentestAuthorizationView"];
+
+// hostPortOfTarget turns the authorization's canonical URL (scheme://host:port)
+// into the host:port the manifest's `target` input carries, which the daemon
+// cross-checks against the authorization before it will run.
+function hostPortOfTarget(target: string): string {
+	try {
+		const u = new URL(target);
+		// URL.host drops a default port (443/80); the daemon's target input is
+		// always explicit host:port, so reconstruct it with the port present.
+		const port = u.port || (u.protocol === "https:" ? "443" : "80");
+		return `${u.hostname}:${port}`;
+	} catch {
+		return target;
+	}
+}
 
 const TERMINAL_RUN_STATES = new Set(["succeeded", "partial", "failed", "refused", "cancelled"]);
 const isTerminalRun = (state: string | undefined) => state !== undefined && TERMINAL_RUN_STATES.has(state);
@@ -149,6 +166,12 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 	const [dryRunMode, setDryRunMode] = useState<Record<string, string>>({});
 	const [dryRun, setDryRun] = useState<SkillDryRun | null>(null);
 	const [activeRunId, setActiveRunId] = useState<string>("");
+	// Active-pentest (2F) is a distinct, deliberate flow: a per-target
+	// authorization is created first, then a confirmed run references it. These
+	// hold the operator's inputs and the created authorization, per skill row.
+	const [pentestTarget, setPentestTarget] = useState<Record<string, string>>({});
+	const [pentestRef, setPentestRef] = useState<Record<string, string>>({});
+	const [pentestAuth, setPentestAuth] = useState<Record<string, PentestAuthorization>>({});
 	const runsKey = ["skills", "project", projectId, "runs"] as const;
 
 	const skills = useQuery({
@@ -290,13 +313,27 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 	// only appears once a dry run has said this mode is executable. The dry run
 	// is the honest way to find out; this is the thing that acts.
 	const execute = useMutation({
-		mutationFn: async ({ skill, modeId }: { skill: string; modeId: string }): Promise<SkillRunStart> => {
+		mutationFn: async ({
+			skill,
+			modeId,
+			inputs,
+			pentestAuthorizationId,
+		}: {
+			skill: string;
+			modeId: string;
+			inputs?: Record<string, string>;
+			pentestAuthorizationId?: string;
+		}): Promise<SkillRunStart> => {
 			const { data, error: apiError } = await apiClient.POST(
 				"/api/v1/projects/{id}/skills/{skillId}/run",
 				{
 					credentials: "include",
 					params: { path: { id: projectId, skillId: skill } },
-					body: { modeId, inputs: { mode: modeId } },
+					body: {
+						modeId,
+						inputs: { mode: modeId, ...(inputs ?? {}) },
+						...(pentestAuthorizationId ? { pentestAuthorizationId } : {}),
+					},
 				},
 			);
 			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
@@ -309,6 +346,46 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 			setError(null);
 			void queryClient.invalidateQueries({ queryKey: runsKey });
 			invalidate();
+		},
+		onError: (err: Error) => {
+			setError(err.message);
+		},
+	});
+
+	// Authorizing a pentest target. This is the explicit, per-target permission
+	// an active-pentest run must reference. It is a deliberate act, separate
+	// from running: it names one target, a written-authorization reference, and
+	// an expiry, and the daemon binds a run to it fail-closed.
+	const authorizePentest = useMutation({
+		mutationFn: async ({
+			skill,
+			target,
+			ref,
+		}: {
+			skill: string;
+			target: string;
+			ref: string;
+		}): Promise<PentestAuthorization> => {
+			const { data, error: apiError } = await apiClient.POST(
+				"/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations",
+				{
+					credentials: "include",
+					params: { path: { id: projectId, skillId: skill } },
+					body: {
+						target,
+						authorizationRef: ref,
+						pentestType: "web-dast",
+						ttlSeconds: 3600,
+						confirm: true,
+					},
+				},
+			);
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		onSuccess: (data, vars) => {
+			setPentestAuth({ ...pentestAuth, [vars.skill]: data });
+			setError(null);
 		},
 		onError: (err: Error) => {
 			setError(err.message);
@@ -477,6 +554,107 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 						>
 							{t("settings.project.skills.check")}
 						</Button>
+					</div>
+				) : null}
+
+				{/* Active pentest is a clearly-distinct surface: it sends real,
+				    bounded traffic to a live target, so it is not run from the
+				    ordinary Check/Run flow. A per-target authorization is created
+				    first, then a confirmed run references it. */}
+				{row.enabled && mode === "active-pentest" ? (
+					<div
+						className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[color-mix(in_oklab,var(--color-status-needs-you)_45%,transparent)] bg-[color-mix(in_oklab,var(--color-status-needs-you)_8%,transparent)] p-3"
+						data-testid="project-skill-pentest"
+					>
+						<p className="flex items-start gap-2 text-caption text-[var(--color-status-needs-you)]">
+							<ShieldAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+							{t("settings.project.skills.pentest.warning")}
+						</p>
+						<Input
+							value={pentestTarget[row.skillId] ?? ""}
+							onChange={(e) => setPentestTarget({ ...pentestTarget, [row.skillId]: e.target.value })}
+							placeholder={t("settings.project.skills.pentest.targetPlaceholder")}
+							aria-label={t("settings.project.skills.pentest.target")}
+							disabled={Boolean(pentestAuth[row.skillId])}
+						/>
+						<Input
+							value={pentestRef[row.skillId] ?? ""}
+							onChange={(e) => setPentestRef({ ...pentestRef, [row.skillId]: e.target.value })}
+							placeholder={t("settings.project.skills.pentest.refPlaceholder")}
+							aria-label={t("settings.project.skills.pentest.ref")}
+							disabled={Boolean(pentestAuth[row.skillId])}
+						/>
+						{!pentestAuth[row.skillId] ? (
+							<Button
+								variant="secondary"
+								size="sm"
+								disabled={
+									authorizePentest.isPending ||
+									!(pentestTarget[row.skillId] ?? "").trim() ||
+									!(pentestRef[row.skillId] ?? "").trim()
+								}
+								onClick={() =>
+									authorizePentest.mutate({
+										skill: row.skillId,
+										target: (pentestTarget[row.skillId] ?? "").trim(),
+										ref: (pentestRef[row.skillId] ?? "").trim(),
+									})
+								}
+								data-testid="project-skill-pentest-authorize"
+							>
+								{authorizePentest.isPending
+									? t("settings.project.skills.pentest.authorizing")
+									: t("settings.project.skills.pentest.authorize")}
+							</Button>
+						) : (
+							<div className="flex flex-col gap-2">
+								<p className="text-caption text-settings-label">
+									{t("settings.project.skills.pentest.confirm", {
+										target: pentestAuth[row.skillId].target,
+										expires: pentestAuth[row.skillId].expiresAt,
+									})}
+								</p>
+								<ul className="list-disc pl-4 text-caption text-settings-muted">
+									<li>{t("settings.project.skills.pentest.scope")}</li>
+									<li>{t("settings.project.skills.pentest.limits")}</li>
+									<li>{t("settings.project.skills.pentest.what")}</li>
+								</ul>
+								<div className="flex items-center gap-2">
+									<Button
+										variant="primary"
+										size="sm"
+										disabled={execute.isPending}
+										onClick={() =>
+											execute.mutate({
+												skill: row.skillId,
+												modeId: "active-pentest",
+												pentestAuthorizationId: pentestAuth[row.skillId].id,
+												inputs: {
+													target: hostPortOfTarget(pentestAuth[row.skillId].target),
+													authorizationRef: (pentestRef[row.skillId] ?? "").trim(),
+												},
+											})
+										}
+										data-testid="project-skill-pentest-run"
+									>
+										{execute.isPending
+											? t("settings.project.skills.running")
+											: t("settings.project.skills.pentest.run")}
+									</Button>
+									<Button
+										variant="ghost"
+										size="sm"
+										onClick={() => {
+											const next = { ...pentestAuth };
+											delete next[row.skillId];
+											setPentestAuth(next);
+										}}
+									>
+										{t("settings.project.skills.pentest.cancel")}
+									</Button>
+								</div>
+							</div>
+						)}
 					</div>
 				) : null}
 

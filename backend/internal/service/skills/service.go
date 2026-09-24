@@ -31,6 +31,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillcatalog"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillpentest"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
@@ -52,6 +53,14 @@ type Store interface {
 	AppendSkillAudit(ctx context.Context, entry store.SkillAuditEntry) error
 	ListSkillAuditForSkill(ctx context.Context, skillID string) ([]store.SkillAuditEntry, error)
 	ListSkillAuditForProject(ctx context.Context, projectID domain.ProjectID) ([]store.SkillAuditEntry, error)
+
+	// 2F (migration 0174): the persisted authorization for an active pentest.
+	// It is on the catalog store, not the durable-run store, so preparation can
+	// consult it whether or not durable runs are wired.
+	GetSkillPentestAuthorization(ctx context.Context, id string) (skillpentest.Authorization, bool, error)
+	InsertSkillPentestAuthorization(ctx context.Context, a skillpentest.Authorization) (skillpentest.Authorization, error)
+	ListSkillPentestAuthorizationsForProject(ctx context.Context, projectID domain.ProjectID) ([]skillpentest.Authorization, error)
+	RevokeSkillPentestAuthorization(ctx context.Context, id string, at time.Time) (bool, error)
 }
 
 // OriginSource is the OPTIONAL provenance read: where an installed version came
