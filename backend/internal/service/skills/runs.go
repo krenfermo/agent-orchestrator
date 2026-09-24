@@ -103,6 +103,9 @@ type RunStore interface {
 	FinishSkillRunUnsuccessful(ctx context.Context, id string, fin store.SkillRunFailure) (bool, error)
 	RequestSkillRunCancel(ctx context.Context, projectID domain.ProjectID, id string, at time.Time) (bool, error)
 	ListSkillRunFindings(ctx context.Context, runID string) ([]store.SkillRunFindingRecord, error)
+	// 2E (migration 0173): an audit ends partial, and lists its children.
+	FinishSkillRunPartial(ctx context.Context, id string, fin store.SkillRunPartialResult) (bool, error)
+	ListSkillRunChildren(ctx context.Context, parentID string) ([]store.SkillRunRecord, error)
 }
 
 // RunReaper removes what a run left behind when its daemon died. The real
@@ -131,6 +134,9 @@ type runEngine struct {
 type inflightRun struct {
 	cancel          context.CancelFunc
 	cancelRequested bool
+	// activeChild is the child run an audit is executing right now, so a
+	// cancel of the audit reaches it as a cancel -- not as an error.
+	activeChild string
 }
 
 // WithDurableRuns enables durable, asynchronous runs owned by the daemon
@@ -173,9 +179,12 @@ type SkillRunDetail struct {
 	// Report is the stored report, decoded, when the run succeeded and its
 	// bytes still hash to the recorded digest.
 	Report *skillrunner.StaticScanReport
-	// AgentReport is the stored findings.v1 report of an agent run, exactly
-	// as stored, under the same condition. At most one of the two is set.
+	// AgentReport is the stored report of an agent run (findings.v1) or of an
+	// audit (ao.security-audit/v1), exactly as stored, under the same
+	// condition. At most one of Report and AgentReport is set.
 	AgentReport json.RawMessage
+	// Children are an audit's child runs, oldest first; empty otherwise.
+	Children []SkillRun
 	// Integrity is "verified", "mismatch", or "none" (no report to verify).
 	Integrity string
 }
@@ -208,6 +217,20 @@ func (s *Service) StartRun(ctx context.Context, req StartRunRequest) (SkillRun, 
 		return SkillRun{}, false, apierr.Conflict("SKILL_RUNS_SHUTTING_DOWN",
 			"the daemon is shutting down and accepts no new runs", nil)
 	}
+	rec, created, err := s.runs.store.CreateSkillRun(ctx, s.runRecord(prep, req.IdempotencyKey, ""))
+	if err != nil {
+		return SkillRun{}, false, err
+	}
+	if created {
+		s.dispatch(rec.ID, prep)
+	}
+	return toSkillRun(rec), created, nil
+}
+
+// runRecord is the row a run is created with -- the same for a standalone run
+// and for a child of an audit (parentID), so the two can never record their
+// authorization differently.
+func (s *Service) runRecord(prep preparedRun, idempotencyKey, parentID string) store.SkillRunRecord {
 	inputsJSON, _ := json.Marshal(prep.inputs)
 	caps := make([]string, 0, len(prep.plan.Decision.Granted))
 	for _, c := range prep.plan.Decision.Granted {
@@ -221,32 +244,24 @@ func (s *Service) StartRun(ctx context.Context, req StartRunRequest) (SkillRun, 
 	}
 	sort.Strings(controls)
 	controlsJSON, _ := json.Marshal(controls)
-
-	now := s.now()
-	rec, created, err := s.runs.store.CreateSkillRun(ctx, store.SkillRunRecord{
+	return store.SkillRunRecord{
 		ID:               newRunID(),
-		ProjectID:        req.ProjectID,
+		ProjectID:        prep.req.ProjectID,
 		SkillID:          prep.resolved.Package.Manifest.ID,
 		SkillVersion:     prep.scope.Version,
 		ModeID:           prep.mode.ID,
 		Tool:             string(prep.tool),
-		IdempotencyKey:   req.IdempotencyKey,
-		RequestedBy:      req.Actor,
+		IdempotencyKey:   idempotencyKey,
+		RequestedBy:      prep.req.Actor,
 		InputsJSON:       string(inputsJSON),
 		CapabilitiesJSON: string(capsJSON),
 		PackageDigest:    prep.resolved.Package.Digest,
 		RunnerID:         prep.plan.Runner.RunnerID,
 		RunnerControls:   string(controlsJSON),
 		OwnerInstance:    s.runs.owner,
-		CreatedAt:        now,
-	})
-	if err != nil {
-		return SkillRun{}, false, err
+		CreatedAt:        s.now(),
+		ParentRunID:      parentID,
 	}
-	if created {
-		s.dispatch(rec.ID, prep)
-	}
-	return toSkillRun(rec), created, nil
 }
 
 // dispatch starts the executor for a freshly created run.
@@ -294,6 +309,10 @@ func (s *Service) execute(ctx context.Context, runID string, prep preparedRun) {
 	}
 	if prep.agent != nil {
 		s.executeAgentRun(ctx, wctx, runID, prep)
+		return
+	}
+	if prep.audit != nil {
+		s.executeAudit(ctx, wctx, runID, prep)
 		return
 	}
 	report, err := s.executeScan(ctx, prep, runID)
@@ -450,6 +469,9 @@ func (s *Service) CancelRun(ctx context.Context, projectID domain.ProjectID, run
 	in, local := e.inflight[runID]
 	if local {
 		in.cancelRequested = true
+		if child, ok := e.inflight[in.activeChild]; ok {
+			child.cancelRequested = true
+		}
 		in.cancel()
 	}
 	e.mu.Unlock()
@@ -508,7 +530,7 @@ func (s *Service) GetRun(ctx context.Context, projectID domain.ProjectID, runID 
 		switch {
 		case hex.EncodeToString(sum[:]) != rec.ReportSHA256:
 			detail.Integrity = "mismatch"
-		case rec.Tool == skillagent.Tool:
+		case rec.Tool == skillagent.Tool || rec.Tool == AuditTool:
 			if !json.Valid(rec.ReportJSON) {
 				detail.Integrity = "mismatch"
 			} else {
@@ -525,7 +547,21 @@ func (s *Service) GetRun(ctx context.Context, projectID domain.ProjectID, runID 
 			}
 		}
 	}
+	if rec.Tool == AuditTool {
+		kids, err := s.runs.store.ListSkillRunChildren(ctx, runID)
+		if err != nil {
+			return SkillRunDetail{}, err
+		}
+		for _, k := range kids {
+			detail.Children = append(detail.Children, toSkillRun(k))
+		}
+	}
 	return detail, nil
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // ReconcileRuns accounts for runs a previous daemon instance left non-terminal.
@@ -548,7 +584,12 @@ func (s *Service) ReconcileRuns(ctx context.Context) (int, error) {
 		if p, ok, perr := s.project(ctx, rec.ProjectID); perr == nil && ok {
 			projectPath = p.Path
 		}
-		if rec.Tool == skillagent.Tool && s.agent != nil {
+		switch {
+		case rec.Tool == AuditTool:
+			// An audit executes nothing itself, so there is nothing of its own
+			// to reap; its children are reconciled, and reaped, as runs of
+			// their own in this same loop.
+		case rec.Tool == skillagent.Tool && s.agent != nil:
 			// An agent a dead daemon left behind is stopped by its pid file,
 			// and only when it is still this run's agent; its copy goes too.
 			killed, removed, rerr := s.agent.Reap(rec.ID)
@@ -558,7 +599,7 @@ func (s *Service) ReconcileRuns(ctx context.Context) (int, error) {
 				e.log.Info("skills: removed an interrupted agent run's leftovers", "run", rec.ID,
 					"agentStopped", killed, "staging", removed != "")
 			}
-		} else if e.reaper != nil && skillrunner.ValidRunID(rec.ID) {
+		case e.reaper != nil && skillrunner.ValidRunID(rec.ID):
 			rep, rerr := e.reaper.ReapRun(ctx, rec.ID, projectPath, s.stagingRoot)
 			if rerr != nil {
 				e.log.Warn("skills: could not reap an interrupted run's leftovers", "run", rec.ID, "err", rerr)

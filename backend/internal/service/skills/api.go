@@ -457,6 +457,9 @@ func (s *Service) GetSkillRun(ctx context.Context, projectID domain.ProjectID, r
 		// Served exactly as stored: these are the bytes the digest covers.
 		view.Report = d.AgentReport
 	}
+	for _, c := range d.Children {
+		view.Children = append(view.Children, skillRunSummaryView(c))
+	}
 	return view, nil
 }
 
@@ -478,7 +481,7 @@ func skillRunSummaryView(r SkillRun) controllers.SkillRunSummaryView {
 		ApprovedBy: r.ApprovedBy, Summary: r.Summary, FindingCount: r.FindingCount,
 		Truncated: r.Truncated, ReportSHA256: r.ReportSHA256, ErrorCode: r.ErrorCode,
 		ErrorMessage: r.ErrorMessage, CancelRequested: r.CancelRequested, CreatedAt: r.CreatedAt,
-		StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
+		StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, ParentRunID: r.ParentRunID,
 	}
 	if r.StartedAt != nil && r.FinishedAt != nil {
 		ms := r.FinishedAt.Sub(*r.StartedAt).Milliseconds()

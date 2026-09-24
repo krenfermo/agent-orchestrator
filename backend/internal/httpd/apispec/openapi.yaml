@@ -3501,8 +3501,11 @@ paths:
         no image, no command and no argv. Tool modes run one of AO''s closed scan
         tools (ao.static-scan/v1, ao.secret-scan/v1, ao.dependency-scan/v1) in the
         container runner; agent modes of builtin or trusted packages run AO''s host
-        agent (ADR 0010). The same idempotencyKey, or any request while a run for
-        this project, skill and mode is queued or running, returns THAT run with created=false.'
+        agent (ADR 0010); a composite mode (full-audit) runs each composed mode as
+        its own child run and consolidates their verified reports, ending succeeded
+        only when every mode produced one and partial otherwise (ADR 0011). The same
+        idempotencyKey, or any request while a run for this project, skill and mode
+        is queued or running, returns THAT run with created=false.'
       tags:
       - skills
   /api/v1/projects/{id}/skills/runs:
@@ -16238,6 +16241,10 @@ components:
       type: object
     ControllersSkillRunDetailView:
       properties:
+        children:
+          items:
+            $ref: '#/components/schemas/ControllersSkillRunSummaryView'
+          type: array
         findings:
           items:
             $ref: '#/components/schemas/ControllersSkillRunFindingView'
@@ -16361,6 +16368,8 @@ components:
           type: string
         packageDigest:
           type: string
+        parentRunId:
+          type: string
         projectId:
           type: string
         reportSha256:
@@ -16385,6 +16394,7 @@ components:
           - queued
           - running
           - succeeded
+          - partial
           - failed
           - refused
           - cancelled

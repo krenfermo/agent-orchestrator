@@ -300,7 +300,7 @@ type SkillRunSummaryView struct {
 	Version         string            `json:"version"`
 	ModeID          string            `json:"modeId"`
 	Tool            string            `json:"tool"`
-	State           string            `json:"state" enum:"queued,running,succeeded,failed,refused,cancelled"`
+	State           string            `json:"state" enum:"queued,running,succeeded,partial,failed,refused,cancelled"`
 	RequestedBy     string            `json:"requestedBy"`
 	Inputs          map[string]string `json:"inputs"`
 	Capabilities    []string          `json:"capabilities"`
@@ -322,6 +322,9 @@ type SkillRunSummaryView struct {
 	FinishedAt      *time.Time        `json:"finishedAt,omitempty"`
 	// DurationMs is finishedAt - startedAt, when both exist.
 	DurationMs *int64 `json:"durationMs,omitempty"`
+	// ParentRunID is the full audit this run is a child of (2E); empty for a
+	// run that is not part of one.
+	ParentRunID string `json:"parentRunId,omitempty"`
 }
 
 // SkillRunStartView is the reply to a start: the run, and whether this request
@@ -356,6 +359,9 @@ type SkillRunDetailView struct {
 	// Integrity is "verified", "mismatch" (the stored report no longer matches
 	// its digest and is NOT served) or "none" (the run has no report).
 	Integrity string `json:"integrity" enum:"verified,mismatch,none"`
+	// Children are a full audit's child runs, in the order they ran; each
+	// keeps its own report, readable at its own run id.
+	Children []SkillRunSummaryView `json:"children,omitempty"`
 }
 
 // SkillRunView is one completed execution, as the wire sees it.
