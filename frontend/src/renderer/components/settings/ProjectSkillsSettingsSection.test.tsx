@@ -681,3 +681,112 @@ describe("ProjectSkillsSettingsSection — running", () => {
 		expect(history).toHaveTextContent("1.5s");
 	});
 });
+
+// Active pentest (2F) is a distinct surface: authorize one target, then run
+// against it referencing that authorization. The caller never contributes the
+// authority — it comes from the persisted authorization the daemon binds to.
+describe("ProjectSkillsSettingsSection — active pentest", () => {
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await appI18n.changeLanguage("en");
+	});
+
+	const pentestSkill = {
+		...securityAudit,
+		capabilities: ["repo.read", "net.egress", "net.active_scan", "report.write"],
+		modes: [
+			{
+				id: "active-pentest",
+				name: "Active penetration test",
+				description: "",
+				riskLevel: "critical",
+				capabilities: ["repo.read", "net.egress", "net.active_scan", "report.write"],
+				approval: "per_target",
+			},
+		],
+	};
+
+	function mockPentestGets() {
+		vi.spyOn(apiClient, "GET").mockImplementation((async (path: string) => {
+			if (path === "/api/v1/projects/{id}/skills") {
+				return {
+					data: {
+						projectId: "medusa",
+						installed: [pentestSkill],
+						activations: [
+							{
+								...enabledActivation,
+								grantedCapabilities: ["repo.read", "net.egress", "net.active_scan", "report.write"],
+							},
+						],
+						permissions: ["project.read", "project.manage", "settings.manage"],
+					},
+				} as never;
+			}
+			if (path === "/api/v1/projects/{id}/skills/runs") return { data: { runs: [] } } as never;
+			if (path === "/api/v1/projects/{id}/skills/runs/{runId}") return { data: undefined } as never;
+			return { data: { skills: [pentestSkill], capabilities: capabilityPolicy } } as never;
+		}) as never);
+	}
+
+	it("authorizes a target, then runs referencing that authorization", async () => {
+		mockPentestGets();
+		const post = vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/pentest-authorizations")) {
+				return {
+					data: {
+						id: "skpen-1",
+						projectId: "medusa",
+						skillId: "security-audit",
+						target: "https://app.example.test:443",
+						scopePaths: [],
+						pentestType: "web-dast",
+						requestedBy: "ada",
+						authorizationRef: "TICKET-42",
+						confirmed: true,
+						createdAt: new Date().toISOString(),
+						expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+						active: true,
+					},
+				} as never;
+			}
+			return startedRun as never;
+		}) as never);
+
+		renderSection();
+		const user = userEvent.setup();
+
+		// The distinct Active Pentest surface renders (its warning is present).
+		expect(await screen.findByTestId("project-skill-pentest")).toBeInTheDocument();
+
+		await user.type(screen.getByLabelText("Target URL"), "https://app.example.test");
+		await user.type(screen.getByLabelText("Written-authorization reference"), "TICKET-42");
+		await user.click(screen.getByTestId("project-skill-pentest-authorize"));
+
+		// Only after authorizing does a run become possible.
+		const runBtn = await screen.findByTestId("project-skill-pentest-run");
+		await user.click(runBtn);
+
+		await waitFor(() => {
+			const calls = post.mock.calls as unknown as Array<
+				[string, { body: { pentestAuthorizationId?: string; modeId?: string; inputs?: Record<string, string> } }]
+			>;
+			const runCall = calls.find(([p]) => p.endsWith("/run"));
+			expect(runCall).toBeTruthy();
+			const body = runCall![1].body;
+			expect(body.pentestAuthorizationId).toBe("skpen-1");
+			expect(body.modeId).toBe("active-pentest");
+			expect(body.inputs?.target).toBe("app.example.test:443");
+			expect(body.inputs?.authorizationRef).toBe("TICKET-42");
+		});
+	});
+
+	it("offers no run until a target is authorized", async () => {
+		mockPentestGets();
+		vi.spyOn(apiClient, "POST").mockResolvedValue({ data: undefined } as never);
+		renderSection();
+		await screen.findByTestId("project-skill-pentest");
+		expect(screen.queryByTestId("project-skill-pentest-run")).not.toBeInTheDocument();
+		expect(screen.getByTestId("project-skill-pentest-authorize")).toBeInTheDocument();
+	});
+});
