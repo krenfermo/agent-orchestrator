@@ -39,7 +39,8 @@ import (
 //
 // # What is deliberately NOT enabled here
 //
-// One TOOL mode: static-code, the one with a live boundary test. process.exec,
+// Three TOOL modes -- static-code, secret-scan and dependencies (2D) -- all
+// on the one scan engine with its live boundary test. process.exec,
 // repo.write, net.egress, net.active_scan and secrets.read are refused by the
 // capability table exactly as before -- this file adds no surface that could
 // reach them, and a mode requiring any of them fails authorization before a
@@ -56,11 +57,14 @@ var ErrNotExecutable = errors.New("skills: no execution path exists for this mod
 
 // executableModes maps a manifest mode onto the AO tool that implements it.
 //
-// It is a closed map, and it holds exactly one entry. Adding a second is a code
-// change and a release -- which is the point, because it is the moment somebody
-// decides a new kind of thing may run as AO.
+// It is a closed map. Adding an entry is a code change and a release -- which
+// is the point, because it is the moment somebody decides a new kind of thing
+// may run as AO. 2D added the secret and dependency scans: the same engine,
+// image and boundary as static-code, each behind its own image approval.
 var executableModes = map[string]skillrunner.Tool{
-	"static-code": skillrunner.ToolStaticScan,
+	"static-code":  skillrunner.ToolStaticScan,
+	"secret-scan":  skillrunner.ToolSecretScan,
+	"dependencies": skillrunner.ToolDependencyScan,
 }
 
 // SkillExecutor is the execution environment this service drives. It is an
@@ -325,10 +329,14 @@ func (s *Service) executeScan(ctx context.Context, prep preparedRun, runID strin
 		// The files come from the MANIFEST's declared read scope, not from the
 		// request. A caller who could name paths could name the ones the
 		// manifest was reviewed for not naming.
-		ScopePaths:          prep.stagingPaths,
+		ScopePaths: prep.stagingPaths,
+		// The manifest's deny list keeps credential files out of every run;
+		// the secret scan reports their presence without reading them.
+		DenyGlobs:           prep.resolved.Package.Manifest.Scope.Files.Deny,
 		StagingRootOverride: s.stagingRoot,
 		DataDir:             s.dataDir,
-		Params:              skillrunner.DefaultToolParams(),
+		Tool:                prep.tool,
+		Params:              skillrunner.DefaultParamsFor(prep.tool),
 		Limits:              skillrunner.DefaultLimits(),
 		RunID:               runID,
 	})

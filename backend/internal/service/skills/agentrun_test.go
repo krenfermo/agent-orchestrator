@@ -377,7 +377,7 @@ func TestAgentRun_UntrustedPackageIsRefusedBeforeAcceptance(t *testing.T) {
 	dir := stagedPackage(t)
 	manifest := filepath.Join(dir, skillcatalog.ManifestFileName)
 	b, _ := os.ReadFile(manifest) //nolint:gosec // test.
-	body := strings.Replace(string(b), "version: 0.2.0", "version: 0.2.1", 1)
+	body := strings.Replace(string(b), "version: 0.3.0", "version: 0.3.1", 1)
 	body = strings.Replace(body, "name: Security Audit", "name: Security Audit (fork)", 1)
 	if err := os.WriteFile(manifest, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -387,7 +387,7 @@ func TestAgentRun_UntrustedPackageIsRefusedBeforeAcceptance(t *testing.T) {
 	}
 	project := f.seedProject(t, "medusa")
 	if _, err := f.svc.Enable(context.Background(), skills.EnableRequest{
-		ProjectID: project, SkillID: "security-audit", Version: "0.2.1",
+		ProjectID: project, SkillID: "security-audit", Version: "0.3.1",
 		Capabilities: []skillcatalog.Capability{skillcatalog.CapRepoRead, skillcatalog.CapReportWrite},
 		Actor:        admin, ActorPermissions: adminPerms(),
 	}); err != nil {

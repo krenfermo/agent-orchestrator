@@ -3498,9 +3498,11 @@ paths:
         the mode declares is granted, the runtime attests every control the mode needs,
         and the mode is implemented. The image approval for this exact scope is checked
         when the run executes: a run without one ends refused. The caller contributes
-        no image, no command and no argv. Only ao.static-scan/v1 is implemented. The
-        same idempotencyKey, or any request while a run for this project, skill and
-        mode is queued or running, returns THAT run with created=false.'
+        no image, no command and no argv. Tool modes run one of AO''s closed scan
+        tools (ao.static-scan/v1, ao.secret-scan/v1, ao.dependency-scan/v1) in the
+        container runner; agent modes of builtin or trusted packages run AO''s host
+        agent (ADR 0010). The same idempotencyKey, or any request while a run for
+        this project, skill and mode is queued or running, returns THAT run with created=false.'
       tags:
       - skills
   /api/v1/projects/{id}/skills/runs:

@@ -1,7 +1,7 @@
 apiVersion: ao.skill/v1
 id: security-audit
 name: Security Audit
-version: 0.2.0
+version: 0.3.0
 description: >-
   On-demand security review of one selected project: static code review,
   dependency and secret scanning, authorization and API review, and — only
@@ -45,8 +45,8 @@ scope:
     mode: worktree
   network:
     mode: allowlist
-    allow:
-      - "api.osv.dev:443"
+    # No mode reaches an advisory API any more (dependencies is offline since
+    # 0.3.0); only active-pentest needs egress, to targets authorized per run.
     perRunTargets: true
 
 inputs:
@@ -88,7 +88,7 @@ compatibility:
 
 integrity:
   algorithm: sha256
-  digest: "6500761dd694c343285e07877e241d316d944a0e2e18e5f17fbd6d4c4b0c6ca4"
+  digest: "e2ca7d4db4edf4687e6d85a47c88a4cbe9e44f1f94293a47045b08d9b3f9b28b"
 
 provenance:
   publisher: agent-orchestrator
@@ -113,11 +113,13 @@ modes:
   - id: dependencies
     name: Dependency review
     description: >-
-      Reads dependency manifests and lockfiles and checks them against published
-      advisories.
-    riskLevel: medium
-    capabilities: [repo.read, deps.read, net.egress, report.write]
-    approval: per_run
+      Inventories dependencies from manifests and lockfiles and reports what they
+      establish on their own: git or URL sources, unpinned versions, missing
+      lockfiles, plain-HTTP registries. Offline: no advisory database is
+      consulted, so no vulnerability is claimed.
+    riskLevel: low
+    capabilities: [repo.read, deps.read, report.write]
+    approval: per_activation
     guide: modes/dependencies.md
 
   - id: secret-scan

@@ -402,12 +402,14 @@ func TestSkills_DryRunReportsWhatIsMissing(t *testing.T) {
 		t.Fatalf("a read mode must not need an egress allowlist: %+v", static.Runner)
 	}
 
-	// The dependency mode is granted and still blocked, because AO has no
-	// runner that can confine outbound traffic.
+	// An egress mode is granted net.egress and still blocked, because AO has
+	// no runner that can confine outbound traffic. (Since 0.3.0 the dependency
+	// mode is offline, so active-pentest is the mode that exercises this.)
 	deps := decode(w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/security-audit/dry-run",
-		ownerCookie, `{"modeId":"dependencies","inputs":{"mode":"dependencies"}}`, http.StatusOK))
+		ownerCookie, `{"modeId":"active-pentest","inputs":{"mode":"active-pentest"},`+
+			`"authorizedTargets":["staging.example.com:443"]}`, http.StatusOK))
 	if deps.Verdict != "blocked" {
-		t.Fatalf("dependencies verdict = %q", deps.Verdict)
+		t.Fatalf("active-pentest verdict = %q", deps.Verdict)
 	}
 	if !deps.Runner.NeedsIsolation || !deps.Runner.NeedsEgressControl {
 		t.Fatalf("runner requirements = %+v", deps.Runner)

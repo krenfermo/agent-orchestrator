@@ -204,7 +204,8 @@ func TestSkillRunIsDurableThroughARealDaemonAndDocker(t *testing.T) {
 		map[string]any{"version": version, "capabilities": []string{"repo.read", "report.write"}}, http.StatusOK, nil)
 
 	// ---- negative: mode authorized but not executable -> 409, no run ----
-	if _, code, ecode := s.startRun("medusa", "secret-scan", ""); code != http.StatusConflict || ecode != "SKILL_MODE_NOT_EXECUTABLE" {
+	// (secret-scan became executable in 2D; api-infra-review is still not.)
+	if _, code, ecode := s.startRun("medusa", "api-infra-review", ""); code != http.StatusConflict || ecode != "SKILL_MODE_NOT_EXECUTABLE" {
 		t.Fatalf("a non-executable mode answered %d %s", code, ecode)
 	}
 

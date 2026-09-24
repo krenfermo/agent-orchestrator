@@ -85,9 +85,11 @@ func TestDryRun_ReadOnlyModeNeedsConfinementToo(t *testing.T) {
 // confining runner, and STILL blocked — because the control it is missing is
 // the egress allowlist, which confinement does not provide.
 func TestDryRun_BlocksOnTheMissingEgressAllowlistEvenWithAFullGrant(t *testing.T) {
+	// active-pentest is the mode that still needs egress: since 0.3.0 the
+	// dependency mode is offline and needs nothing beyond confinement.
 	f, medusa := enabledFixture(t, []skillcatalog.Capability{
 		skillcatalog.CapRepoRead, skillcatalog.CapDepsRead,
-		skillcatalog.CapReportWrite, skillcatalog.CapNetEgress,
+		skillcatalog.CapReportWrite, skillcatalog.CapNetEgress, skillcatalog.CapNetActiveScan,
 	})
 	svc := skills.New(f.store, f.dataDir, skills.WithRunner(fixedRunner{
 		skillcatalog.RunnerAttestation{RunnerID: "container/docker", Controls: []skillcatalog.Control{
@@ -97,9 +99,10 @@ func TestDryRun_BlocksOnTheMissingEgressAllowlistEvenWithAFullGrant(t *testing.T
 		}},
 	}, ""))
 	dr, err := svc.DryRun(context.Background(), skills.DryRunRequest{
-		ProjectID: medusa, SkillID: "security-audit", ModeID: "dependencies",
-		Inputs:           map[string]string{"mode": "dependencies"},
-		ActorPermissions: adminPerms(),
+		ProjectID: medusa, SkillID: "security-audit", ModeID: "active-pentest",
+		Inputs:            map[string]string{"mode": "active-pentest"},
+		AuthorizedTargets: []string{"staging.example.com:443"},
+		ActorPermissions:  adminPerms(),
 	})
 	if err != nil {
 		t.Fatalf("DryRun: %v", err)
@@ -123,9 +126,14 @@ func TestDryRun_BlocksOnTheMissingEgressAllowlistEvenWithAFullGrant(t *testing.T
 	if !dr.Runner.NeedsIsolation || !dr.Runner.NeedsEgressControl {
 		t.Fatalf("runner requirements = %#v", dr.Runner)
 	}
-	// The missing-control list is exactly the one thing that has to be built.
-	if len(dr.Runner.MissingControls) != 1 ||
-		dr.Runner.MissingControls[0] != skillcatalog.ControlEgressAllowlist {
+	// The missing-control list is exactly what has to be built: the egress
+	// allowlist, and (for the active scan) the process-execution contract.
+	missing := map[skillcatalog.Control]bool{}
+	for _, c := range dr.Runner.MissingControls {
+		missing[c] = true
+	}
+	if len(missing) != 2 || !missing[skillcatalog.ControlEgressAllowlist] ||
+		!missing[skillcatalog.ControlArbitraryProcessExecution] {
 		t.Fatalf("missing controls = %v", dr.Runner.MissingControls)
 	}
 	// Confinement is reported honestly and is NOT mistaken for an allowlist.
@@ -151,8 +159,8 @@ func TestDryRun_DistinguishesAMissingGrantFromAMissingRunner(t *testing.T) {
 		skillcatalog.CapRepoRead, skillcatalog.CapReportWrite,
 	})
 	dr, err := f.svc.DryRun(context.Background(), skills.DryRunRequest{
-		ProjectID: medusa, SkillID: "security-audit", ModeID: "dependencies",
-		Inputs:           map[string]string{"mode": "dependencies"},
+		ProjectID: medusa, SkillID: "security-audit", ModeID: "active-pentest",
+		Inputs:           map[string]string{"mode": "active-pentest"},
 		ActorPermissions: adminPerms(),
 	})
 	if err != nil {
@@ -395,17 +403,30 @@ func TestDryRun_ReportsAConfiningRunnerAndStillBlocks(t *testing.T) {
 		t.Fatalf("the dry run did not report the real runner: %#v", static.Runner)
 	}
 
-	// The dependency mode is still blocked, and the reason has moved from "no
-	// runner at all" to the one control this runner does not implement.
-	deps, err := svc.DryRun(ctx, skills.DryRunRequest{
+	// Since 0.3.0 the dependency mode is offline: confinement is all it needs.
+	offline, err := svc.DryRun(ctx, skills.DryRunRequest{
 		ProjectID: medusa, SkillID: "security-audit", ModeID: "dependencies",
 		Inputs: map[string]string{"mode": "dependencies"}, ActorPermissions: adminPerms(),
 	})
 	if err != nil {
 		t.Fatalf("DryRun: %v", err)
 	}
+	if offline.Verdict != skills.DryRunExecutable || offline.Runner.NeedsEgressControl {
+		t.Fatalf("dependencies = %q, needs egress %v", offline.Verdict, offline.Runner.NeedsEgressControl)
+	}
+
+	// An egress mode is still blocked, and the reason has moved from "no
+	// runner at all" to the control this runner does not implement.
+	deps, err := svc.DryRun(ctx, skills.DryRunRequest{
+		ProjectID: medusa, SkillID: "security-audit", ModeID: "active-pentest",
+		Inputs: map[string]string{"mode": "active-pentest"}, ActorPermissions: adminPerms(),
+		AuthorizedTargets: []string{"staging.example.com:443"},
+	})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
 	if deps.Verdict != skills.DryRunBlocked {
-		t.Fatalf("dependencies = %q", deps.Verdict)
+		t.Fatalf("active-pentest = %q", deps.Verdict)
 	}
 	egress, ok := decisionFor(deps, skillcatalog.CapNetEgress)
 	if !ok || egress.MissingControl != skillcatalog.ControlEgressAllowlist {
