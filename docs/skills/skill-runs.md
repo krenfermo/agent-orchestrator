@@ -143,8 +143,8 @@ overwritten — it is reported.
 
 ## 7. Agent modes (Frente 2 / 2C)
 
-*Status: **implemented** on `feat/skills-2c-agent-mode` (base `b0ecb59a2`),
-pending review and merge. No migration. Design and residual risks: ADR 0010.*
+*Status: **merged** (ECC `b9ec8ca92`). No migration. Design and residual
+risks: ADR 0010.*
 
 A mode declares `executor: tool | agent` (absent = `tool`). The builtin
 `security-audit` is **0.2.0**, with `authz-review` as its one agent mode;
@@ -231,3 +231,70 @@ what that does not claim); Codex is not a provider; only `authz-review` is an
 agent mode; revocation of a trust root after install is not re-evaluated beyond
 the origin row; the provider's token spend is recorded in the report's AO notes, not
 in the usage ledger.
+
+## 8. Deterministic scanners (Frente 2 / 2D)
+
+*Status: **implemented** on `feat/skills-2d-deterministic-scanners` (base
+`b9ec8ca92`), pending review and merge. No migration. `security-audit` 0.3.0.*
+
+Two more **tool** modes, on the SAME engine as `static-code` — not a second
+framework. A tool is a row in `skillrunner/scantools.go`: which files it
+stages, which files it reads, its closed rule set, an optional AO-authored
+section, and its limitations. Every row runs the same AO-authored POSIX-shell
+script in the same digest-approved alpine image with `--network none`,
+non-root, read-only rootfs, `--cap-drop ALL`, cgroup limits, the boundary
+evidence first and the coverage accounting last. Each mode needs its own
+administrative image approval for its exact scope **and tool**; a static-code
+approval authorizes nothing else.
+
+| Mode | Tool | Capabilities | What it reports |
+| --- | --- | --- | --- |
+| `static-code` | `ao.static-scan/v1` | repo.read, report.write | unchanged |
+| `secret-scan` | `ao.secret-scan/v1` | repo.read, report.write | credential SHAPES (SEC-001..013: cloud, forge, chat, payment and AI-provider keys, private key blocks, JWTs, URL credentials, credential-named literals, rc-file auth tokens, webhooks) by rule and location; SEC-100 for a manifest-denied file that is present |
+| `dependencies` | `ao.dependency-scan/v1` | repo.read, deps.read, report.write | an inventory of declared dependencies (npm, Go, pip, Cargo) and DEP-001 git/URL source, DEP-002 unpinned version, DEP-003 no lockfile, DEP-004 plain-HTTP registry |
+
+**Secrets never become report content.** The engine prints a rule id and
+`path:line`, never the match. Files the manifest denies (`.env`, `.env.*`,
+`*.pem`, `*.key`, `id_rsa*`) are never staged, so no tool can read them; the
+secret scan reports their PRESENCE (SEC-100, by path, computed on the host).
+The dependency inventory strips URL userinfo inside the container and AO
+redacts known credential shapes again before storing.
+
+**No invented vulnerabilities.** `dependencies` is offline: 0.3.0 drops
+`net.egress` from the mode (and the unused `api.osv.dev` allowlist entry), so it
+runs under confinement alone. Its findings are facts read off a manifest
+(`confirmed`), none is a vulnerability claim, and its limitations say that no
+advisory data was consulted. Recognised manifests it does not parse (Gemfile,
+pyproject.toml, pom.xml, ...) are listed as unparsed. It stages only manifests
+and lockfiles — never source.
+
+**Behaviour change for `static-code`:** the manifest deny list now applies to its
+staging too (it was declared but not enforced on the container path); a denied
+file appears in coverage as `denied-by-manifest`.
+
+**Other 2D candidates reviewed.** `api-infra-review` is a review mode (an
+agent's judgement), not a deterministic scan, and stays unimplemented;
+`active-pentest` is out of scope. Nothing else in the package is a 2D scanner.
+
+**Tests.** `skillrunner/scantools_live_test.go` runs both tools in the real
+container (busybox grep/awk): every planted shape found, no value in the report,
+denied files reported and not read, exactly the planted dependency facts, a
+token in a git URL absent, a clean locked project with zero findings.
+`service/skills/scanmodes_test.go`: each mode reaches the runner with its tool,
+the deny list and its own defaults; a static-code approval does not authorize
+secret-scan. **E2E** `e2e/skillruns/scanners_e2e_test.go` (real daemon, SQLite,
+Docker): both scanners on a positive and a clean project, static-code
+regression, refused without an image approval, refused without `deps.read`,
+restart with history and verified reports, no container or staging left, and
+no planted value in the database, its WAL or the daemon log:
+
+```
+AO_SKILL_RUN_E2E=1 AO_SKILL_RUN_E2E_SHARED_ROOT=<a path the runtime shares> \
+  go test ./e2e/skillruns/ -run 'Scanners|SkillRun' -v -count=1 -timeout 20m
+```
+
+**Debt (2D).** Advisory lookup needs data (a local advisory DB AO would have to
+ship and update, or `net.egress`, still refused); only the working tree is
+scanned, not git history; the secret scan is shape-based; package.json is read
+line by line (minified manifests are not inventoried); the UI shows findings
+but not the dependency inventory (the CLI summarises it).
