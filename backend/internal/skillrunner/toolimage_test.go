@@ -13,8 +13,19 @@ import (
 // us", and it is why arbitrary_process_execution stays a separate control.
 func TestApprovedTools_IsAClosedVocabulary(t *testing.T) {
 	tools := ApprovedTools()
-	if len(tools) != 1 || tools[0] != ToolStaticScan {
+	// 2D added the secret and dependency scans, deliberately; each is a row in
+	// scantools.go running the same engine in the same image.
+	want := []Tool{ToolDependencyScan, ToolSecretScan, ToolStaticScan}
+	if len(tools) != len(want) {
 		t.Fatalf("approved tools = %v; adding one must be a deliberate code change", tools)
+	}
+	for i := range want {
+		if tools[i] != want[i] {
+			t.Fatalf("approved tools = %v; adding one must be a deliberate code change", tools)
+		}
+		if _, ok := scanTools[want[i]]; !ok {
+			t.Fatalf("%s has no row in the scan tool table", want[i])
+		}
 	}
 	for _, tool := range tools {
 		contract, ok := approvedTools[tool]
@@ -110,7 +121,12 @@ func TestToolParams_BoundsWhatReachesACommandLine(t *testing.T) {
 // future rule that carries any of them.
 func TestStaticScanRules_CannotBreakTheirOwnEncoding(t *testing.T) {
 	seen := map[string]bool{}
-	for _, rule := range staticScanRules {
+	var all []scanRule
+	for _, tool := range scanTools {
+		all = append(all, tool.rules...)
+	}
+	all = append(all, deniedFileRule)
+	for _, rule := range all {
 		if seen[rule.ID] {
 			t.Fatalf("duplicate rule id %s", rule.ID)
 		}

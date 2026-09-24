@@ -117,7 +117,7 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if entry.Version != "0.2.0" {
+	if entry.Version != "0.3.0" {
 		t.Fatalf("installed version = %q", entry.Version)
 	}
 
@@ -148,7 +148,10 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 	// Read-only modes plan successfully against the confining container the
 	// runner prototype provides -- and ONLY against it. Reading is not exempt
 	// from confinement; it simply needs no control beyond it.
-	for _, mode := range []string{"static-code", "secret-scan", "authz-review"} {
+	//
+	// Since 0.3.0 that includes dependencies: it is offline and needs deps.read,
+	// which confinement carries, and nothing beyond it.
+	for _, mode := range []string{"static-code", "secret-scan", "authz-review", "dependencies"} {
 		plan, err := PlanRun(r, RunRequest{
 			ProjectID: "medusa", SkillID: "security-audit", ModeID: mode,
 			Inputs:             map[string]string{"mode": mode},
@@ -170,19 +173,8 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 		}
 	}
 
-	// The dependency mode holds net.egress, so it is refused until a runner
-	// can confine outbound traffic -- even though medusa granted it.
-	_, err = PlanRun(r, RunRequest{
-		ProjectID: "medusa", SkillID: "security-audit", ModeID: "dependencies",
-		Inputs:             map[string]string{"mode": "dependencies"},
-		SubjectPermissions: perms,
-	}, confiningRunner())
-	if !errors.Is(err, ErrCapabilityDenied) || !strings.Contains(err.Error(), "egress_allowlist") {
-		t.Fatalf("dependencies = %v, want an egress-allowlist denial", err)
-	}
-
-	// Poseidon never granted net.egress, so the same mode is refused there for
-	// a different, correctly-reported reason.
+	// Poseidon never granted deps.read, so the same mode is refused there, for
+	// the correctly-reported reason.
 	_, err = PlanRun(r, RunRequest{
 		ProjectID: "poseidon", SkillID: "security-audit", ModeID: "dependencies",
 		Inputs:             map[string]string{"mode": "dependencies"},

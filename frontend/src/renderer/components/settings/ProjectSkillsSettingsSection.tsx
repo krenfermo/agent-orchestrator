@@ -597,7 +597,7 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 							</span>
 							<span className="text-settings-muted">
 								{" "}
-								{f.path}:{f.line} · {f.ruleId} · {f.confidence}
+								{f.line > 0 ? `${f.path}:${f.line}` : f.path} · {f.ruleId} · {f.confidence}
 							</span>
 						</li>
 					))}

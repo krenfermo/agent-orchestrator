@@ -311,7 +311,7 @@ func TestSkillAgentModeEndToEndWithRealClaudeCode(t *testing.T) {
 	}
 	s.addProject("medusa", medusa)
 
-	// ---- the builtin: available at 0.2.0, never enabled ----
+	// ---- the builtin: available at 0.3.0, never enabled ----
 	var catalog struct {
 		Skills []struct {
 			ID      string `json:"id"`
@@ -325,8 +325,8 @@ func TestSkillAgentModeEndToEndWithRealClaudeCode(t *testing.T) {
 			version = sk.Version
 		}
 	}
-	if version != "0.2.0" {
-		t.Fatalf("security-audit available at %q, want 0.2.0: %+v", version, catalog.Skills)
+	if version != "0.3.0" {
+		t.Fatalf("security-audit available at %q, want 0.3.0: %+v", version, catalog.Skills)
 	}
 	if _, code, ecode := s.startAgentRun("medusa", ""); code != http.StatusNotFound {
 		t.Fatalf("a run of a skill never enabled answered %d %s", code, ecode)
@@ -475,14 +475,14 @@ func TestSkillAgentModeEndToEndWithRealClaudeCode(t *testing.T) {
 	}
 	manifest := filepath.Join(fork, "skill.yaml")
 	mb, _ := os.ReadFile(manifest) //nolint:gosec // test.
-	mtext := strings.Replace(string(mb), "version: 0.2.0", "version: 0.2.1", 1)
+	mtext := strings.Replace(string(mb), "version: 0.3.0", "version: 0.3.1", 1)
 	mtext = strings.Replace(mtext, "name: Security Audit", "name: Security Audit (third-party fork)", 1)
 	writeFile(t, manifest, mtext)
 	s.expect(http.MethodPost, "/api/v1/skills", map[string]any{"sourceDir": fork}, http.StatusCreated, nil)
 	other := filepath.Join(s.root, "projects", "other")
 	s.initAgentRepo(other, canary)
 	s.addProject("other", other)
-	s.enableSkill("other", "0.2.1", "repo.read", "report.write")
+	s.enableSkill("other", "0.3.1", "repo.read", "report.write")
 	if _, code, ecode := s.startAgentRun("other", ""); code != http.StatusForbidden || ecode != "SKILL_AGENT_UNTRUSTED" {
 		t.Fatalf("an untrusted package answered %d %s", code, ecode)
 	}
@@ -560,7 +560,7 @@ func fakeProvider(t *testing.T, dir, control string) string {
 		return `printf '%s' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"permission_denials":[],"structured_output":` + structured + `}'`
 	}
 	script := "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\ncat <<'HELP'\n" + help + "\nHELP\nexit 0\nfi\n" +
-		"echo $$ > " + filepath.Join(dir, "last.pid") + "\n" +
+		"echo $$ > " + filepath.Join(dir, "last.pid.tmp") + " && mv " + filepath.Join(dir, "last.pid.tmp") + " " + filepath.Join(dir, "last.pid") + "\n" +
 		"case \"$(cat " + control + ")\" in\n" +
 		"invalid) " + envelope(`{"schemaVersion":"security-audit/findings/v1","verdict":"clean","capabilities":["net.egress"]}`) + " ;;\n" +
 		"tamper) chmod u+w api/orders.go && echo '// pwned' >> api/orders.go; " + envelope(report("t", "e")) + " ;;\n" +
@@ -590,7 +590,7 @@ func TestSkillAgentNegativesThroughARealDaemon(t *testing.T) {
 
 	s.startDaemon("AO_SKILL_AGENT_BIN=" + fake)
 	s.addProject("medusa", medusa)
-	s.enableSkill("medusa", "0.2.0", "repo.read", "report.write")
+	s.enableSkill("medusa", "0.3.0", "repo.read", "report.write")
 
 	run := func(mode string) agentDetail {
 		t.Helper()
@@ -637,6 +637,9 @@ func TestSkillAgentNegativesThroughARealDaemon(t *testing.T) {
 	// daemon ends the run interrupted, stops the orphaned agent and removes
 	// its staged copy.
 	setMode("hang")
+	// The earlier modes left their own (long-exited) pid behind; wait for THIS
+	// run's agent to write a fresh one, not for a file that already exists.
+	_ = os.Remove(filepath.Join(fakeDir, "last.pid"))
 	sv, code, ecode := s.startAgentRun("medusa", "")
 	if code != http.StatusAccepted {
 		t.Fatalf("hang: start = %d %s", code, ecode)

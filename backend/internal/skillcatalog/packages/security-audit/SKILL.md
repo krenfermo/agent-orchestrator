@@ -62,6 +62,8 @@ of the report.
 
 A manifest and a prompt are not a security boundary. The tool allow/deny list
 and the file scope in `skill.yaml` describe intent; only an isolated runner
-enforces them. Until AO has one, the modes that need real containment
-(`dependencies`, `active-pentest`) are refused by the catalog rather than run
-unconfined. That refusal is the correct behavior — do not work around it.
+enforces them. The mode that needs more than confinement (`active-pentest`,
+which needs an egress allowlist and named targets) is refused by the catalog
+rather than run unconfined. That refusal is the correct behavior — do not work
+around it. `dependencies` is offline and reports no vulnerability it has no
+advisory data for.

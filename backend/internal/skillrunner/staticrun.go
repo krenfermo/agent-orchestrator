@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillimage"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillreport"
 )
 
 // staticrun.go — the one execution path AO ships.
@@ -53,6 +54,13 @@ type StaticScanRequest struct {
 	// Params are the tool's two validated integers.
 	Params ToolParams
 	Limits Limits
+	// Tool is the closed scan tool to run. Empty is ToolStaticScan, which is
+	// what every request meant before 2D.
+	Tool Tool
+	// DenyGlobs are the manifest's scope.files.deny patterns. A denied file is
+	// never staged, so the container cannot read it; a tool that reports on
+	// them (the secret scan) reports its presence, by path, from the host.
+	DenyGlobs []string
 	// RunID, when set, is the durable skill run this scan belongs to. It names
 	// the staging directory and labels the container (RunIDLabel), so a daemon
 	// that restarts after a crash can remove exactly this run's leftovers with
@@ -239,6 +247,9 @@ type StaticScanReport struct {
 	Coverage                 ScanCoverage     `json:"coverage"`
 	Findings                 []ScanFinding    `json:"findings"`
 	Evidence                 BoundaryEvidence `json:"evidence"`
+	// Inventory is the dependency scan's list of declared dependencies. Nil
+	// for every other tool.
+	Inventory *DependencyInventory `json:"inventory,omitempty"`
 	// Truncated says the tool's own output hit AO's cap, so the finding list
 	// may be incomplete. A truncated report is not a clean one.
 	Truncated bool `json:"truncated"`
@@ -269,9 +280,17 @@ func (r *Runner) RunStaticScan(
 	if !r.Available() {
 		return StaticScanReport{}, fmt.Errorf("%w: %s", ErrRuntimeUnavailable, r.Unavailable())
 	}
+	toolID := req.Tool
+	if toolID == "" {
+		toolID = ToolStaticScan
+	}
+	tool, known := scanTools[toolID]
+	if !known {
+		return StaticScanReport{}, fmt.Errorf("%w: %q (approved: %s)", ErrToolNotApproved, toolID, joinTools(ApprovedTools()))
+	}
 	params := req.Params
 	if params.MaxFiles == 0 && params.MaxFileBytes == 0 {
-		params = DefaultToolParams()
+		params = tool.params
 	}
 	if err := params.Validate(); err != nil {
 		return StaticScanReport{}, err
@@ -285,7 +304,7 @@ func (r *Runner) RunStaticScan(
 	// to happen. Staging copies somebody's source, and doing it before the
 	// authorization check would leave a copy behind for a run that was always
 	// going to be refused.
-	image, err := r.ResolveApprovedImage(ctx, authority, req.Scope, ToolStaticScan)
+	image, err := r.ResolveApprovedImage(ctx, authority, req.Scope, toolID)
 	if err != nil {
 		return StaticScanReport{}, err
 	}
@@ -319,9 +338,11 @@ func (r *Runner) RunStaticScan(
 		}
 		runID = req.RunID
 	}
+	obs := &stageObservation{seen: map[string]bool{}}
 	staging, err := Stage(StageRequest{
 		SourceDir: req.ProjectPath, ScopePaths: req.ScopePaths, Root: root, RunID: runID,
 		MaxFiles: params.MaxFiles, MaxFileBytes: int64(params.MaxFileBytes),
+		Exclude: obs.exclude(tool, CompileDenyGlobs(req.DenyGlobs)),
 	})
 	if err != nil {
 		return StaticScanReport{}, err
@@ -376,7 +397,15 @@ func (r *Runner) RunStaticScan(
 		return StaticScanReport{}, err
 	}
 
+	if strings.Contains(res.Stdout, "ao_dependency_parse_failed=1") {
+		// A parser that died would leave a findings list shorter than the
+		// manifests warrant -- a cleaner-looking report, which is the one
+		// outcome this engine refuses to produce.
+		return StaticScanReport{}, fmt.Errorf("skillrunner: the %s parser failed inside the container; "+
+			"a partial inventory is not a report", toolID)
+	}
 	report := parseStaticScan(res, staging, contract, req.ProjectID)
+	finishToolReport(&report, tool, obs, res.Stdout)
 	report.ImageDigest = image.Digest
 	report.ApprovalID = image.Approval.ID
 	report.ApprovedBy = image.Approval.ApprovedBy
@@ -392,8 +421,12 @@ func (r *Runner) RunStaticScan(
 // tool's own totals, so a dropped line shows up as a discrepancy rather than
 // as a smaller, cleaner-looking report.
 func parseStaticScan(res Result, staging Staging, contract ToolContract, projectID string) StaticScanReport {
+	tool, ok := scanTools[contract.Tool]
+	if !ok {
+		tool = scanTools[ToolStaticScan]
+	}
 	report := StaticScanReport{
-		SchemaVersion: "ao.static-scan/v1",
+		SchemaVersion: tool.schemaVersion,
 		ProjectID:     projectID,
 		Tool:          string(contract.Tool),
 		StartedAt:     res.Started,
@@ -405,8 +438,8 @@ func parseStaticScan(res Result, staging Staging, contract ToolContract, project
 			FilesDiscovered: staging.Discovered,
 			FilesStaged:     len(staging.Inputs),
 			FilesVisible:    res.Evidence.InputFilesVisible,
-			Extensions:      append([]string(nil), scannedExtensions...),
-			Limitations:     append([]string(nil), staticScanLimitations...),
+			Extensions:      append(append([]string(nil), tool.extensions...), tool.names...),
+			Limitations:     append([]string(nil), tool.limitations...),
 			// Staging's own skips are part of coverage: a file AO never put
 			// on the mount was never scanned, and the report has to say so.
 			// The COUNT is authoritative even when the list was capped.
@@ -417,7 +450,7 @@ func parseStaticScan(res Result, staging Staging, contract ToolContract, project
 		},
 	}
 	byRule := map[string]scanRule{}
-	for _, rule := range staticScanRules {
+	for _, rule := range tool.rules {
 		byRule[rule.ID] = rule
 		report.Coverage.RulesRun = append(report.Coverage.RulesRun, rule.ID)
 	}
@@ -449,6 +482,11 @@ func parseStaticScan(res Result, staging Staging, contract ToolContract, project
 			if !ok || strings.TrimSpace(path) == "" {
 				continue
 			}
+			// The enumeration is bounded; ao_skipped_files keeps the count exact.
+			if len(report.Coverage.Skipped) >= staging.SkippedCount+maxRecordedSkips {
+				report.Coverage.SkippedListTruncated = true
+				continue
+			}
 			report.Coverage.Skipped = append(report.Coverage.Skipped, SkippedFile{
 				Path: containerRelPath(path), Reason: reason, Stage: SkipAtScan,
 			})
@@ -472,7 +510,7 @@ func parseStaticScan(res Result, staging Staging, contract ToolContract, project
 			report.Findings = append(report.Findings, ScanFinding{
 				RuleID: rule.ID, Severity: rule.Severity, Category: rule.Category,
 				Title: rule.Title, Path: containerRelPath(path), Line: n,
-				Recommendation: rule.Recommendation, Confidence: "possible",
+				Recommendation: rule.Recommendation, Confidence: rule.confidence(),
 			})
 		}
 	}
@@ -518,3 +556,119 @@ func lastLines(s string, n int) string {
 // that made it would be read as an assurance nobody produced. The report
 // carries coverage and limitations instead, and the caller draws its own
 // conclusion from what was actually examined.
+
+// DependencyEntry is one declared dependency, as the manifest states it. The
+// version is the SPEC the manifest wrote (a range, a URL with its userinfo
+// removed), not a resolved version.
+type DependencyEntry struct {
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Path      string `json:"path"`
+	Line      int    `json:"line"`
+	// Kind is direct, indirect (go), or the npm section (devDependencies, ...).
+	Kind string `json:"kind"`
+}
+
+// DependencyInventory is the dependency scan's inventory.
+type DependencyInventory struct {
+	// Total is exact; Entries is bounded (Truncated).
+	Total     int               `json:"total"`
+	Entries   []DependencyEntry `json:"entries"`
+	Truncated bool              `json:"truncated,omitempty"`
+	// ByEcosystem counts entries per ecosystem.
+	ByEcosystem map[string]int `json:"byEcosystem"`
+	// Manifests are the manifests that declared at least one dependency.
+	Manifests []string `json:"manifests"`
+	// Unparsed are recognised manifests this scan does not parse.
+	Unparsed []string `json:"unparsed"`
+}
+
+// maxInventoryEntries bounds the enumerated inventory; Total stays exact.
+const maxInventoryEntries = 5000
+
+// shapeRedactor is the storage-layer net for anything a tool printed about a
+// dependency: the awk program already strips URL userinfo, and this catches a
+// token shape it did not anticipate.
+var shapeRedactor = skillreport.NewRedactor(nil)
+
+// finishToolReport adds what a tool knows from the HOST (what staging saw) and
+// the dependency inventory, then re-sorts and re-reconciles.
+func finishToolReport(report *StaticScanReport, tool scanTool, obs *stageObservation, stdout string) {
+	var manifests []manifestRef
+	if tool.tool == ToolDependencyScan {
+		inv := &DependencyInventory{Entries: []DependencyEntry{}, ByEcosystem: map[string]int{}, Manifests: []string{}}
+		section := ""
+		for _, line := range strings.Split(stdout, "\n") {
+			line = strings.TrimRight(line, "\r")
+			if rest, ok := strings.CutPrefix(line, "AO_SECTION="); ok {
+				section = rest
+				continue
+			}
+			if section != "inventory" {
+				continue
+			}
+			f := strings.Split(line, "\x1f")
+			switch {
+			case len(f) == 6 && f[0] == "INV":
+				p, n := splitLoc(f[4])
+				inv.Total++
+				inv.ByEcosystem[f[1]]++
+				if len(inv.Entries) >= maxInventoryEntries {
+					inv.Truncated = true
+					continue
+				}
+				name, _ := shapeRedactor.String(f[2])
+				ver, _ := shapeRedactor.String(f[3])
+				inv.Entries = append(inv.Entries, DependencyEntry{
+					Ecosystem: f[1], Name: name, Version: ver, Path: p, Line: n, Kind: f[5],
+				})
+			case len(f) == 3 && f[0] == "MAN":
+				p, n := splitLoc(f[2])
+				manifests = append(manifests, manifestRef{ecosystem: f[1], path: p, line: n})
+				inv.Manifests = append(inv.Manifests, p)
+			}
+		}
+		inv.Unparsed = obs.unparsedPresent(tool)
+		if inv.Unparsed == nil {
+			inv.Unparsed = []string{}
+		}
+		sort.Strings(inv.Manifests)
+		report.Inventory = inv
+		if len(inv.Unparsed) > 0 {
+			report.Coverage.Limitations = append(report.Coverage.Limitations,
+				fmt.Sprintf("%d recognised manifest(s) present but not parsed by this scan: %s",
+					len(inv.Unparsed), strings.Join(firstNStrings(inv.Unparsed, 20), ", ")))
+		}
+	}
+	report.Findings = append(report.Findings, obs.hostFindings(tool, manifests)...)
+	if tool.reportDenied {
+		report.Coverage.RulesRun = append(report.Coverage.RulesRun, deniedFileRule.ID)
+	}
+	sort.SliceStable(report.Findings, func(i, j int) bool {
+		a, b := report.Findings[i], report.Findings[j]
+		if a.Path != b.Path {
+			return a.Path < b.Path
+		}
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		return a.RuleID < b.RuleID
+	})
+}
+
+func splitLoc(loc string) (string, int) {
+	p, n, ok := strings.Cut(containerRelPath(loc), ":")
+	if !ok {
+		return containerRelPath(loc), 0
+	}
+	line, _ := strconv.Atoi(strings.TrimSpace(n))
+	return p, line
+}
+
+func firstNStrings(s []string, n int) []string {
+	if len(s) <= n {
+		return s
+	}
+	return append(append([]string(nil), s[:n]...), fmt.Sprintf("and %d more", len(s)-n))
+}

@@ -11,15 +11,20 @@ roadmap after P11 is organized by **Frentes**: this is Frente 2.
 - **2B — durable runs: merged into ECC.** A run is a durable record with
   history, cancellation, restart reconciliation and verified reports — see
   `docs/skills/skill-runs.md`.
-- **2C — agent modes: implemented on `feat/skills-2c-agent-mode`, pending
-  merge.** A mode declares `executor: tool | agent`; an agent mode of a builtin
+- **2C — agent modes: merged into ECC (`b9ec8ca92`).** A mode declares `executor: tool | agent`; an agent mode of a builtin
   or signature-trusted package runs Claude Code on the host over a read-only
   staged copy, and its report is validated against the canonical findings
   schema and redacted before it is stored. One agent mode: `authz-review`. See
   ADR 0010 and `docs/skills/skill-runs.md` §7.
-- **2D-2G — pending:** agent inside the runner (the target architecture), more
-  deterministic scanners, full SAST, DAST/pentest behind its own control,
-  hardening.
+- **2D — deterministic scanners: implemented on
+  `feat/skills-2d-deterministic-scanners`, pending merge.** `secret-scan` and
+  `dependencies` run as closed tools (`ao.secret-scan/v1`,
+  `ao.dependency-scan/v1`) on the same container engine as `static-code`; the
+  manifest's deny list now applies to every tool mode. `dependencies` is
+  offline (no `net.egress`) and claims no vulnerability. See
+  `docs/skills/skill-runs.md` §8.
+- **2E-2G — pending:** agent inside the runner (the target architecture), full
+  SAST / Security Audit, DAST/pentest behind its own control, hardening.
 
 Three controls are built but not wired into the daemon (scoped secret
 delivery, writable workspace, egress allowlist — the last only with

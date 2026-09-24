@@ -86,7 +86,7 @@ func (e *Executor) Run(ctx context.Context, req Request) (Result, error) {
 	if !skillrunner.ValidRunID(req.RunID) {
 		return Result{}, fmt.Errorf("%w: run id %q is not valid", skillrunner.ErrStagingUnusable, req.RunID)
 	}
-	deny := compileGlobs(req.DenyGlobs)
+	deny := skillrunner.CompileDenyGlobs(req.DenyGlobs)
 	staging, err := skillrunner.Stage(skillrunner.StageRequest{
 		SourceDir:      req.ProjectPath,
 		ScopePaths:     req.ScopePaths,
@@ -102,8 +102,8 @@ func (e *Executor) Run(ctx context.Context, req Request) (Result, error) {
 					return "agent-config"
 				}
 			}
-			if deny.match(rel) {
-				return "denied-by-manifest"
+			if deny.Match(rel) {
+				return skillrunner.SkipReasonDenied
 			}
 			return ""
 		},

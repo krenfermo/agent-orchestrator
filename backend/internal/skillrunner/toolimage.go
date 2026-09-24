@@ -96,6 +96,21 @@ var approvedTools = map[Tool]ToolContract{
 		Argv:        staticScanArgv,
 		Description: "Read-only pattern scan over a staged checkout. No network, no writes.",
 	},
+	// Frente 2 / 2D. Same engine, same image, same boundary; a different closed
+	// rule set (scantools.go). Each still needs its own administrative image
+	// approval, per exact scope, before it can run.
+	ToolSecretScan: {
+		Tool:        ToolSecretScan,
+		BaseImage:   "alpine:3.19",
+		Argv:        func(p ToolParams) []string { return scanArgv(scanTools[ToolSecretScan], p) },
+		Description: "Read-only credential-shape scan over a staged checkout. Reports rule and location, never the value. No network, no writes.",
+	},
+	ToolDependencyScan: {
+		Tool:        ToolDependencyScan,
+		BaseImage:   "alpine:3.19",
+		Argv:        func(p ToolParams) []string { return scanArgv(scanTools[ToolDependencyScan], p) },
+		Description: "Read-only dependency inventory over staged manifests and lockfiles. No advisory lookup, no network, no writes.",
+	},
 }
 
 // ApprovedTools lists the vocabulary in a stable order.

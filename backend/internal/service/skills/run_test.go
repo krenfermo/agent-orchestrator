@@ -52,7 +52,11 @@ func (e *recordingExecutor) RunStaticScan(
 	if authority == nil {
 		return skillrunner.StaticScanReport{}, skillrunner.ErrImageNotApproved
 	}
-	approval, err := authority.ApprovedImage(ctx, req.Scope, string(skillrunner.ToolStaticScan))
+	tool := req.Tool
+	if tool == "" {
+		tool = skillrunner.ToolStaticScan
+	}
+	approval, err := authority.ApprovedImage(ctx, req.Scope, string(tool))
 	if err != nil {
 		return skillrunner.StaticScanReport{}, err
 	}

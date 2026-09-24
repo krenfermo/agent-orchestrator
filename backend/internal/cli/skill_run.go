@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -88,6 +89,13 @@ type skillRunDTO struct {
 			Recommendation string `json:"recommendation"`
 			Confidence     string `json:"confidence"`
 		} `json:"findings"`
+		// Inventory is present only for the dependency scan (2D).
+		Inventory *struct {
+			Total       int            `json:"total"`
+			Truncated   bool           `json:"truncated"`
+			ByEcosystem map[string]int `json:"byEcosystem"`
+			Unparsed    []string       `json:"unparsed"`
+		} `json:"inventory"`
 	} `json:"report"`
 }
 
@@ -438,10 +446,31 @@ func renderSkillRun(cmd *cobra.Command, res skillRunDTO) error {
 		return err
 	}
 	for _, f := range res.Report.Findings {
-		if err := p("  [%s] %s\n    %s:%d  %s (%s, confidence %s)\n    %s\n",
-			strings.ToUpper(f.Severity), f.Title, f.Path, f.Line,
+		// A finding about a FILE (a denied credential file, a manifest) has no
+		// line, and ":0" would read as a line that does not exist.
+		loc := f.Path
+		if f.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", f.Path, f.Line)
+		}
+		if err := p("  [%s] %s\n    %s  %s (%s, confidence %s)\n    %s\n",
+			strings.ToUpper(f.Severity), f.Title, loc,
 			f.RuleID, f.Category, f.Confidence, f.Recommendation); err != nil {
 			return err
+		}
+	}
+	if inv := res.Report.Inventory; inv != nil {
+		eco := make([]string, 0, len(inv.ByEcosystem))
+		for name, n := range inv.ByEcosystem {
+			eco = append(eco, fmt.Sprintf("%s %d", name, n))
+		}
+		sort.Strings(eco)
+		if err := p("\ninventory %d declared dependencies (%s)\n", inv.Total, strings.Join(eco, ", ")); err != nil {
+			return err
+		}
+		if len(inv.Unparsed) > 0 {
+			if err := p("  unparsed manifests: %s\n", strings.Join(inv.Unparsed, ", ")); err != nil {
+				return err
+			}
 		}
 	}
 	if len(res.Report.Findings) == 0 && c.FilesScanned == 0 {
