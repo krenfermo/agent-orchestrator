@@ -217,16 +217,25 @@ func (r *Runner) measureNetworkBoundary(ctx context.Context, b EgressBoundary) E
 	// non-zero on an unreachable address, which is the outcome under test.
 	script := "for a in " + strings.Join(unroutableProbes, " ") + "; do " +
 		"if nc -w 2 -z $a 80 2>/dev/null; then echo \"REACHED $a\"; else echo \"blocked $a\"; fi; done"
-	out, runErr := r.runner.Output(probeCtx, r.runtime.Binary, "run", "--rm",
-		"--label", RunLabel+"=1", "--network", network,
+	name := "ao-skillprobe-" + randomToken()
+	args := append([]string{"run", "--rm", "--name", name}, r.ownerArgs(kindProbe, "")...)
+	args = append(args, "--network", network,
 		"--user", nobodyUser, "--read-only", "--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges", "--network-alias", "ao-egress-check",
 		contract.PinnedRef(), "sh", "-c", script)
+	r.track(name, "")
+	out, runErr := r.runner.Output(probeCtx, r.runtime.Binary, args...)
 	b.Observed = strings.TrimSpace(string(out))
 	if runErr != nil {
+		// A killed CLI leaves its container running; remove it and confirm,
+		// or leave it recorded for SweepOwned.
+		if r.removeContainer(context.WithoutCancel(ctx), name, "") != CleanupConfirmed {
+			runErr = fmt.Errorf("%w (its container %s is recorded for cleanup)", runErr, name)
+		}
 		b.Err = fmt.Errorf("the egress probe container did not run: %w", runErr)
 		return b
 	}
+	r.untrack(name)
 	if b.Observed == "" {
 		b.Err = errors.New("the egress probe container reported nothing, so nothing was measured")
 		return b

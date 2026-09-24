@@ -21,7 +21,11 @@ import (
 
 // ReapReport says what ReapRun found and removed.
 type ReapReport struct {
+	// ContainersRemoved are containers the runtime CONFIRMED gone.
 	ContainersRemoved []string
+	// ContainersPending are containers of the run whose removal the runtime
+	// did not confirm. They stay recorded, and SweepOwned retries them.
+	ContainersPending []string
 	StagingRemoved    string
 }
 
@@ -33,19 +37,31 @@ func (r *Runner) ReapRun(ctx context.Context, runID, projectPath, stagingOverrid
 	if !ValidRunID(runID) {
 		return rep, fmt.Errorf("skillrunner: run id %q is not a valid run id", runID)
 	}
+	var pendingErr error
 	if r.Available() {
-		out, err := r.runner.Output(ctx, r.runtime.Binary, "ps", "-aq",
+		// Bounded here, not by the caller: the boot reconcile passes a context
+		// with no deadline, and a wedged runtime must not hold up the boot.
+		listCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		out, err := r.runner.Output(listCtx, r.runtime.Binary, "ps", "-aq", "--no-trunc",
 			"--filter", "label="+RunIDLabel+"="+runID)
+		cancel()
 		if err != nil {
 			return rep, fmt.Errorf("skillrunner: list containers of run %s: %w", runID, err)
 		}
 		for _, id := range strings.Fields(string(out)) {
-			r.forceRemove(ctx, id)
-			rep.ContainersRemoved = append(rep.ContainersRemoved, id)
+			if r.removeContainer(ctx, id, runID) == CleanupConfirmed {
+				rep.ContainersRemoved = append(rep.ContainersRemoved, id)
+			} else {
+				rep.ContainersPending = append(rep.ContainersPending, id)
+			}
+		}
+		if len(rep.ContainersPending) > 0 {
+			pendingErr = fmt.Errorf("%w: run %s: %s", ErrCleanupPending, runID,
+				strings.Join(rep.ContainersPending, ", "))
 		}
 	}
 	if strings.TrimSpace(projectPath) == "" && strings.TrimSpace(stagingOverride) == "" {
-		return rep, nil
+		return rep, pendingErr
 	}
 	root, err := StagingRootFor(projectPath, stagingOverride)
 	if err != nil {
@@ -58,5 +74,5 @@ func (r *Runner) ReapRun(ctx context.Context, runID, projectPath, stagingOverrid
 		}
 		rep.StagingRemoved = dir
 	}
-	return rep, nil
+	return rep, pendingErr
 }

@@ -371,6 +371,12 @@ func executionError(err error) error {
 	switch {
 	case errors.Is(err, skillrunner.ErrImageNotApproved), errors.Is(err, skillimage.ErrNotApproved):
 		return apierr.Forbidden("SKILL_IMAGE_NOT_APPROVED", err.Error())
+	case errors.Is(err, skillrunner.ErrRuntimeTimeout), errors.Is(err, skillrunner.ErrCommandAbandoned):
+		// The runtime was stuck, not absent: a failure worth retrying once it
+		// answers, never a refusal that names the wrong cause.
+		return apierr.Conflict(RunErrRuntimeTimeout, err.Error(), nil)
+	case errors.Is(err, skillrunner.ErrWallClockExceeded):
+		return apierr.Conflict(RunErrTimedOut, err.Error(), nil)
 	case errors.Is(err, skillrunner.ErrRuntimeUnavailable):
 		return apierr.Conflict("SKILL_RUNTIME_UNAVAILABLE", err.Error(), nil)
 	case errors.Is(err, skillrunner.ErrStagingUnusable):

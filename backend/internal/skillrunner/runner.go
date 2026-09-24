@@ -163,6 +163,11 @@ type Result struct {
 	Truncated bool
 	// TimedOut reports that the wall clock ran out and the run was killed.
 	TimedOut bool
+	// Abandoned reports that the container CLI did not exit after it was
+	// killed; AO stopped waiting for it and has no output from it.
+	Abandoned bool
+	// Cleanup is whether the runtime confirmed the container removed.
+	Cleanup  CleanupStatus
 	Started  time.Time
 	Ended    time.Time
 	Evidence BoundaryEvidence
@@ -194,6 +199,11 @@ type Runner struct {
 	// a runner that attested this because somebody asked it to would defeat
 	// every check the capability table makes.
 	secretsAvailable bool
+	// owner is the AO installation id stamped on every container as
+	// OwnerLabel (WithOwner). Empty means AO claims no container by label.
+	owner string
+	// cleanup tracks containers in flight and removals not yet confirmed.
+	cleanup cleanupState
 }
 
 // WithWritableWorkspace records that AO can give a run a writable workspace on
@@ -314,24 +324,35 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	defer cancel()
 
 	started := time.Now().UTC()
-	cmd := exec.CommandContext(runCtx, r.runtime.Binary, args...) //nolint:gosec // binary is the probed runtime.
+	cmd := exec.Command(r.runtime.Binary, args...) //nolint:gosec,noctx // binary is the probed runtime; runBounded enforces runCtx.
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	// The daemon's own environment is never forwarded. This is the difference
 	// between "we did not pass a secret" and "we passed nothing at all".
 	cmd.Env = []string{}
-	runErr := cmd.Run()
+	r.track(name, req.RunID)
+	runErr := runBounded(runCtx, cmd)
 
 	// Whatever happened, remove the container and everything in its namespace.
 	// A timeout kills `docker run`, which does NOT by itself stop the
-	// container, so the explicit rm is what makes "no orphaned child" true.
-	r.forceRemove(context.WithoutCancel(ctx), name)
+	// container, so the explicit rm is what makes "no orphaned child" true --
+	// and it is confirmed, or recorded as pending, never assumed.
+	cleanup := r.removeContainer(context.WithoutCancel(ctx), name, req.RunID)
 
 	res := Result{
 		Started:  started,
 		Ended:    time.Now().UTC(),
 		TimedOut: errors.Is(runCtx.Err(), context.DeadlineExceeded),
+		Cleanup:  cleanup,
+	}
+	if errors.Is(runErr, ErrCommandAbandoned) {
+		// The CLI would not die, so its buffers are not safe to read and there
+		// is no output to report. The run produced nothing AO can trust.
+		res.Abandoned = true
+		res.ExitCode = -1
+		res.Evidence = r.evidenceFrom(res, req, limits)
+		return res, nil
 	}
 	res.Stdout, res.Truncated = truncate(stdout.String(), limits.MaxOutputBytes)
 	trimmedErr, errTruncated := truncate(stderr.String(), limits.MaxOutputBytes)
@@ -410,13 +431,7 @@ func looksLikeCredential(name string) bool {
 // boundary settings; dropping any of them invalidates a control this runner
 // attests.
 func (r *Runner) containerArgs(name string, req Request, limits Limits) []string {
-	args := []string{
-		"run", "--rm", "--name", name,
-		"--label", RunLabel + "=1",
-	}
-	if req.RunID != "" {
-		args = append(args, "--label", RunIDLabel+"="+req.RunID)
-	}
+	args := append([]string{"run", "--rm", "--name", name}, r.ownerArgs(kindRun, req.RunID)...)
 	args = append(args,
 		// AO never fetches an image. The approved digest must already be on
 		// this host; an absent one is a refusal, not a download. Without this
@@ -457,15 +472,6 @@ func (r *Runner) containerArgs(name string, req Request, limits Limits) []string
 	}
 	args = append(args, req.Image)
 	return append(args, req.Argv...)
-}
-
-// forceRemove tears the container down. Errors are ignored on purpose: the
-// container may already be gone (--rm), and a teardown failure must not mask
-// the run's own outcome. What matters is that it is always attempted.
-func (r *Runner) forceRemove(ctx context.Context, name string) {
-	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-	_, _ = r.runner.Output(ctx, r.runtime.Binary, "rm", "-f", name)
 }
 
 func (r *Runner) evidenceFrom(res Result, req Request, limits Limits) BoundaryEvidence {

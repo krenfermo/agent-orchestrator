@@ -328,15 +328,17 @@ func (r *Runner) RunStaticScan(
 	if err := ValidateStagingRoot(root, req.DataDir); err != nil {
 		return StaticScanReport{}, err
 	}
-	if err := r.VerifyStagingVisible(ctx, root, image); err != nil {
-		return StaticScanReport{}, err
-	}
 	runID := "run-" + randomToken()
 	if req.RunID != "" {
 		if !ValidRunID(req.RunID) {
 			return StaticScanReport{}, fmt.Errorf("%w: run id %q is not a valid run id", ErrStagingUnusable, req.RunID)
 		}
 		runID = req.RunID
+	}
+	// The probe carries the durable run's id, so a probe container the runtime
+	// could not remove is reaped with the run it belongs to.
+	if err := r.verifyStagingVisible(ctx, root, image, req.RunID); err != nil {
+		return StaticScanReport{}, err
 	}
 	obs := &stageObservation{seen: map[string]bool{}}
 	staging, err := Stage(StageRequest{
@@ -376,12 +378,16 @@ func (r *Runner) RunStaticScan(
 	// the probe and the launch, a stale VM cache, a partial copy. A scan over a
 	// tree that is not the project is not a scan of the project, and reporting
 	// it as one is the single most misleading thing this runner could do.
+	//
+	// A run that timed out, or whose CLI AO had to abandon, is judged on that
+	// first: it produced no complete output, so an input-digest mismatch read
+	// from it would be a misdiagnosis (and a refusal) of what is a timeout.
+	if res.TimedOut || res.Abandoned {
+		return StaticScanReport{}, fmt.Errorf("%w: the scan exceeded its %s wall clock; "+
+			"a partial scan is not a report%s", ErrWallClockExceeded, limits.Wall, cleanupNote(res))
+	}
 	if err := verifyStagedInputsDelivered(staging, res.Evidence); err != nil {
 		return StaticScanReport{}, err
-	}
-	if res.TimedOut {
-		return StaticScanReport{}, fmt.Errorf("skillrunner: the scan exceeded its %s wall clock; "+
-			"a partial scan is not a report", limits.Wall)
 	}
 	if res.ExitCode != 0 {
 		return StaticScanReport{}, fmt.Errorf("skillrunner: the scan exited %d: %s",
