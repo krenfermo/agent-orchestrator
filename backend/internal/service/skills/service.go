@@ -58,6 +58,9 @@ type Store interface {
 	// It is on the catalog store, not the durable-run store, so preparation can
 	// consult it whether or not durable runs are wired.
 	GetSkillPentestAuthorization(ctx context.Context, id string) (skillpentest.Authorization, bool, error)
+	InsertSkillPentestAuthorization(ctx context.Context, a skillpentest.Authorization) (skillpentest.Authorization, error)
+	ListSkillPentestAuthorizationsForProject(ctx context.Context, projectID domain.ProjectID) ([]skillpentest.Authorization, error)
+	RevokeSkillPentestAuthorization(ctx context.Context, id string, at time.Time) (bool, error)
 }
 
 // OriginSource is the OPTIONAL provenance read: where an installed version came

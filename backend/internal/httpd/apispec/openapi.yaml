@@ -3424,6 +3424,182 @@ paths:
         no process, opens no socket and changes nothing. Requires project.read.'
       tags:
       - skills
+  /api/v1/projects/{id}/skills/{skillId}/pentest-authorizations:
+    get:
+      operationId: listPentestAuthorizations
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PentestAuthorizationListResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: the project''s active-pentest authorizations for one skill,
+        active and not - the history of what it once allowed to be tested. Carries
+        no secret. Requires project.read.'
+      tags:
+      - skills
+    post:
+      operationId: createPentestAuthorization
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PentestAuthorizationRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PentestAuthorizationView'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: create the explicit, per-target authorization an active-pentest
+        run must reference. It binds to one destination (scheme+host+port, no wildcard/IP),
+        carries the written-authorization reference, and expires. Confirm must be
+        true. Requires settings.manage - a pentest is the one skill capability that
+        emits offensive traffic.'
+      tags:
+      - skills
+  /api/v1/projects/{id}/skills/{skillId}/pentest-authorizations/{authId}/revoke:
+    post:
+      operationId: revokePentestAuthorization
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      - description: Pentest authorization identifier (skpen-...).
+        in: path
+        name: authId
+        required: true
+        schema:
+          description: Pentest authorization identifier (skpen-...).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PentestAuthorizationView'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: revoke a pentest authorization. Revocation is immediate for
+        any new run; a run already in flight keeps its own bounded window. Requires
+        settings.manage.'
+      tags:
+      - skills
   /api/v1/projects/{id}/skills/{skillId}/run:
     post:
       operationId: runProjectSkill
@@ -16313,6 +16489,8 @@ components:
           type: object
         modeId:
           type: string
+        pentestAuthorizationId:
+          type: string
       type: object
     ControllersSkillRunStartView:
       properties:
@@ -19420,6 +19598,84 @@ components:
       - title
       - targetSha
       - status
+      type: object
+    PentestAuthorizationListResponse:
+      properties:
+        authorizations:
+          items:
+            $ref: '#/components/schemas/PentestAuthorizationView'
+          type: array
+      required:
+      - authorizations
+      type: object
+    PentestAuthorizationRequest:
+      properties:
+        authorizationRef:
+          type: string
+        confirm:
+          type: boolean
+        pentestType:
+          type: string
+        scopePaths:
+          items:
+            type: string
+          type: array
+        target:
+          type: string
+        ttlSeconds:
+          type: integer
+      required:
+      - target
+      - pentestType
+      - authorizationRef
+      - ttlSeconds
+      - confirm
+      type: object
+    PentestAuthorizationView:
+      properties:
+        active:
+          type: boolean
+        authorizationRef:
+          type: string
+        confirmed:
+          type: boolean
+        createdAt:
+          type: string
+        expiresAt:
+          type: string
+        id:
+          type: string
+        inactiveReason:
+          type: string
+        pentestType:
+          type: string
+        projectId:
+          type: string
+        requestedBy:
+          type: string
+        revokedAt:
+          type: string
+        scopePaths:
+          items:
+            type: string
+          type: array
+        skillId:
+          type: string
+        target:
+          type: string
+      required:
+      - id
+      - projectId
+      - skillId
+      - target
+      - scopePaths
+      - pentestType
+      - requestedBy
+      - authorizationRef
+      - confirmed
+      - createdAt
+      - expiresAt
+      - active
       type: object
     PlacementOverrideRequestBody:
       properties:

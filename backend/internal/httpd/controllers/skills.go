@@ -61,6 +61,13 @@ type SkillCatalog interface {
 	GetSkillRun(ctx context.Context, projectID domain.ProjectID, runID string) (SkillRunDetailView, error)
 	// CancelSkillRun asks a queued or running run of this project to stop.
 	CancelSkillRun(ctx context.Context, projectID domain.ProjectID, runID string) (SkillRunSummaryView, error)
+
+	// Active-pentest authorizations (2F). Creating one is the explicit,
+	// per-target authorization an active-pentest run must reference; it is a
+	// separate, deliberate act from starting the run.
+	CreatePentestAuthorization(ctx context.Context, in PentestAuthorizationInput) (PentestAuthorizationView, error)
+	ListPentestAuthorizations(ctx context.Context, projectID domain.ProjectID, skillID string) ([]PentestAuthorizationView, error)
+	RevokePentestAuthorization(ctx context.Context, projectID domain.ProjectID, skillID, authID, actor string) (PentestAuthorizationView, error)
 }
 
 // EnableSkillInput carries an activation from the controller to the service,
@@ -201,6 +208,13 @@ type ProjectSkillRunParams struct {
 	RunID string `path:"runId" description:"Skill run identifier (skr-...)."`
 }
 
+// ProjectSkillPentestAuthParams addresses one pentest authorization.
+type ProjectSkillPentestAuthParams struct {
+	ID      string `path:"id" description:"Project identifier (registry key)."`
+	SkillID string `path:"skillId" description:"Skill identifier (kebab-case)."`
+	AuthID  string `path:"authId" description:"Pentest authorization identifier (skpen-...)."`
+}
+
 // SkillAuditView is one row of the catalog's audit trail.
 type SkillAuditView struct {
 	ID         string    `json:"id"`
@@ -286,9 +300,12 @@ type SkillRunInput struct {
 	ModeID    string
 	Inputs    map[string]string
 	// IdempotencyKey, when set, makes a retry return the run it created.
-	IdempotencyKey   string
-	Actor            string
-	ActorPermissions []domain.Permission
+	IdempotencyKey string
+	// PentestAuthorizationID references the persisted authorization an
+	// active-pentest run must run under. Ignored by every other mode.
+	PentestAuthorizationID string
+	Actor                  string
+	ActorPermissions       []domain.Permission
 }
 
 // SkillRunSummaryView is one durable run, as a history row or a start reply.
@@ -386,6 +403,9 @@ type SkillRunRequest struct {
 	// IdempotencyKey makes a retry of the same request return the run it
 	// created instead of starting a second one. 1-128 of [A-Za-z0-9-_.:].
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+	// PentestAuthorizationID is required by the active-pentest mode and ignored
+	// by every other: the run's authorized target is derived from this record.
+	PentestAuthorizationID string `json:"pentestAuthorizationId,omitempty"`
 }
 
 // SkillRunListResponse is a project's run history, newest first.
@@ -521,6 +541,12 @@ func (c *SkillsController) Register(r chi.Router) {
 	r.Get("/projects/{id}/skills/runs", c.listSkillRuns)
 	r.Get("/projects/{id}/skills/runs/{runId}", c.getSkillRun)
 	r.Post("/projects/{id}/skills/runs/{runId}/cancel", c.cancelSkillRun)
+	// Active-pentest authorizations (2F): the per-target authorization a
+	// pentest run must reference. Creating/revoking is settings.manage; a
+	// pentest is the one skill capability that emits offensive traffic.
+	r.Post("/projects/{id}/skills/{skillId}/pentest-authorizations", c.createPentestAuthorization)
+	r.Get("/projects/{id}/skills/{skillId}/pentest-authorizations", c.listPentestAuthorizations)
+	r.Post("/projects/{id}/skills/{skillId}/pentest-authorizations/{authId}/revoke", c.revokePentestAuthorization)
 }
 
 func (c *SkillsController) list(w http.ResponseWriter, r *http.Request) {
@@ -742,13 +768,14 @@ func (c *SkillsController) runSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view, err := c.Catalog.StartSkillRun(r.Context(), SkillRunInput{
-		ProjectID:        id,
-		SkillID:          chi.URLParam(r, "skillId"),
-		ModeID:           in.ModeID,
-		Inputs:           in.Inputs,
-		IdempotencyKey:   in.IdempotencyKey,
-		Actor:            c.actor(r),
-		ActorPermissions: c.callerProjectPermissions(r, id),
+		ProjectID:              id,
+		SkillID:                chi.URLParam(r, "skillId"),
+		ModeID:                 in.ModeID,
+		Inputs:                 in.Inputs,
+		IdempotencyKey:         in.IdempotencyKey,
+		PentestAuthorizationID: in.PentestAuthorizationID,
+		Actor:                  c.actor(r),
+		ActorPermissions:       c.callerProjectPermissions(r, id),
 	})
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -889,4 +916,124 @@ func SkillCapabilityCatalog() []SkillCapabilityView {
 		})
 	}
 	return out
+}
+
+// PentestAuthorizationInput carries a create request to the service.
+type PentestAuthorizationInput struct {
+	ProjectID        domain.ProjectID
+	SkillID          string
+	Target           string
+	ScopePaths       []string
+	PentestType      string
+	AuthorizationRef string
+	TTLSeconds       int
+	Confirm          bool
+	Actor            string
+	ActorPermissions []domain.Permission
+}
+
+// PentestAuthorizationRequest is the JSON body for creating an authorization.
+type PentestAuthorizationRequest struct {
+	// Target is the full destination URL (scheme://host[:port]) that may be
+	// tested. No wildcard, no path, no IP literal.
+	Target string `json:"target"`
+	// ScopePaths optionally narrows the test to parts of the app.
+	ScopePaths []string `json:"scopePaths,omitempty"`
+	// PentestType names the class of test. Only "web-dast" exists in 2F.
+	PentestType string `json:"pentestType"`
+	// AuthorizationRef points at the out-of-band written authorization.
+	AuthorizationRef string `json:"authorizationRef"`
+	// TTLSeconds is how long the authorization stays usable.
+	TTLSeconds int `json:"ttlSeconds"`
+	// Confirm must be true: an unconfirmed authorization never authorizes a run.
+	Confirm bool `json:"confirm"`
+}
+
+// PentestAuthorizationView is one authorization as the API reports it. It never
+// carries anything secret: a target, a scope, a window, and who authorized it.
+type PentestAuthorizationView struct {
+	ID               string   `json:"id"`
+	ProjectID        string   `json:"projectId"`
+	SkillID          string   `json:"skillId"`
+	Target           string   `json:"target"`
+	ScopePaths       []string `json:"scopePaths"`
+	PentestType      string   `json:"pentestType"`
+	RequestedBy      string   `json:"requestedBy"`
+	AuthorizationRef string   `json:"authorizationRef"`
+	Confirmed        bool     `json:"confirmed"`
+	CreatedAt        string   `json:"createdAt"`
+	ExpiresAt        string   `json:"expiresAt"`
+	RevokedAt        string   `json:"revokedAt,omitempty"`
+	// Active is whether the authorization may back a run right now, and
+	// InactiveReason says why not when it cannot.
+	Active         bool   `json:"active"`
+	InactiveReason string `json:"inactiveReason,omitempty"`
+}
+
+// PentestAuthorizationListResponse is the list route's body.
+type PentestAuthorizationListResponse struct {
+	Authorizations []PentestAuthorizationView `json:"authorizations"`
+}
+
+func (c *SkillsController) createPentestAuthorization(w http.ResponseWriter, r *http.Request) {
+	if c.Catalog == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations")
+		return
+	}
+	id := projectID(r)
+	// Authorizing offensive traffic is settings-level, stricter than starting
+	// an ordinary run: it is the RequiredPermission of net.active_scan.
+	if !c.Guard.AllowProject(w, r, domain.PermSettingsManage, id, "PROJECT_NOT_FOUND", "project not found") {
+		return
+	}
+	var in PentestAuthorizationRequest
+	if err := decodeJSONStrict(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	view, err := c.Catalog.CreatePentestAuthorization(r.Context(), PentestAuthorizationInput{
+		ProjectID: id, SkillID: chi.URLParam(r, "skillId"),
+		Target: in.Target, ScopePaths: in.ScopePaths, PentestType: in.PentestType,
+		AuthorizationRef: in.AuthorizationRef, TTLSeconds: in.TTLSeconds, Confirm: in.Confirm,
+		Actor: c.actor(r), ActorPermissions: c.callerProjectPermissions(r, id),
+	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusCreated, view)
+}
+
+func (c *SkillsController) listPentestAuthorizations(w http.ResponseWriter, r *http.Request) {
+	if c.Catalog == nil {
+		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations")
+		return
+	}
+	id := projectID(r)
+	if !c.Guard.AllowProject(w, r, domain.PermProjectRead, id, "PROJECT_NOT_FOUND", "project not found") {
+		return
+	}
+	list, err := c.Catalog.ListPentestAuthorizations(r.Context(), id, chi.URLParam(r, "skillId"))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, PentestAuthorizationListResponse{Authorizations: list})
+}
+
+func (c *SkillsController) revokePentestAuthorization(w http.ResponseWriter, r *http.Request) {
+	if c.Catalog == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations/{authId}/revoke")
+		return
+	}
+	id := projectID(r)
+	if !c.Guard.AllowProject(w, r, domain.PermSettingsManage, id, "PROJECT_NOT_FOUND", "project not found") {
+		return
+	}
+	view, err := c.Catalog.RevokePentestAuthorization(r.Context(), id, chi.URLParam(r, "skillId"), chi.URLParam(r, "authId"), c.actor(r))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, view)
 }

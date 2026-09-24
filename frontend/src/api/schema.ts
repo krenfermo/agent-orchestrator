@@ -1186,6 +1186,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: the project's active-pentest authorizations for one skill, active and not - the history of what it once allowed to be tested. Carries no secret. Requires project.read. */
+        get: operations["listPentestAuthorizations"];
+        put?: never;
+        /** Skills: create the explicit, per-target authorization an active-pentest run must reference. It binds to one destination (scheme+host+port, no wildcard/IP), carries the written-authorization reference, and expires. Confirm must be true. Requires settings.manage - a pentest is the one skill capability that emits offensive traffic. */
+        post: operations["createPentestAuthorization"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations/{authId}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: revoke a pentest authorization. Revocation is immediate for any new run; a run already in flight keeps its own bounded window. Requires settings.manage. */
+        post: operations["revokePentestAuthorization"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/skills/{skillId}/run": {
         parameters: {
             query?: never;
@@ -5458,6 +5493,7 @@ export interface components {
                 [key: string]: string;
             };
             modeId?: string;
+            pentestAuthorizationId?: string;
         };
         ControllersSkillRunStartView: {
             created: boolean;
@@ -6645,6 +6681,33 @@ export interface components {
             status: "needs_review" | "running" | "up_to_date" | "changes_requested" | "ineligible";
             targetSha: string;
             title: string;
+        };
+        PentestAuthorizationListResponse: {
+            authorizations: components["schemas"]["PentestAuthorizationView"][];
+        };
+        PentestAuthorizationRequest: {
+            authorizationRef: string;
+            confirm: boolean;
+            pentestType: string;
+            scopePaths?: string[];
+            target: string;
+            ttlSeconds: number;
+        };
+        PentestAuthorizationView: {
+            active: boolean;
+            authorizationRef: string;
+            confirmed: boolean;
+            createdAt: string;
+            expiresAt: string;
+            id: string;
+            inactiveReason?: string;
+            pentestType: string;
+            projectId: string;
+            requestedBy: string;
+            revokedAt?: string;
+            scopePaths: string[];
+            skillId: string;
+            target: string;
         };
         PlacementOverrideRequestBody: {
             /** @enum {string} */
@@ -13331,6 +13394,195 @@ export interface operations {
             };
             /** @description Unauthorized */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listPentestAuthorizations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PentestAuthorizationListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createPentestAuthorization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PentestAuthorizationRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PentestAuthorizationView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokePentestAuthorization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+                /** @description Pentest authorization identifier (skpen-...). */
+                authId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PentestAuthorizationView"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
