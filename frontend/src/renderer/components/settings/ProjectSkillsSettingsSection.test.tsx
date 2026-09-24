@@ -408,6 +408,35 @@ describe("ProjectSkillsSettingsSection — running", () => {
 		expect(report).not.toHaveTextContent("staged, ");
 	});
 
+	// A finding about a whole FILE (a denied credential file seen, never read)
+	// has no line; it must not render as ":0".
+	it("renders a file-level finding without a line number", async () => {
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: succeededDetail({
+				imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
+				coverage: { filesStaged: 3, filesVisible: 3, filesScanned: 3 },
+				findings: [{
+					ruleId: "SEC-100", severity: "medium", category: "secret",
+					title: "Credential-bearing file present in the checkout (not read)", path: ".env", line: 0,
+					recommendation: "Confirm it is not committed.", confidence: "possible",
+				}],
+			}),
+		});
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return startedRun as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		const report = await screen.findByTestId("project-skill-run-report");
+		expect(report).toHaveTextContent(".env · SEC-100 · possible");
+		expect(report).not.toHaveTextContent(".env:0");
+	});
+
 	// The failure this panel exists to prevent.
 	it("says an empty scan is not a clean result", async () => {
 		mockSkills({
