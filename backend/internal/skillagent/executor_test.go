@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillcatalog"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
 )
 
 // These tests drive a REAL subprocess -- a shell script standing in for the
@@ -351,13 +352,13 @@ func TestReap_LeavesAnUnrelatedProcessAlone(t *testing.T) {
 }
 
 func TestGlobs_ConservativeDenyReading(t *testing.T) {
-	g := compileGlobs([]string{".env", ".env.*", "**/*.pem", "**/id_rsa*", "secrets/**"})
+	g := skillrunner.CompileDenyGlobs([]string{".env", ".env.*", "**/*.pem", "**/id_rsa*", "secrets/**"})
 	for path, want := range map[string]bool{
 		".env": true, "config/.env": true, ".env.local": true, "a/b/.env.prod": true,
 		"x/server.pem": true, "server.pem": true, "home/.ssh/id_rsa.pub": true,
 		"secrets/a/b.txt": true, "src/env.go": false, "README.md": false, "pem/notes.txt": false,
 	} {
-		if got := g.match(path); got != want {
+		if got := g.Match(path); got != want {
 			t.Errorf("match(%q) = %v, want %v", path, got, want)
 		}
 	}

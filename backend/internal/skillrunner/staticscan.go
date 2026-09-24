@@ -34,6 +34,18 @@ type scanRule struct {
 	Pattern string
 	// Recommendation is one concrete change.
 	Recommendation string
+	// Confidence is what a match establishes. Empty means "possible": a
+	// pattern match that needs a human to confirm it. A rule whose match IS
+	// the fact it reports (a dependency declared from a git URL) says
+	// "confirmed".
+	Confidence string
+}
+
+func (r scanRule) confidence() string {
+	if r.Confidence == "" {
+		return "possible"
+	}
+	return r.Confidence
 }
 
 // staticScanRules is the closed rule set. Each is a shape that is nearly always
@@ -132,6 +144,13 @@ var staticScanRules = []scanRule{
 	},
 }
 
+func boolFlag(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
 // scannedExtensions is what the tool claims to understand. A file outside this
 // set is reported as SKIPPED rather than silently ignored, because "we did not
 // look" and "we looked and found nothing" are different results and only one of
@@ -144,11 +163,15 @@ var scannedExtensions = []string{
 // skippedDirs are never worth scanning and would exhaust the file budget.
 var skippedDirs = []string{".git", "node_modules", "vendor", "dist", "build", ".venv", "__pycache__", "target"}
 
-// staticScanArgv builds the command. Only the two validated integers vary; the
-// rules, the extensions and the structure are fixed here.
-func staticScanArgv(p ToolParams) []string {
+// staticScanArgv builds the static-code command.
+func staticScanArgv(p ToolParams) []string { return scanArgv(scanTools[ToolStaticScan], p) }
+
+// scanArgv builds one closed tool's command. Only the two validated integers
+// vary; the rules, the file selection, any extra section and the structure are
+// fixed in Go, per tool (scantools.go).
+func scanArgv(tool scanTool, p ToolParams) []string {
 	var rules strings.Builder
-	for _, rule := range staticScanRules {
+	for _, rule := range tool.rules {
 		// Single-quoted, and no rule contains a single quote — asserted by a
 		// test, so a future rule that does fails the build rather than
 		// breaking out of the quoting.
@@ -160,7 +183,9 @@ func staticScanArgv(p ToolParams) []string {
 set -u
 MAX_FILES=` + fmt.Sprint(p.MaxFiles) + `
 MAX_BYTES=` + fmt.Sprint(p.MaxFileBytes) + `
-EXTS="` + strings.Join(scannedExtensions, " ") + `"
+EXTS="` + strings.Join(tool.extensions, " ") + `"
+NAMES="` + strings.Join(tool.names, " ") + `"
+SCAN_ALL=` + boolFlag(tool.scanAll) + `
 SKIP_DIRS="` + strings.Join(skippedDirs, " ") + `"
 
 # Boundary evidence first: a report from a run that cannot show it was
@@ -213,10 +238,17 @@ echo "ao_input_digest=$(sha256sum < /tmp/input_rows | cut -d' ' -f1)"
 scanned=0
 while IFS= read -r f; do
   ext="${f##*.}"
-  case " $EXTS " in
-    *" $ext "*) ;;
-    *) printf '%s\037%s\n' "$f" "unsupported_extension" >> /tmp/skipped; continue ;;
-  esac
+  base="${f##*/}"
+  if [ "$SCAN_ALL" != 1 ]; then
+    case " $NAMES " in
+      *" $base "*) ;;
+      *)
+        case " $EXTS " in
+          *" $ext "*) ;;
+          *) printf '%s\037%s\n' "$f" "unsupported_extension" >> /tmp/skipped; continue ;;
+        esac ;;
+    esac
+  fi
   # SINGLE SOURCE OF TRUTH for the size bound: STAGING, not this.
   #
   # Stage() applies the same MaxFileBytes on the host and records the file as
@@ -248,7 +280,9 @@ echo "AO_SECTION=rules"
 cat <<'AO_RULES_EOF'
 ` + rules.String() + `AO_RULES_EOF
 
+` + tool.extraSection + `
 echo "AO_SECTION=findings"
+cat /tmp/extra_findings 2>/dev/null || true
 if [ "$scanned" -gt 0 ]; then
   cat <<'AO_PATTERNS_EOF' > /tmp/patterns
 ` + rules.String() + `AO_PATTERNS_EOF

@@ -7,68 +7,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
 )
-
-// globSet matches repo-relative paths against a manifest's deny globs.
-//
-// The semantics are the conservative reading of a deny list: "**" crosses
-// directories, "*" and "?" do not, and a pattern with no slash matches the
-// file's name at ANY depth -- ".env" denies config/.env too. Reading a deny
-// list narrowly is how a credential file one directory down reaches an agent.
-type globSet []*regexp.Regexp
-
-func compileGlobs(globs []string) globSet {
-	var out globSet
-	for _, g := range globs {
-		g = strings.TrimSpace(g)
-		if g == "" {
-			continue
-		}
-		if !strings.Contains(g, "/") {
-			g = "**/" + g
-		}
-		out = append(out, regexp.MustCompile("^"+globToRegexp(g)+"$"))
-	}
-	return out
-}
-
-func globToRegexp(g string) string {
-	var b strings.Builder
-	for i := 0; i < len(g); i++ {
-		c := g[i]
-		switch {
-		case c == '*' && i+1 < len(g) && g[i+1] == '*':
-			i++
-			if i+1 < len(g) && g[i+1] == '/' {
-				i++
-				b.WriteString(`(?:.*/)?`)
-			} else {
-				b.WriteString(`.*`)
-			}
-		case c == '*':
-			b.WriteString(`[^/]*`)
-		case c == '?':
-			b.WriteString(`[^/]`)
-		default:
-			b.WriteString(regexp.QuoteMeta(string(c)))
-		}
-	}
-	return b.String()
-}
-
-func (s globSet) match(rel string) bool {
-	for _, re := range s {
-		if re.MatchString(rel) {
-			return true
-		}
-	}
-	return false
-}
 
 // makeReadOnly removes every write bit from the staged copy: files 0400,
 // directories 0500. The agent has no tool that writes, and this makes the
