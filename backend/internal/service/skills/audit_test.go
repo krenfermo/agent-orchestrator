@@ -550,3 +550,11 @@ func TestAudit_ALongChildErrorStillValidates(t *testing.T) {
 	}
 	decodeAudit(t, d)
 }
+
+func (e *perToolExecutor) PentestAttestation() skillcatalog.RunnerAttestation { return fullyAttested() }
+
+func (e *perToolExecutor) RunActivePentestScan(
+	context.Context, skillrunner.ImageAuthority, skillrunner.ActivePentestScanRequest,
+) (skillrunner.PentestResult, skillrunner.ApprovedImage, error) {
+	return skillrunner.PentestResult{}, skillrunner.ApprovedImage{}, skillcatalog.ErrNoRunner
+}

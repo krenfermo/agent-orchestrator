@@ -332,6 +332,10 @@ func (s *Service) execute(ctx context.Context, runID string, prep preparedRun) {
 		s.executeAudit(ctx, wctx, runID, prep)
 		return
 	}
+	if prep.pentest != nil {
+		s.executePentest(ctx, wctx, runID, prep)
+		return
+	}
 	report, err := s.executeScan(ctx, prep, runID)
 	if err != nil {
 		image := store.SkillRunImage{}

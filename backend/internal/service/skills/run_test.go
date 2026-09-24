@@ -30,9 +30,47 @@ type recordingExecutor struct {
 	// onRun runs inside the executor, which is where a test can revoke an
 	// approval "while the run is happening".
 	onRun func()
+	// pentest fields, for the active-pentest path.
+	pentestAttestation skillcatalog.RunnerAttestation
+	pentestReport      []byte
+	pentestErr         error
+	pentestRequests    []skillrunner.ActivePentestScanRequest
 }
 
 func (e *recordingExecutor) Attestation() skillcatalog.RunnerAttestation { return e.attestation }
+
+func (e *recordingExecutor) PentestAttestation() skillcatalog.RunnerAttestation {
+	if e.pentestAttestation.RunnerID != "" {
+		return e.pentestAttestation
+	}
+	return e.attestation
+}
+
+func (e *recordingExecutor) RunActivePentestScan(
+	ctx context.Context, authority skillrunner.ImageAuthority, req skillrunner.ActivePentestScanRequest,
+) (skillrunner.PentestResult, skillrunner.ApprovedImage, error) {
+	e.mu.Lock()
+	e.pentestRequests = append(e.pentestRequests, req)
+	e.mu.Unlock()
+	if authority == nil {
+		return skillrunner.PentestResult{}, skillrunner.ApprovedImage{}, skillrunner.ErrImageNotApproved
+	}
+	approval, err := authority.ApprovedImage(ctx, req.Scope, string(skillrunner.ToolActivePentest))
+	if err != nil {
+		return skillrunner.PentestResult{}, skillrunner.ApprovedImage{}, err
+	}
+	if e.pentestErr != nil {
+		return skillrunner.PentestResult{}, skillrunner.ApprovedImage{}, e.pentestErr
+	}
+	return skillrunner.PentestResult{ReportJSON: e.pentestReport, Cleanup: skillrunner.CleanupConfirmed},
+		skillrunner.ApprovedImage{Approval: approval, Digest: approval.Digest}, nil
+}
+
+func (e *recordingExecutor) pentestSeen() []skillrunner.ActivePentestScanRequest {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]skillrunner.ActivePentestScanRequest(nil), e.pentestRequests...)
+}
 
 func (e *recordingExecutor) Execute(context.Context, skillcatalog.Plan) (skillcatalog.Result, error) {
 	return skillcatalog.Result{}, skillcatalog.ErrNoRunner
