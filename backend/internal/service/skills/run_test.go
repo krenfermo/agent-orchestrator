@@ -414,6 +414,9 @@ func TestRunSkill_DistinguishesTheKindsOfFailure(t *testing.T) {
 		"tool not approved":  {skillrunner.ErrToolNotApproved, "SKILL_TOOL_NOT_APPROVED"},
 		"image not approved": {skillrunner.ErrImageNotApproved, "SKILL_IMAGE_NOT_APPROVED"},
 		"something else":     {errors.New("the scan exited 3"), "SKILL_RUN_FAILED"},
+		"runtime stuck":      {skillrunner.ErrRuntimeTimeout, "SKILL_RUNTIME_TIMEOUT"},
+		"CLI abandoned":      {skillrunner.ErrCommandAbandoned, "SKILL_RUNTIME_TIMEOUT"},
+		"wall clock":         {skillrunner.ErrWallClockExceeded, "SKILL_RUN_TIMED_OUT"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
