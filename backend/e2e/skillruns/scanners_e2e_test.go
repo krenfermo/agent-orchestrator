@@ -171,8 +171,8 @@ func TestScannersAreDurableThroughARealDaemonAndDocker(t *testing.T) {
 			version = sk.Version
 		}
 	}
-	if version != "0.3.0" {
-		t.Fatalf("security-audit available at %q, want 0.3.0", version)
+	if version != shippedVersion(t) {
+		t.Fatalf("security-audit available at %q, want %s", version, shippedVersion(t))
 	}
 	caps := []string{"repo.read", "deps.read", "report.write"}
 	for _, p := range []string{"scanme", "clean"} {

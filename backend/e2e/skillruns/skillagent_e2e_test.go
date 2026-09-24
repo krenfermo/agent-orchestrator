@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -311,7 +312,7 @@ func TestSkillAgentModeEndToEndWithRealClaudeCode(t *testing.T) {
 	}
 	s.addProject("medusa", medusa)
 
-	// ---- the builtin: available at 0.3.0, never enabled ----
+	// ---- the builtin: available at the shipped version, never enabled ----
 	var catalog struct {
 		Skills []struct {
 			ID      string `json:"id"`
@@ -325,8 +326,8 @@ func TestSkillAgentModeEndToEndWithRealClaudeCode(t *testing.T) {
 			version = sk.Version
 		}
 	}
-	if version != "0.3.0" {
-		t.Fatalf("security-audit available at %q, want 0.3.0: %+v", version, catalog.Skills)
+	if version != shippedVersion(t) {
+		t.Fatalf("security-audit available at %q, want %s: %+v", version, shippedVersion(t), catalog.Skills)
 	}
 	if _, code, ecode := s.startAgentRun("medusa", ""); code != http.StatusNotFound {
 		t.Fatalf("a run of a skill never enabled answered %d %s", code, ecode)
@@ -475,14 +476,14 @@ func TestSkillAgentModeEndToEndWithRealClaudeCode(t *testing.T) {
 	}
 	manifest := filepath.Join(fork, "skill.yaml")
 	mb, _ := os.ReadFile(manifest) //nolint:gosec // test.
-	mtext := strings.Replace(string(mb), "version: 0.3.0", "version: 0.3.1", 1)
+	mtext := regexp.MustCompile(`(?m)^version: .*$`).ReplaceAllString(string(mb), "version: 90.0.0-fork")
 	mtext = strings.Replace(mtext, "name: Security Audit", "name: Security Audit (third-party fork)", 1)
 	writeFile(t, manifest, mtext)
 	s.expect(http.MethodPost, "/api/v1/skills", map[string]any{"sourceDir": fork}, http.StatusCreated, nil)
 	other := filepath.Join(s.root, "projects", "other")
 	s.initAgentRepo(other, canary)
 	s.addProject("other", other)
-	s.enableSkill("other", "0.3.1", "repo.read", "report.write")
+	s.enableSkill("other", "90.0.0-fork", "repo.read", "report.write")
 	if _, code, ecode := s.startAgentRun("other", ""); code != http.StatusForbidden || ecode != "SKILL_AGENT_UNTRUSTED" {
 		t.Fatalf("an untrusted package answered %d %s", code, ecode)
 	}
@@ -590,7 +591,7 @@ func TestSkillAgentNegativesThroughARealDaemon(t *testing.T) {
 
 	s.startDaemon("AO_SKILL_AGENT_BIN=" + fake)
 	s.addProject("medusa", medusa)
-	s.enableSkill("medusa", "0.3.0", "repo.read", "report.write")
+	s.enableSkill("medusa", shippedVersion(t), "repo.read", "report.write")
 
 	run := func(mode string) agentDetail {
 		t.Helper()
@@ -674,4 +675,15 @@ func TestSkillAgentNegativesThroughARealDaemon(t *testing.T) {
 func dirExists(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && info.IsDir()
+}
+
+// shippedVersion is the version of the builtin security-audit this build
+// embeds. The E2Es follow it rather than pinning a number every release moves.
+func shippedVersion(t *testing.T) string {
+	t.Helper()
+	pkg, err := skillcatalog.LoadPackage("../../internal/skillcatalog/packages/security-audit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pkg.Manifest.Version
 }

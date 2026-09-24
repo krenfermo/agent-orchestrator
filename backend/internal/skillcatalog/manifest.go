@@ -360,6 +360,11 @@ type Mode struct {
 	// that is refused unless the package is builtin or trusted and AO's own
 	// agent executor attests the controls the mode's capabilities need.
 	Executor Executor `yaml:"executor,omitempty" json:"executor,omitempty"`
+	// Composes lists the modes a COMPOSITE mode runs, in order (2E). A
+	// composite mode executes nothing itself: each composed mode runs as its
+	// own skill run, authorized against its own executor, and the composite
+	// consolidates their reports. Empty for every other executor.
+	Composes []string `yaml:"composes,omitempty" json:"composes,omitempty"`
 }
 
 // Executor names what carries out a mode.
@@ -371,13 +376,16 @@ const (
 	// ExecutorAgent runs a provider agent that reads SKILL.md and the mode
 	// guide over a staged, read-only copy of the project (ADR 0010).
 	ExecutorAgent Executor = "agent"
+	// ExecutorComposite runs other modes of the same skill, each as its own
+	// run, and consolidates their reports (ADR 0011).
+	ExecutorComposite Executor = "composite"
 )
 
 // Valid reports whether e is a supported executor. The empty value is valid
 // and means tool.
 func (e Executor) Valid() bool {
 	switch e {
-	case "", ExecutorTool, ExecutorAgent:
+	case "", ExecutorTool, ExecutorAgent, ExecutorComposite:
 		return true
 	}
 	return false
@@ -772,7 +780,10 @@ func (m Manifest) validateModes() error {
 			return err
 		}
 		if !mode.Executor.Valid() {
-			return invalidf("modes[%q].executor %q is not one of tool, agent", mode.ID, mode.Executor)
+			return invalidf("modes[%q].executor %q is not one of tool, agent, composite", mode.ID, mode.Executor)
+		}
+		if mode.Executor != ExecutorComposite && len(mode.Composes) > 0 {
+			return invalidf("modes[%q] lists composes but is not executor composite", mode.ID)
 		}
 		if mode.Executor == ExecutorAgent {
 			// An agent mode's only product is a report AO validates and stores.
@@ -787,6 +798,58 @@ func (m Manifest) validateModes() error {
 			if !hasReport {
 				return invalidf("modes[%q] is executor agent and must request %q: the agent's only "+
 					"output is a report AO validates before storing", mode.ID, CapReportWrite)
+			}
+		}
+	}
+	return m.validateComposites()
+}
+
+// validateComposites checks every composite mode against the modes it runs. A
+// composite may not widen anything: its capabilities are EXACTLY the union of
+// its composed modes' (so a grant shows precisely what the audit needs), and
+// its risk and approval are at least the strictest among them.
+func (m Manifest) validateComposites() error {
+	for _, mode := range m.Modes {
+		if mode.Executor != ExecutorComposite {
+			continue
+		}
+		if len(mode.Composes) == 0 {
+			return invalidf("modes[%q] is executor composite and composes no mode", mode.ID)
+		}
+		union := map[Capability]bool{}
+		seen := map[string]bool{}
+		for _, id := range mode.Composes {
+			if seen[id] {
+				return invalidf("modes[%q] composes %q twice", mode.ID, id)
+			}
+			seen[id] = true
+			sub, ok := m.Mode(id)
+			if !ok {
+				return invalidf("modes[%q] composes %q, which the skill does not declare", mode.ID, id)
+			}
+			if sub.Executor == ExecutorComposite {
+				return invalidf("modes[%q] composes the composite mode %q; composites do not nest", mode.ID, id)
+			}
+			for _, c := range sub.Capabilities {
+				union[c] = true
+			}
+			if sub.RiskLevel.rank() > mode.RiskLevel.rank() {
+				return invalidf("modes[%q].riskLevel %s is below composed mode %q's %s", mode.ID, mode.RiskLevel, id, sub.RiskLevel)
+			}
+			if sub.Approval.rank() > mode.Approval.rank() {
+				return invalidf("modes[%q].approval %s is weaker than composed mode %q's %s", mode.ID, mode.Approval, id, sub.Approval)
+			}
+		}
+		own := map[Capability]bool{}
+		for _, c := range mode.Capabilities {
+			own[c] = true
+		}
+		if len(own) != len(union) {
+			return invalidf("modes[%q].capabilities must be exactly the union of its composed modes' capabilities", mode.ID)
+		}
+		for c := range union {
+			if !own[c] {
+				return invalidf("modes[%q].capabilities must include %q, which a composed mode requests", mode.ID, c)
 			}
 		}
 	}
