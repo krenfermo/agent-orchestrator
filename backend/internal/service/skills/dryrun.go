@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
@@ -187,6 +188,13 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 			trusted = true
 		}
 	}
+	composite := mode.EffectiveExecutor() == skillcatalog.ExecutorComposite
+	if composite {
+		// The parent executes nothing: it is judged on grants, and each
+		// composed mode is dry-run on its own, against its own executor.
+		runner = skillcatalog.RunnerAttestation{RunnerID: auditRunnerID}
+		unavailable = ""
+	}
 	decision, _ := skillcatalog.Authorize(skillcatalog.AuthorizationRequest{
 		Manifest:           manifest,
 		ModeID:             mode.ID,
@@ -195,6 +203,7 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 		Runner:             runner,
 		AuthorizedTargets:  req.AuthorizedTargets,
 		PackageTrusted:     trusted,
+		CompositeParent:    composite,
 	})
 
 	out := DryRun{
@@ -218,6 +227,35 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 	if agentBlocker != "" {
 		out.Reasons = append(out.Reasons, agentBlocker)
 	}
+	// A composite reports, per composed mode, whether it would run -- and a
+	// mode that would not makes the audit partial, which the reasons say.
+	var composedBlocked, composedRunnable int
+	if composite {
+		out.Runner.Available = true
+		for _, id := range mode.Composes {
+			childReq := req
+			childReq.ModeID = id
+			childReq.Inputs = map[string]string{}
+			for k, v := range req.Inputs {
+				if k != modeInputName {
+					childReq.Inputs[k] = v
+				}
+			}
+			childReq.Inputs[modeInputName] = id
+			child, err := s.DryRun(ctx, childReq)
+			switch {
+			case err != nil:
+				composedBlocked++
+				out.Reasons = append(out.Reasons, fmt.Sprintf("%s would not run: %v", id, err))
+			case child.Verdict == DryRunBlocked:
+				composedBlocked++
+				out.Reasons = append(out.Reasons, fmt.Sprintf("%s would not run (the audit would be PARTIAL): %s",
+					id, strings.Join(child.Reasons, "; ")))
+			default:
+				composedRunnable++
+			}
+		}
+	}
 
 	denials := map[skillcatalog.Capability]skillcatalog.Denial{}
 	for _, d := range decision.Denials {
@@ -237,6 +275,11 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 			// The controls that apply are the ones THIS environment is judged
 			// by: a host agent by the host-agent set, a container by its own.
 			need := spec.ControlsFor(runner)
+			if composite {
+				// The parent needs no control; its composed modes are dry-run
+				// against their own executors above.
+				need = nil
+			}
 			entry.RequiresControls = append([]skillcatalog.Control(nil), need...)
 			for _, need := range need {
 				if !runner.Provides(need) && !containsControl(out.Runner.MissingControls, need) {
@@ -283,7 +326,7 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 	}
 
 	switch {
-	case !decision.Allowed(), agentBlocker != "":
+	case !decision.Allowed(), agentBlocker != "", composite && composedRunnable == 0:
 		out.Verdict = DryRunBlocked
 	case out.RequiredApproval != skillcatalog.ApprovalNone &&
 		out.RequiredApproval != skillcatalog.ApprovalPerActivation:

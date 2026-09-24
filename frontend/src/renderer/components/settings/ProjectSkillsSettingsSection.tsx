@@ -26,7 +26,7 @@ type SkillRunStart = components["schemas"]["ControllersSkillRunStartView"];
 type SkillRunSummary = components["schemas"]["ControllersSkillRunSummaryView"];
 type SkillRunDetail = components["schemas"]["ControllersSkillRunDetailView"];
 
-const TERMINAL_RUN_STATES = new Set(["succeeded", "failed", "refused", "cancelled"]);
+const TERMINAL_RUN_STATES = new Set(["succeeded", "partial", "failed", "refused", "cancelled"]);
 const isTerminalRun = (state: string | undefined) => state !== undefined && TERMINAL_RUN_STATES.has(state);
 
 /**
@@ -67,6 +67,34 @@ type StaticScanReport = {
 // redacted by the daemon before it was stored (Frente 2 / 2C). It carries no
 // image or container evidence, so it is rendered from its own shape.
 const SKILL_AGENT_TOOL = "ao.skill-agent/v1";
+
+// A full security audit (Frente 2 / 2E) is a parent run whose report is the
+// consolidated ao.security-audit/v1 document. It ends "partial" -- never
+// "succeeded" -- when not every mode it planned produced a verified report.
+const SKILL_AUDIT_TOOL = "ao.security-audit/v1";
+
+type AuditReport = {
+	completeness?: string;
+	summary?: { modesPlanned?: number; modesVerified?: number; statements?: string[] };
+	modes?: {
+		mode: string;
+		status: string;
+		verified: boolean;
+		runId?: string;
+		errorCode?: string;
+		coverage?: { statement: string };
+	}[];
+	findings?: {
+		id: string;
+		severity: string;
+		confidence: string;
+		title: string;
+		path: string;
+		line?: number;
+		sources: { mode: string; ruleId: string }[];
+	}[];
+	limitations?: string[];
+};
 
 type AgentReport = {
 	coverage?: {
@@ -311,6 +339,8 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 				return t("settings.project.skills.runState.running");
 			case "succeeded":
 				return t("settings.project.skills.runState.succeeded");
+			case "partial":
+				return t("settings.project.skills.runState.partial");
 			case "refused":
 				return t("settings.project.skills.runState.refused");
 			case "cancelled":
@@ -491,24 +521,47 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 		const run = detail.run;
 		if (!isTerminalRun(run.state)) {
 			return (
-				<div className="flex items-center gap-2" data-testid="project-skill-run-progress">
-					<Loader2 className="size-3 animate-spin" aria-hidden="true" />
-					<span className="text-caption">
-						{t("settings.project.skills.runInProgress", { id: run.id, state: runStateLabel(run.state) })}
-					</span>
-					{canManage ? (
-						<Button
-							variant="secondary"
-							size="sm"
-							disabled={cancelRun.isPending || run.cancelRequested}
-							onClick={() => cancelRun.mutate(run.id)}
-							data-testid="project-skill-run-cancel"
-						>
-							{t("settings.project.skills.cancelRun")}
-						</Button>
+				<div className="flex flex-col gap-1" data-testid="project-skill-run-progress-block">
+					<div className="flex items-center gap-2" data-testid="project-skill-run-progress">
+						<Loader2 className="size-3 animate-spin" aria-hidden="true" />
+						<span className="text-caption">
+							{t("settings.project.skills.runInProgress", { id: run.id, state: runStateLabel(run.state) })}
+						</span>
+						{canManage ? (
+							<Button
+								variant="secondary"
+								size="sm"
+								disabled={cancelRun.isPending || run.cancelRequested}
+								onClick={() => cancelRun.mutate(run.id)}
+								data-testid="project-skill-run-cancel"
+							>
+								{t("settings.project.skills.cancelRun")}
+							</Button>
+						) : null}
+					</div>
+					{(detail.children ?? []).length > 0 ? (
+						<ul className="flex flex-col gap-0.5 pl-5" data-testid="project-skill-audit-children">
+							{(detail.children ?? []).map((c) => (
+								<li className="flex items-center gap-2 text-caption" key={c.id}>
+									<Badge variant={runStateBadge(c.state)}>{runStateLabel(c.state)}</Badge>
+									<span>{c.modeId}</span>
+								</li>
+							))}
+						</ul>
 					) : null}
 				</div>
 			);
+		}
+		if (run.tool === SKILL_AUDIT_TOOL && (run.state === "succeeded" || run.state === "partial")) {
+			if (detail.integrity !== "verified" || !detail.report) {
+				return (
+					<p className="flex items-start gap-2 text-caption text-error" data-testid="project-skill-run-unverified">
+						<ShieldAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+						{t("settings.project.skills.reportUnverified", { id: run.id })}
+					</p>
+				);
+			}
+			return auditReportPanel(detail);
 		}
 		if (run.state !== "succeeded") {
 			return (
@@ -676,6 +729,99 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 						);
 					})}
 				</ul>
+			</div>
+		);
+	};
+
+	// A full audit: completeness first -- a partial audit says so before
+	// anything else -- then the factual summary, each mode with its own
+	// coverage and a way to open its own report, the consolidated findings with
+	// their sources, and what none of it can tell you.
+	const auditReportPanel = (detail: SkillRunDetail) => {
+		const report = (detail.report ?? {}) as AuditReport;
+		const summary = report.summary ?? {};
+		const partial = report.completeness !== "complete";
+		const findings = report.findings ?? [];
+		return (
+			<div
+				className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+				data-testid="project-skill-audit-report"
+			>
+				<p
+					className={`flex items-start gap-2 text-caption font-medium ${partial ? "text-error" : ""}`}
+					data-testid="project-skill-audit-completeness"
+				>
+					{partial ? <CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" /> : null}
+					{t(partial ? "settings.project.skills.auditPartial" : "settings.project.skills.auditComplete", {
+						verified: summary.modesVerified ?? 0,
+						planned: summary.modesPlanned ?? 0,
+					})}
+				</p>
+				<ul className="flex flex-col gap-0.5">
+					{(summary.statements ?? []).map((st) => (
+						<li className="text-caption text-settings-muted" key={st}>
+							{st}
+						</li>
+					))}
+				</ul>
+				<p className="text-caption font-medium">{t("settings.project.skills.auditModes")}</p>
+				<ul className="flex flex-col gap-1">
+					{(report.modes ?? []).map((m) => (
+						<li className="flex flex-wrap items-center gap-2 text-caption" key={m.mode}>
+							<Badge variant={m.verified ? "success" : "error"}>{m.status}</Badge>
+							<span className="font-medium">{m.mode}</span>
+							<span className="text-settings-muted">
+								{m.coverage?.statement ?? m.errorCode ?? ""}
+							</span>
+							{m.runId ? (
+								<Button
+									variant="secondary"
+									size="sm"
+									onClick={() => setActiveRunId(m.runId ?? "")}
+									data-testid="project-skill-audit-open-mode"
+								>
+									{t("settings.project.skills.auditOpenMode")}
+								</Button>
+							) : null}
+						</li>
+					))}
+				</ul>
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.findingsCount", { count: findings.length })}
+				</p>
+				<ul className="flex flex-col gap-1">
+					{findings.map((f) => (
+						<li className="text-caption" key={f.id}>
+							<span className="font-medium">
+								[{f.severity.toUpperCase()}] {f.title}
+							</span>
+							<span className="text-settings-muted">
+								{" "}
+								{f.line ? `${f.path}:${f.line}` : f.path} · {f.id} · {f.confidence} ·{" "}
+								{f.sources.map((src) => `${src.mode}/${src.ruleId}`).join(", ")}
+							</span>
+						</li>
+					))}
+				</ul>
+				{(report.limitations ?? []).length > 0 ? (
+					<>
+						<p className="text-caption font-medium">{t("settings.project.skills.limitations")}</p>
+						<ul className="flex flex-col gap-0.5">
+							{(report.limitations ?? []).map((l) => (
+								<li className="text-caption text-settings-muted" key={l}>
+									{l}
+								</li>
+							))}
+						</ul>
+					</>
+				) : null}
+				<p className="text-caption text-settings-muted" data-testid="project-skill-audit-export">
+					{t("settings.project.skills.auditExportHint", {
+						project: projectId,
+						id: detail.run.id,
+						sha: detail.run.reportSha256 ?? "",
+					})}
+				</p>
 			</div>
 		);
 	};
@@ -890,8 +1036,9 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 										{r.durationMs !== undefined && r.durationMs !== null
 											? ` · ${(r.durationMs / 1000).toFixed(1)}s`
 											: ""}
+										{r.parentRunId ? ` · ${t("settings.project.skills.auditChild", { id: r.parentRunId })}` : ""}
 										{" · "}
-										{r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ""}` : r.summary}
+										{r.errorCode && r.state !== "partial" ? `${r.errorCode}: ${r.errorMessage ?? ""}` : r.summary}
 									</span>
 								</button>
 							</li>

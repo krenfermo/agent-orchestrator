@@ -2925,5 +2925,12 @@
 	"settings.project.skills.runState.succeeded": "erfolgreich",
 	"settings.project.skills.runState.failed": "fehlgeschlagen",
 	"settings.project.skills.runState.refused": "abgelehnt",
-	"settings.project.skills.runState.cancelled": "abgebrochen"
+	"settings.project.skills.runState.cancelled": "abgebrochen",
+	"settings.project.skills.runState.partial": "teilweise",
+	"settings.project.skills.auditComplete": "Vollständiges Audit: {{verified}} von {{planned}} Modi haben einen verifizierten Bericht erzeugt",
+	"settings.project.skills.auditPartial": "TEILWEISES Audit: nur {{verified}} von {{planned}} Modi haben einen verifizierten Bericht erzeugt. Dies ist kein vollständiges Audit.",
+	"settings.project.skills.auditModes": "Modi",
+	"settings.project.skills.auditOpenMode": "Bericht öffnen",
+	"settings.project.skills.auditChild": "Teil von Audit {{id}}",
+	"settings.project.skills.auditExportHint": "Verifizierbarer Export: ao skills runs --project {{project}} {{id}} --export audit.json (SHA-256 {{sha}})"
 }

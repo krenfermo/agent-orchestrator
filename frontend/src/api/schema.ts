@@ -1195,7 +1195,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skills: accept one authorized mode of an activated skill for execution and return the durable run (202). Requires project.manage -- the dry run reports what WOULD happen, this makes it happen. Refused (4xx, no run created) unless the skill is installed and enabled, the version is pinned, every capability the mode declares is granted, the runtime attests every control the mode needs, and the mode is implemented. The image approval for this exact scope is checked when the run executes: a run without one ends refused. The caller contributes no image, no command and no argv. Tool modes run one of AO's closed scan tools (ao.static-scan/v1, ao.secret-scan/v1, ao.dependency-scan/v1) in the container runner; agent modes of builtin or trusted packages run AO's host agent (ADR 0010). The same idempotencyKey, or any request while a run for this project, skill and mode is queued or running, returns THAT run with created=false. */
+        /** Skills: accept one authorized mode of an activated skill for execution and return the durable run (202). Requires project.manage -- the dry run reports what WOULD happen, this makes it happen. Refused (4xx, no run created) unless the skill is installed and enabled, the version is pinned, every capability the mode declares is granted, the runtime attests every control the mode needs, and the mode is implemented. The image approval for this exact scope is checked when the run executes: a run without one ends refused. The caller contributes no image, no command and no argv. Tool modes run one of AO's closed scan tools (ao.static-scan/v1, ao.secret-scan/v1, ao.dependency-scan/v1) in the container runner; agent modes of builtin or trusted packages run AO's host agent (ADR 0010); a composite mode (full-audit) runs each composed mode as its own child run and consolidates their verified reports, ending succeeded only when every mode produced one and partial otherwise (ADR 0011). The same idempotencyKey, or any request while a run for this project, skill and mode is queued or running, returns THAT run with created=false. */
         post: operations["runProjectSkill"];
         delete?: never;
         options?: never;
@@ -5431,6 +5431,7 @@ export interface components {
             setupRequired: boolean;
         };
         ControllersSkillRunDetailView: {
+            children?: components["schemas"]["ControllersSkillRunSummaryView"][];
             findings: components["schemas"]["ControllersSkillRunFindingView"][];
             /** @enum {string} */
             integrity: "verified" | "mismatch" | "none";
@@ -5482,6 +5483,7 @@ export interface components {
             } | null;
             modeId: string;
             packageDigest: string;
+            parentRunId?: string;
             projectId: string;
             reportSha256?: string;
             requestedBy: string;
@@ -5491,7 +5493,7 @@ export interface components {
             /** Format: date-time */
             startedAt?: null | string;
             /** @enum {string} */
-            state: "queued" | "running" | "succeeded" | "failed" | "refused" | "cancelled";
+            state: "queued" | "running" | "succeeded" | "partial" | "failed" | "refused" | "cancelled";
             summary: string;
             tool: string;
             truncated: boolean;

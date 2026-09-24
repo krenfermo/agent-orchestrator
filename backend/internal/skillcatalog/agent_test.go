@@ -186,8 +186,11 @@ func TestSecurityAudit_AuthzReviewIsTheOneAgentMode(t *testing.T) {
 	}
 	for _, m := range pkg.Manifest.Modes {
 		want := ExecutorTool
-		if m.ID == "authz-review" {
+		switch m.ID {
+		case "authz-review":
 			want = ExecutorAgent
+		case "full-audit":
+			want = ExecutorComposite
 		}
 		if m.EffectiveExecutor() != want {
 			t.Fatalf("mode %s executor = %s, want %s", m.ID, m.EffectiveExecutor(), want)

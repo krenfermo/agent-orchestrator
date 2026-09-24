@@ -2907,5 +2907,12 @@
 	"settings.project.skills.runState.succeeded": "成功",
 	"settings.project.skills.runState.failed": "失败",
 	"settings.project.skills.runState.refused": "已拒绝",
-	"settings.project.skills.runState.cancelled": "已取消"
+	"settings.project.skills.runState.cancelled": "已取消",
+	"settings.project.skills.runState.partial": "部分",
+	"settings.project.skills.auditComplete": "完整审计：{{planned}} 个模式中有 {{verified}} 个生成了经验证的报告",
+	"settings.project.skills.auditPartial": "部分审计：{{planned}} 个模式中只有 {{verified}} 个生成了经验证的报告。这不是完整的审计。",
+	"settings.project.skills.auditModes": "模式",
+	"settings.project.skills.auditOpenMode": "打开报告",
+	"settings.project.skills.auditChild": "审计 {{id}} 的一部分",
+	"settings.project.skills.auditExportHint": "可验证导出：ao skills runs --project {{project}} {{id}} --export audit.json（SHA-256 {{sha}}）"
 }

@@ -437,6 +437,98 @@ describe("ProjectSkillsSettingsSection — running", () => {
 		expect(report).not.toHaveTextContent(".env:0");
 	});
 
+	// A full audit that did not cover every mode is PARTIAL, says so first,
+	// and never reads like a completed audit.
+	const auditDetail = (state: string, completeness: string, verified: number) => ({
+		run: runSummary(state, {
+			modeId: "full-audit", tool: "ao.security-audit/v1", reportSha256: "a1b2c3",
+			errorCode: state === "partial" ? "SKILL_AUDIT_PARTIAL" : undefined,
+		}),
+		findings: [],
+		integrity: "verified",
+		children: [runSummary("succeeded", { id: "skr-2", modeId: "secret-scan", parentRunId: "skr-1" })],
+		report: {
+			schemaVersion: "ao.security-audit/v1", completeness,
+			summary: { modesPlanned: 4, modesVerified: verified,
+				statements: [completeness === "partial" ? "PARTIAL: 3 of 4 audit modes produced a verified report." : "Complete: all 4 audit modes produced a verified report."] },
+			modes: [
+				{ mode: "secret-scan", status: "succeeded", verified: true, runId: "skr-2",
+					coverage: { statement: "4 of 4 staged file(s) scanned" } },
+				{ mode: "authz-review", status: "refused_before_start", verified: false, errorCode: "SKILL_AGENT_UNAVAILABLE" },
+			],
+			findings: [{ id: "AUD-001", severity: "critical", confidence: "possible", title: "Credential-shaped literal",
+				path: "app/db.py", line: 3, sources: [{ mode: "secret-scan", ruleId: "SEC-011" }, { mode: "static-code", ruleId: "AOSS-006" }] }],
+			limitations: ["authz-review did not produce a verified report; its checks were NOT performed in this audit."],
+		},
+	});
+
+	it("renders a partial audit as partial, with what it did not cover", async () => {
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: auditDetail("partial", "partial", 3),
+		});
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return startedRun as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		const report = await screen.findByTestId("project-skill-audit-report");
+		const completeness = screen.getByTestId("project-skill-audit-completeness");
+		expect(completeness).toHaveTextContent("PARTIAL audit: only 3 of 4 modes produced a verified report");
+		expect(completeness).toHaveTextContent("This is not a complete audit.");
+		expect(report).not.toHaveTextContent("Complete audit");
+		expect(report).toHaveTextContent("refused_before_start");
+		expect(report).toHaveTextContent("SKILL_AGENT_UNAVAILABLE");
+		expect(report).toHaveTextContent("[CRITICAL] Credential-shaped literal");
+		expect(report).toHaveTextContent("secret-scan/SEC-011, static-code/AOSS-006");
+		expect(report).toHaveTextContent("were NOT performed");
+		expect(screen.getByTestId("project-skill-audit-export")).toHaveTextContent("--export audit.json (SHA-256 a1b2c3)");
+		// Completeness comes before the findings.
+		const text = report.textContent ?? "";
+		expect(text.indexOf("PARTIAL audit")).toBeLessThan(text.indexOf("AUD-001"));
+	});
+
+	it("renders a complete audit and lets each mode's own report be opened", async () => {
+		mockSkills({
+			permissions: ["project.read", "project.manage"], activations: [enabledActivation],
+			runDetail: auditDetail("succeeded", "complete", 4),
+		});
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return startedRun as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		expect(await screen.findByTestId("project-skill-audit-completeness")).toHaveTextContent(
+			"Complete audit: 4 of 4 modes produced a verified report",
+		);
+		expect(screen.getAllByTestId("project-skill-audit-open-mode")).toHaveLength(1);
+	});
+
+	it("shows an audit's child runs while it is running", async () => {
+		const running = auditDetail("running", "partial", 0);
+		mockSkills({ permissions: ["project.read", "project.manage"], activations: [enabledActivation], runDetail: running });
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return startedRun as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		const children = await screen.findByTestId("project-skill-audit-children");
+		expect(children).toHaveTextContent("secret-scan");
+		expect(children).toHaveTextContent("succeeded");
+	});
+
 	// The failure this panel exists to prevent.
 	it("says an empty scan is not a clean result", async () => {
 		mockSkills({

@@ -13,6 +13,50 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+const finishSkillRunPartial = `-- name: FinishSkillRunPartial :execrows
+UPDATE skill_runs
+SET state = 'partial',
+    summary = ?1,
+    finding_count = ?2,
+    report_json = ?3,
+    report_sha256 = ?4,
+    error_code = ?5,
+    error_message = ?6,
+    finished_at = ?7,
+    updated_at = ?7
+WHERE id = ?8 AND state = 'running'
+`
+
+type FinishSkillRunPartialParams struct {
+	Summary      string
+	FindingCount int64
+	ReportJson   sql.NullString
+	ReportSha256 string
+	ErrorCode    string
+	ErrorMessage string
+	FinishedAt   sql.NullTime
+	ID           string
+}
+
+// An audit that consolidated a report while not every planned mode produced a
+// verified result (migration 0173). It is never 'succeeded'.
+func (q *Queries) FinishSkillRunPartial(ctx context.Context, arg FinishSkillRunPartialParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, finishSkillRunPartial,
+		arg.Summary,
+		arg.FindingCount,
+		arg.ReportJson,
+		arg.ReportSha256,
+		arg.ErrorCode,
+		arg.ErrorMessage,
+		arg.FinishedAt,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const finishSkillRunSucceeded = `-- name: FinishSkillRunSucceeded :execrows
 UPDATE skill_runs
 SET state = 'succeeded',
@@ -106,7 +150,7 @@ func (q *Queries) FinishSkillRunUnsuccessful(ctx context.Context, arg FinishSkil
 }
 
 const getActiveSkillRun = `-- name: GetActiveSkillRun :one
-SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at FROM skill_runs
+SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at, parent_run_id FROM skill_runs
 WHERE project_id = ? AND skill_id = ? AND mode_id = ? AND state IN ('queued','running')
 `
 
@@ -150,12 +194,13 @@ func (q *Queries) GetActiveSkillRun(ctx context.Context, arg GetActiveSkillRunPa
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.UpdatedAt,
+		&i.ParentRunID,
 	)
 	return i, err
 }
 
 const getSkillRun = `-- name: GetSkillRun :one
-SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at FROM skill_runs WHERE id = ?
+SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at, parent_run_id FROM skill_runs WHERE id = ?
 `
 
 func (q *Queries) GetSkillRun(ctx context.Context, id string) (SkillRun, error) {
@@ -192,12 +237,13 @@ func (q *Queries) GetSkillRun(ctx context.Context, id string) (SkillRun, error) 
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.UpdatedAt,
+		&i.ParentRunID,
 	)
 	return i, err
 }
 
 const getSkillRunByIdempotencyKey = `-- name: GetSkillRunByIdempotencyKey :one
-SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at FROM skill_runs WHERE project_id = ? AND idempotency_key = ?
+SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at, parent_run_id FROM skill_runs WHERE project_id = ? AND idempotency_key = ?
 `
 
 type GetSkillRunByIdempotencyKeyParams struct {
@@ -239,12 +285,13 @@ func (q *Queries) GetSkillRunByIdempotencyKey(ctx context.Context, arg GetSkillR
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.UpdatedAt,
+		&i.ParentRunID,
 	)
 	return i, err
 }
 
 const getSkillRunForProject = `-- name: GetSkillRunForProject :one
-SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at FROM skill_runs WHERE project_id = ? AND id = ?
+SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at, parent_run_id FROM skill_runs WHERE project_id = ? AND id = ?
 `
 
 type GetSkillRunForProjectParams struct {
@@ -286,6 +333,7 @@ func (q *Queries) GetSkillRunForProject(ctx context.Context, arg GetSkillRunForP
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.UpdatedAt,
+		&i.ParentRunID,
 	)
 	return i, err
 }
@@ -296,9 +344,9 @@ INSERT INTO skill_runs (
     id, project_id, skill_id, skill_version, mode_id, tool, state,
     idempotency_key, requested_by, inputs_json, capabilities_json,
     package_digest, runner_id, runner_controls, owner_instance,
-    created_at, updated_at
+    created_at, updated_at, parent_run_id
 )
-VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertSkillRunParams struct {
@@ -318,6 +366,7 @@ type InsertSkillRunParams struct {
 	OwnerInstance    string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	ParentRunID      sql.NullString
 }
 
 // Skill runs (migration 0172). service/skills/runs.go is the only writer; every
@@ -341,6 +390,7 @@ func (q *Queries) InsertSkillRun(ctx context.Context, arg InsertSkillRunParams) 
 		arg.OwnerInstance,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.ParentRunID,
 	)
 	return err
 }
@@ -382,7 +432,7 @@ func (q *Queries) InsertSkillRunFinding(ctx context.Context, arg InsertSkillRunF
 }
 
 const listActiveSkillRuns = `-- name: ListActiveSkillRuns :many
-SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at FROM skill_runs WHERE state IN ('queued','running') ORDER BY created_at, id
+SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at, parent_run_id FROM skill_runs WHERE state IN ('queued','running') ORDER BY created_at, id
 `
 
 func (q *Queries) ListActiveSkillRuns(ctx context.Context) ([]SkillRun, error) {
@@ -425,6 +475,67 @@ func (q *Queries) ListActiveSkillRuns(ctx context.Context) ([]SkillRun, error) {
 			&i.StartedAt,
 			&i.FinishedAt,
 			&i.UpdatedAt,
+			&i.ParentRunID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSkillRunChildren = `-- name: ListSkillRunChildren :many
+SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at, parent_run_id FROM skill_runs WHERE parent_run_id = ? ORDER BY created_at, id
+`
+
+// The child runs of one audit (migration 0173), oldest first.
+func (q *Queries) ListSkillRunChildren(ctx context.Context, parentRunID sql.NullString) ([]SkillRun, error) {
+	rows, err := q.db.QueryContext(ctx, listSkillRunChildren, parentRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SkillRun{}
+	for rows.Next() {
+		var i SkillRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.SkillID,
+			&i.SkillVersion,
+			&i.ModeID,
+			&i.Tool,
+			&i.State,
+			&i.IdempotencyKey,
+			&i.RequestedBy,
+			&i.InputsJson,
+			&i.CapabilitiesJson,
+			&i.PackageDigest,
+			&i.RunnerID,
+			&i.RunnerControls,
+			&i.OwnerInstance,
+			&i.ImageDigest,
+			&i.ApprovalID,
+			&i.ApprovedBy,
+			&i.Summary,
+			&i.FindingCount,
+			&i.Truncated,
+			&i.ReportJson,
+			&i.ReportSha256,
+			&i.ErrorCode,
+			&i.ErrorMessage,
+			&i.CancelRequested,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.UpdatedAt,
+			&i.ParentRunID,
 		); err != nil {
 			return nil, err
 		}
@@ -478,7 +589,7 @@ func (q *Queries) ListSkillRunFindings(ctx context.Context, runID string) ([]Ski
 }
 
 const listSkillRunsForProject = `-- name: ListSkillRunsForProject :many
-SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at FROM skill_runs
+SELECT id, project_id, skill_id, skill_version, mode_id, tool, state, idempotency_key, requested_by, inputs_json, capabilities_json, package_digest, runner_id, runner_controls, owner_instance, image_digest, approval_id, approved_by, summary, finding_count, truncated, report_json, report_sha256, error_code, error_message, cancel_requested, created_at, started_at, finished_at, updated_at, parent_run_id FROM skill_runs
 WHERE project_id = ?
 ORDER BY created_at DESC, id DESC
 LIMIT ?
@@ -529,6 +640,7 @@ func (q *Queries) ListSkillRunsForProject(ctx context.Context, arg ListSkillRuns
 			&i.StartedAt,
 			&i.FinishedAt,
 			&i.UpdatedAt,
+			&i.ParentRunID,
 		); err != nil {
 			return nil, err
 		}

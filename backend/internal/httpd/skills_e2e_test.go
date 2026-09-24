@@ -239,7 +239,7 @@ func TestSkills_ListCarriesTheCapabilityPolicy(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatalf("decode: %v (%s)", err, body)
 	}
-	if len(out.Skills) != 1 || out.Skills[0].Digest == "" || len(out.Skills[0].Modes) != 6 {
+	if len(out.Skills) != 1 || out.Skills[0].Digest == "" || len(out.Skills[0].Modes) != 7 {
 		t.Fatalf("skills = %+v", out.Skills)
 	}
 	byName := map[string]bool{}

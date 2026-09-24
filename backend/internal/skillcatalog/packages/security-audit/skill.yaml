@@ -1,7 +1,7 @@
 apiVersion: ao.skill/v1
 id: security-audit
 name: Security Audit
-version: 0.3.0
+version: 0.4.0
 description: >-
   On-demand security review of one selected project: static code review,
   dependency and secret scanning, authorization and API review, and — only
@@ -53,7 +53,7 @@ inputs:
   - name: mode
     type: enum
     required: true
-    enum: [static-code, dependencies, secret-scan, authz-review, api-infra-review, active-pentest]
+    enum: [static-code, dependencies, secret-scan, authz-review, api-infra-review, active-pentest, full-audit]
     description: Which audit mode to run. One run is one mode.
   - name: scopePaths
     type: list
@@ -88,7 +88,7 @@ compatibility:
 
 integrity:
   algorithm: sha256
-  digest: "e2ca7d4db4edf4687e6d85a47c88a4cbe9e44f1f94293a47045b08d9b3f9b28b"
+  digest: "179f3736c074c1306e704fc4ea7fd24e29a1d1196caf64c0ed2608b8ea381608"
 
 provenance:
   publisher: agent-orchestrator
@@ -165,3 +165,19 @@ modes:
     capabilities: [repo.read, net.egress, net.active_scan, report.write]
     approval: per_target
     guide: modes/active-pentest.md
+
+  - id: full-audit
+    name: Full security audit
+    description: >-
+      Runs secret-scan, dependencies, static-code and authz-review on one project,
+      each as its own run behind its own boundary, and consolidates their verified
+      reports into one. Partial when any mode does not produce a verified result.
+    riskLevel: low
+    # Exactly the union of the composed modes' capabilities -- the manifest
+    # validator refuses anything wider or narrower. Each composed mode is still
+    # authorized on its own, against its own executor, when it launches.
+    capabilities: [repo.read, deps.read, report.write]
+    approval: per_activation
+    guide: modes/full-audit.md
+    executor: composite
+    composes: [secret-scan, dependencies, static-code, authz-review]

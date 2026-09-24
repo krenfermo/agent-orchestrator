@@ -548,6 +548,12 @@ type AuthorizationRequest struct {
 	// controls do not depend on whose package it runs, and a host agent's do.
 	// The zero value is untrusted, so a caller that forgets it is refused.
 	PackageTrusted bool
+	// CompositeParent authorizes the PARENT of a composite mode (ADR 0011):
+	// grant, permission and approval are checked for the union of the composed
+	// modes' capabilities, and controls are NOT, because the parent executes
+	// nothing. Every composed mode is authorized again, fully, against its own
+	// executor's attestation when it launches. Refused for any other mode.
+	CompositeParent bool
 }
 
 // Authorize resolves a run's capability request fail-closed: a capability is
@@ -563,6 +569,12 @@ func Authorize(req AuthorizationRequest) (Decision, error) {
 		}
 		requested = mode.Capabilities
 		approval = StricterApproval(approval, mode.Approval)
+		if req.CompositeParent != (mode.Executor == ExecutorComposite) {
+			return Decision{}, invalidf("mode %q: a composite mode is authorized only as a composite parent, "+
+				"and only a composite mode can be", mode.ID)
+		}
+	} else if req.CompositeParent {
+		return Decision{}, invalidf("a composite parent names its mode")
 	}
 
 	granted := map[Capability]bool{}
@@ -604,6 +616,15 @@ func Authorize(req AuthorizationRequest) (Decision, error) {
 				Capability: c, Reason: DenyApprovalTooWeak,
 				Detail: fmt.Sprintf("requires approval %s, manifest asks for %s", spec.MinApproval, approval),
 			})
+			continue
+		}
+		if req.CompositeParent {
+			// Controls are the composed runs' business, checked at their launch.
+			decision.Granted = append(decision.Granted, c)
+			if spec.Risk.rank() > decision.EffectiveRisk.rank() {
+				decision.EffectiveRisk = spec.Risk
+			}
+			decision.RequiredApproval = StricterApproval(decision.RequiredApproval, spec.MinApproval)
 			continue
 		}
 		if hostAgent && len(spec.RequiresControls) > 0 && !req.PackageTrusted {

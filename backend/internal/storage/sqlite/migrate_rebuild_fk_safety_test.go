@@ -262,6 +262,13 @@ var knownTableRebuilds = []tableRebuild{
 			"workflow_mutation_provenance.attempt_id ON DELETE NO ACTION",
 		},
 		handling: handlingPark, outcome: outcomePreserved,
+	}, {
+		// 0173 adds the 'partial' terminal state and parent_run_id (2E, full
+		// security audit). skill_run_findings cascades from skill_runs, so a
+		// naive rebuild would delete every stored finding of every run.
+		version: 173, table: "skill_runs",
+		children: []string{"skill_run_findings.run_id ON DELETE CASCADE"},
+		handling: handlingPragmaOff, outcome: outcomePreserved,
 	},
 }
 

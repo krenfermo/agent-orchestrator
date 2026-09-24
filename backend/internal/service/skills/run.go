@@ -110,6 +110,10 @@ type RunRequest struct {
 	// what the mode's capabilities require; nothing here re-implements that.
 	Actor            string
 	ActorPermissions []domain.Permission
+	// quiet suppresses run_refused audit rows. It is set only by an audit
+	// checking, before acceptance, whether its composed modes could run --
+	// a question, not a refused request.
+	quiet bool
 }
 
 // RunResult is one completed execution.
@@ -145,6 +149,10 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 	prep, err := s.prepareRun(ctx, req)
 	if err != nil {
 		return RunResult{}, err
+	}
+	if prep.audit != nil {
+		return RunResult{}, apierr.Conflict(auditErrRequiresDurableRun,
+			"a full audit runs only as a durable run (POST .../run returns 202)", nil)
 	}
 	if prep.agent != nil {
 		// An agent run is long, and its result is only worth anything once it
@@ -183,6 +191,8 @@ type preparedRun struct {
 	// agent is set only for a mode whose executor is agent: the verified
 	// instruction bytes and schema the host agent run uses (agentrun.go).
 	agent *agentPlan
+	// audit is set only for a composite mode (audit.go).
+	audit *auditPlan
 }
 
 // prepareRun performs steps 1-4 of RunSkill's contract. Every refusal is
@@ -243,6 +253,9 @@ func (s *Service) prepareRun(ctx context.Context, req RunRequest) (preparedRun, 
 	// reaches the container path below, and a tool mode never reaches it.
 	if mode.EffectiveExecutor() == skillcatalog.ExecutorAgent {
 		return s.prepareAgentRun(ctx, req, resolved, mode, project, inputs)
+	}
+	if mode.EffectiveExecutor() == skillcatalog.ExecutorComposite {
+		return s.prepareAuditRun(ctx, req, resolved, mode, project, inputs)
 	}
 
 	// A missing execution environment is answered HERE, not at the top of the
@@ -401,6 +414,9 @@ func (s *Service) recordRun(
 	ctx context.Context, action store.SkillAuditAction, req RunRequest,
 	version, modeID, digest, detail string,
 ) {
+	if req.quiet {
+		return
+	}
 	projectID := req.ProjectID
 	_ = s.store.AppendSkillAudit(ctx, store.SkillAuditEntry{
 		ID:         s.newID(),

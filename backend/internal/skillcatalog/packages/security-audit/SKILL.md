@@ -30,6 +30,7 @@ Read only the guide for the selected mode:
 - [modes/authz-review.md](modes/authz-review.md)
 - [modes/api-infra-review.md](modes/api-infra-review.md)
 - [modes/active-pentest.md](modes/active-pentest.md)
+- [modes/full-audit.md](modes/full-audit.md)
 
 ## Output
 

@@ -7,9 +7,13 @@ INSERT INTO skill_runs (
     id, project_id, skill_id, skill_version, mode_id, tool, state,
     idempotency_key, requested_by, inputs_json, capabilities_json,
     package_digest, runner_id, runner_controls, owner_instance,
-    created_at, updated_at
+    created_at, updated_at, parent_run_id
 )
-VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- name: ListSkillRunChildren :many
+-- The child runs of one audit (migration 0173), oldest first.
+SELECT * FROM skill_runs WHERE parent_run_id = ? ORDER BY created_at, id;
 
 -- name: GetSkillRun :one
 SELECT * FROM skill_runs WHERE id = ?;
@@ -49,6 +53,21 @@ SET state = 'succeeded',
     truncated = sqlc.arg(truncated),
     report_json = sqlc.arg(report_json),
     report_sha256 = sqlc.arg(report_sha256),
+    finished_at = sqlc.arg(finished_at),
+    updated_at = sqlc.arg(finished_at)
+WHERE id = sqlc.arg(id) AND state = 'running';
+
+-- name: FinishSkillRunPartial :execrows
+-- An audit that consolidated a report while not every planned mode produced a
+-- verified result (migration 0173). It is never 'succeeded'.
+UPDATE skill_runs
+SET state = 'partial',
+    summary = sqlc.arg(summary),
+    finding_count = sqlc.arg(finding_count),
+    report_json = sqlc.arg(report_json),
+    report_sha256 = sqlc.arg(report_sha256),
+    error_code = sqlc.arg(error_code),
+    error_message = sqlc.arg(error_message),
     finished_at = sqlc.arg(finished_at),
     updated_at = sqlc.arg(finished_at)
 WHERE id = sqlc.arg(id) AND state = 'running';

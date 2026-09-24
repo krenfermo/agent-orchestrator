@@ -117,7 +117,7 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if entry.Version != "0.3.0" {
+	if entry.Version != "0.4.0" {
 		t.Fatalf("installed version = %q", entry.Version)
 	}
 

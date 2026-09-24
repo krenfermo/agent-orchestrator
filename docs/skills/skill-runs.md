@@ -234,8 +234,7 @@ in the usage ledger.
 
 ## 8. Deterministic scanners (Frente 2 / 2D)
 
-*Status: **implemented** on `feat/skills-2d-deterministic-scanners` (base
-`b9ec8ca92`), pending review and merge. No migration. `security-audit` 0.3.0.*
+*Status: **merged** (ECC `45554edc7`). No migration. `security-audit` 0.3.0.*
 
 Two more **tool** modes, on the SAME engine as `static-code` — not a second
 framework. A tool is a row in `skillrunner/scantools.go`: which files it
@@ -298,3 +297,62 @@ ship and update, or `net.egress`, still refused); only the working tree is
 scanned, not git history; the secret scan is shape-based; package.json is read
 line by line (minified manifests are not inventoried); the UI shows findings
 but not the dependency inventory (the CLI summarises it).
+
+## 9. The full security audit (Frente 2 / 2E)
+
+*Status: **implemented** on `feat/skills-2e-security-audit` (base
+`45554edc7`), pending review and merge. Migration **0173**. `security-audit`
+0.4.0. Design: ADR 0011.*
+
+`POST .../skills/security-audit/run` with `modeId: full-audit` accepts an
+**audit**: a parent run (`tool = ao.security-audit/v1`, `runnerId = composite`)
+that runs `secret-scan`, `dependencies`, `static-code` and `authz-review` as
+**child runs** (`parentRunId` set), in that order, each on its own boundary --
+Docker for the tools (each with its own image approval), the host agent for
+`authz-review` (builtin/trusted only). Each child keeps its own report and
+digest; the parent stores the consolidated `ao.security-audit/v1` report.
+
+| Parent outcome | When |
+| --- | --- |
+| `succeeded` | every composed mode produced a verified report |
+| `partial` (`SKILL_AUDIT_PARTIAL`) | some did and some did not; the report and the run say which, and why |
+| `failed` `SKILL_AUDIT_NO_VERIFIED_RESULT` | none did (no report) |
+| `cancelled` | a person cancelled the audit; the running child ends cancelled, no later child starts |
+| `failed` `SKILL_RUN_INTERRUPTED` / `SKILL_RUN_DAEMON_SHUTDOWN` | as 2B, for the audit and its running child |
+
+Refused before acceptance (4xx, no run): the grant lacks a capability of the
+union (`SKILL_RUN_REFUSED`), or no composed mode could run now
+(`SKILL_AUDIT_NOTHING_RUNNABLE`). A mode that cannot run at its launch
+(`refused_before_start`: e.g. no provider, an untrusted package) or whose mode
+already had a run in flight (`busy`) has no child run and makes the audit partial.
+
+**Surfaces.** Run detail adds `children`; summaries add `parentRunId`; `state`
+adds `partial`. `ao skills run security-audit --mode full-audit` prints the
+consolidated report (completeness and gaps first) and exits non-zero for a
+partial audit; `ao skills runs --project P <audit-id> --export audit.json` writes
+the stored bytes after checking their SHA-256. The project settings panel shows
+completeness first, each mode with its coverage and a link to its own report,
+the consolidated findings with their sources, limitations, and the export
+command; while an audit runs it lists its children.
+
+**Tests.** `skillcatalog/composite_test.go` (composite contract, no widening,
+parent authorization without controls); `migrate_skill_run_audit_test.go` (0173
+invariants, findings preserved, Down); the rebuild inventory exercises 0173
+against real child rows; `service/skills/audit_test.go` (complete, partial on a
+missing provider / unapproved image / invalid agent output, no verified result,
+refused before acceptance, cancel, shutdown, busy mode not adopted, idempotency,
+reconcile, secrets kept out of the consolidated report, composite dry run);
+CLI and UI tests. **E2E** `e2e/skillruns/audit_e2e_test.go` with a real daemon,
+SQLite, Docker and Claude Code:
+
+```
+AO_SKILL_AUDIT_E2E=1 AO_SKILL_RUN_E2E_SHARED_ROOT=<a path the runtime shares> \
+  go test ./e2e/skillruns/ -run SecurityAudit -v -count=1 -timeout 45m
+```
+
+**Debt (2E).** Children run sequentially (one boundary at a time; a parallel
+audit would need a capacity decision); a cancelled audit keeps no consolidated
+report (its children keep theirs); deduplication is deliberately conservative
+(same category, file and line); usage is what each mode reports (the agent's
+tokens and cost, the tools' wall clock) and is not yet in the usage ledger
+(Frente 4); the audit covers the working tree only.

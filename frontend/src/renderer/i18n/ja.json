@@ -2925,5 +2925,12 @@
 	"settings.project.skills.runState.succeeded": "成功",
 	"settings.project.skills.runState.failed": "失敗",
 	"settings.project.skills.runState.refused": "拒否",
-	"settings.project.skills.runState.cancelled": "キャンセル済み"
+	"settings.project.skills.runState.cancelled": "キャンセル済み",
+	"settings.project.skills.runState.partial": "部分的",
+	"settings.project.skills.auditComplete": "完全な監査: {{planned}} モード中 {{verified}} モードが検証済みレポートを作成しました",
+	"settings.project.skills.auditPartial": "部分的な監査: {{planned}} モード中 {{verified}} モードのみが検証済みレポートを作成しました。これは完全な監査ではありません。",
+	"settings.project.skills.auditModes": "モード",
+	"settings.project.skills.auditOpenMode": "レポートを開く",
+	"settings.project.skills.auditChild": "監査 {{id}} の一部",
+	"settings.project.skills.auditExportHint": "検証可能なエクスポート: ao skills runs --project {{project}} {{id}} --export audit.json (SHA-256 {{sha}})"
 }

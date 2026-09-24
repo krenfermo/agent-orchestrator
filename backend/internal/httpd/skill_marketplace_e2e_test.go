@@ -100,13 +100,24 @@ func newMarketplaceWorld(t *testing.T) *marketplaceWorld {
 	}
 }
 
+// shippedVersion is the version the builtin security-audit package ships at.
+// The fixture publishes that package unchanged, so it follows the package
+// rather than pinning a number the next release will move.
+var shippedVersion = func() string {
+	pkg, err := skillcatalog.LoadPackage("../skillcatalog/packages/security-audit")
+	if err != nil {
+		panic(err)
+	}
+	return pkg.Manifest.Version
+}()
+
 // buildFixtureRegistry writes a local registry holding one release of the
 // shipped security-audit package, with digests computed from the bytes it
 // actually wrote.
 func buildFixtureRegistry(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	pkgDir := filepath.Join(root, "packages", "security-audit", "0.3.0")
+	pkgDir := filepath.Join(root, "packages", "security-audit", shippedVersion)
 	if err := skillcatalog.CopyPackage("../skillcatalog/packages/security-audit", pkgDir); err != nil {
 		t.Fatalf("stage package: %v", err)
 	}
@@ -148,7 +159,7 @@ func buildFixtureRegistry(t *testing.T) string {
 			"executionModes":        modes,
 			"compatibility":         map[string]any{"aoMinVersion": pkg.Manifest.Compatibility.AOMinVersion},
 			"publishedAt":           time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
-			"artifactPath":          "packages/security-audit/0.3.0",
+			"artifactPath":          "packages/security-audit/" + shippedVersion,
 		}},
 	}
 	b, err := json.MarshalIndent(index, "", "  ")
@@ -225,12 +236,12 @@ func TestMarketplace_WritesAreGatedOnSettingsManage(t *testing.T) {
 		w.expect(http.MethodPut, "/api/v1/skills/registries/ao-fixture", cookie, configure, http.StatusForbidden)
 		w.expect(http.MethodDelete, "/api/v1/skills/registries/ao-fixture", cookie, "", http.StatusForbidden)
 		w.expect(http.MethodPost, "/api/v1/skills/marketplace/install", cookie,
-			`{"registryId":"ao-fixture","skillId":"security-audit","version":"0.3.0"}`,
+			`{"registryId":"ao-fixture","skillId":"security-audit","version":"`+shippedVersion+`"}`,
 			http.StatusForbidden)
 	}
 	w.expect(http.MethodPut, "/api/v1/skills/registries/ao-fixture", nil, configure, http.StatusUnauthorized)
 	w.expect(http.MethodPost, "/api/v1/skills/marketplace/install", nil,
-		`{"registryId":"ao-fixture","skillId":"security-audit","version":"0.3.0"}`,
+		`{"registryId":"ao-fixture","skillId":"security-audit","version":"`+shippedVersion+`"}`,
 		http.StatusUnauthorized)
 }
 
@@ -308,7 +319,7 @@ func TestMarketplace_SearchOpenInstallEnablesNothing(t *testing.T) {
 	}
 
 	out := w.expect(http.MethodPost, "/api/v1/skills/marketplace/install", owner,
-		`{"registryId":"ao-fixture","skillId":"security-audit","version":"0.3.0"}`,
+		`{"registryId":"ao-fixture","skillId":"security-audit","version":"`+shippedVersion+`"}`,
 		http.StatusCreated)
 	var installed struct {
 		Install struct {
