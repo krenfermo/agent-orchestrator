@@ -2925,5 +2925,12 @@
 	"settings.project.skills.runState.succeeded": "성공",
 	"settings.project.skills.runState.failed": "실패",
 	"settings.project.skills.runState.refused": "거부됨",
-	"settings.project.skills.runState.cancelled": "취소됨"
+	"settings.project.skills.runState.cancelled": "취소됨",
+	"settings.project.skills.runState.partial": "부분",
+	"settings.project.skills.auditComplete": "완전한 감사: {{planned}}개 모드 중 {{verified}}개가 검증된 보고서를 생성했습니다",
+	"settings.project.skills.auditPartial": "부분 감사: {{planned}}개 모드 중 {{verified}}개만 검증된 보고서를 생성했습니다. 완전한 감사가 아닙니다.",
+	"settings.project.skills.auditModes": "모드",
+	"settings.project.skills.auditOpenMode": "보고서 열기",
+	"settings.project.skills.auditChild": "감사 {{id}}의 일부",
+	"settings.project.skills.auditExportHint": "검증 가능한 내보내기: ao skills runs --project {{project}} {{id}} --export audit.json (SHA-256 {{sha}})"
 }

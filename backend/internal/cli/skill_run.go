@@ -122,6 +122,7 @@ type skillRunSummaryDTO struct {
 	ErrorMessage string   `json:"errorMessage"`
 	CreatedAt    string   `json:"createdAt"`
 	DurationMs   *int64   `json:"durationMs"`
+	ParentRunID  string   `json:"parentRunId"`
 }
 
 type skillRunStartDTO struct {
@@ -130,9 +131,10 @@ type skillRunStartDTO struct {
 }
 
 type skillRunDetailDTO struct {
-	Run       skillRunSummaryDTO `json:"run"`
-	Report    json.RawMessage    `json:"report"`
-	Integrity string             `json:"integrity"`
+	Run       skillRunSummaryDTO   `json:"run"`
+	Report    json.RawMessage      `json:"report"`
+	Integrity string               `json:"integrity"`
+	Children  []skillRunSummaryDTO `json:"children"`
 }
 
 type skillRunListDTO struct {
@@ -141,7 +143,7 @@ type skillRunListDTO struct {
 
 func skillRunTerminal(state string) bool {
 	switch state {
-	case "succeeded", "failed", "refused", "cancelled":
+	case "succeeded", "partial", "failed", "refused", "cancelled":
 		return true
 	}
 	return false
@@ -261,6 +263,9 @@ func waitForSkillRun(cmd *cobra.Command, ctx *commandContext, project, runID str
 // success, the reason for anything else -- which is also a non-zero exit.
 func renderSkillRunOutcome(cmd *cobra.Command, detail skillRunDetailDTO) error {
 	r := detail.Run
+	if r.Tool == skillAuditTool && (r.State == "succeeded" || r.State == "partial") {
+		return renderAuditOutcome(cmd, detail)
+	}
 	if r.State != "succeeded" {
 		return fmt.Errorf("run %s ended %s: %s: %s", r.ID, r.State, r.ErrorCode, r.ErrorMessage)
 	}
@@ -285,6 +290,7 @@ func newSkillsRunsCommand(ctx *commandContext) *cobra.Command {
 	var (
 		project string
 		limit   int
+		export  string
 	)
 	cmd := &cobra.Command{
 		Use:   "runs [run-id]",
@@ -309,6 +315,11 @@ func newSkillsRunsCommand(ctx *commandContext) *cobra.Command {
 					_, err := fmt.Fprintln(out, "still in progress")
 					return err
 				}
+				if export != "" {
+					if err := exportSkillRunReport(out, detail, export); err != nil {
+						return err
+					}
+				}
 				return renderSkillRunOutcome(cmd, detail)
 			}
 			path := skillRunPath(project, "runs")
@@ -329,8 +340,11 @@ func newSkillsRunsCommand(ctx *commandContext) *cobra.Command {
 					dur = (time.Duration(*r.DurationMs) * time.Millisecond).String()
 				}
 				detail := r.Summary
-				if r.ErrorCode != "" {
+				if r.ErrorCode != "" && r.State != "partial" {
 					detail = r.ErrorCode + ": " + r.ErrorMessage
+				}
+				if r.ParentRunID != "" {
+					detail = "(part of audit " + r.ParentRunID + ") " + detail
 				}
 				if _, err := fmt.Fprintf(out, "%s  %-9s  %s@%s  %-11s  %s  %s  %s\n",
 					r.ID, r.State, r.SkillID, r.Version, r.ModeID, r.CreatedAt, dur, detail); err != nil {
@@ -342,6 +356,8 @@ func newSkillsRunsCommand(ctx *commandContext) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&project, "project", "", "Project whose runs to show (required)")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum runs to list (1-500; default 50)")
+	cmd.Flags().StringVar(&export, "export", "", "With a run id: write the stored report, byte for byte, to this file "+
+		"after checking it hashes to the recorded SHA-256")
 	return cmd
 }
 

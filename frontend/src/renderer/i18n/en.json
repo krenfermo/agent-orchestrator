@@ -2907,5 +2907,12 @@
 	"settings.project.skills.runState.succeeded": "succeeded",
 	"settings.project.skills.runState.failed": "failed",
 	"settings.project.skills.runState.refused": "refused",
-	"settings.project.skills.runState.cancelled": "cancelled"
+	"settings.project.skills.runState.cancelled": "cancelled",
+	"settings.project.skills.runState.partial": "partial",
+	"settings.project.skills.auditComplete": "Complete audit: {{verified}} of {{planned}} modes produced a verified report",
+	"settings.project.skills.auditPartial": "PARTIAL audit: only {{verified}} of {{planned}} modes produced a verified report. This is not a complete audit.",
+	"settings.project.skills.auditModes": "Modes",
+	"settings.project.skills.auditOpenMode": "Open report",
+	"settings.project.skills.auditChild": "part of audit {{id}}",
+	"settings.project.skills.auditExportHint": "Verifiable export: ao skills runs --project {{project}} {{id}} --export audit.json (SHA-256 {{sha}})"
 }

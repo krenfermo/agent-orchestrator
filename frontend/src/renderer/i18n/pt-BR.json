@@ -2943,5 +2943,12 @@
 	"settings.project.skills.runState.succeeded": "concluída",
 	"settings.project.skills.runState.failed": "falhou",
 	"settings.project.skills.runState.refused": "recusada",
-	"settings.project.skills.runState.cancelled": "cancelada"
+	"settings.project.skills.runState.cancelled": "cancelada",
+	"settings.project.skills.runState.partial": "parcial",
+	"settings.project.skills.auditComplete": "Auditoria completa: {{verified}} de {{planned}} modos produziram um relatório verificado",
+	"settings.project.skills.auditPartial": "Auditoria PARCIAL: apenas {{verified}} de {{planned}} modos produziram um relatório verificado. Não é uma auditoria completa.",
+	"settings.project.skills.auditModes": "Modos",
+	"settings.project.skills.auditOpenMode": "Abrir relatório",
+	"settings.project.skills.auditChild": "parte da auditoria {{id}}",
+	"settings.project.skills.auditExportHint": "Exportação verificável: ao skills runs --project {{project}} {{id}} --export audit.json (SHA-256 {{sha}})"
 }
