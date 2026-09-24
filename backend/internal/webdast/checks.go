@@ -273,11 +273,21 @@ func runBoundarySelfCheck(ctx context.Context, c *client, cfg Config) {
 		cfg.Target.Scheme + "://admin." + cfg.Target.Host + "/",
 	}
 	for _, dest := range offTarget {
-		// A success here returns a non-nil response; onTarget is false so do()
-		// will not have recorded it as blocked. Record that as a runtime error
-		// rather than silently — it means the boundary let something through.
-		if r, _ := c.do(ctx, http.MethodGet, dest, nil); r != nil {
-			c.recordRuntimeError("egress boundary did not block " + redactURL(dest) + fmt.Sprintf(" (status %d)", r.Status))
+		r, _ := c.do(ctx, http.MethodGet, dest, nil)
+		if r == nil {
+			// A transport error against an off-target destination is the proxy
+			// refusing the CONNECT (or the topology refusing the route); do()
+			// already recorded it as a blocked attempt.
+			continue
 		}
+		// A forward proxy denies an off-allowlist HTTP request with a 4xx/5xx
+		// FROM THE PROXY (typically 403). That is the boundary blocking it, not
+		// a reach — record it as blocked. Only a 2xx/3xx means something
+		// actually answered as the destination, which is a boundary FAILURE.
+		if r.Status >= 200 && r.Status < 400 {
+			c.recordRuntimeError("egress boundary did not block " + redactURL(dest) + fmt.Sprintf(" (status %d)", r.Status))
+			continue
+		}
+		c.recordBlocked(dest, fmt.Sprintf("proxy_denied_%d", r.Status))
 	}
 }
