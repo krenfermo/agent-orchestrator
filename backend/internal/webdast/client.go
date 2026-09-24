@@ -128,7 +128,7 @@ func (c *client) do(ctx context.Context, method, absURL string, header http.Head
 	if err := c.reserve(ctx); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, absURL, nil)
+	req, err := http.NewRequestWithContext(ctx, method, absURL, http.NoBody)
 	if err != nil {
 		return nil, err
 	}

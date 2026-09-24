@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
@@ -47,7 +48,7 @@ func main() {
 		}
 		// A flagless session cookie whose value is a fake secret: the checker
 		// quotes the Set-Cookie in its finding, and the daemon redacts it.
-		http.SetCookie(w, &http.Cookie{Name: "session", Value: "AKIAIOSFODNN7EXAMPLE"})
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "AKIAIOSFODNN7EXAMPLE"}) //nolint:gosec // deliberately-fake example value in a vulnerable test fixture
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
@@ -56,7 +57,7 @@ func main() {
 	})
 
 	fmt.Fprintf(os.Stderr, "fixture: listening on %s\n", *addr)
-	srv := &http.Server{Addr: *addr, Handler: mux}
+	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintf(os.Stderr, "fixture: %v\n", err)
 		os.Exit(1)

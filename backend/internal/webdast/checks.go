@@ -28,13 +28,6 @@ const (
 	checkBoundary        checkName = "egress-boundary-selfcheck"
 )
 
-// allChecks is the order checks run in. Boundary self-check runs last so its
-// deliberately-blocked attempts do not consume budget the real checks need.
-var allChecks = []checkName{
-	checkSecurityHeaders, checkCookies, checkCORS, checkHTTPMethods,
-	checkRedirects, checkSensitivePaths, checkInfoDisclosure, checkBoundary,
-}
-
 // notAttempted names what this checker deliberately does NOT do in 2F, so an
 // empty findings list is never read as a clean bill of health.
 var notAttempted = []string{
@@ -60,7 +53,7 @@ func runChecks(ctx context.Context, c *client, cfg Config) ([]Finding, []checkNa
 	root, _ := c.get(ctx, base)
 	add(checkSecurityHeaders, checkSecurityHeadersOn(cfg, base, root))
 	add(checkCookies, checkCookiesOn(base, root))
-	add(checkCORS, checkCORSOn(ctx, c, cfg, base))
+	add(checkCORS, checkCORSOn(ctx, c, base))
 	add(checkHTTPMethods, checkMethodsOn(ctx, c, base))
 	add(checkRedirects, checkRedirectsOn(ctx, c, cfg))
 	add(checkSensitivePaths, checkSensitiveOn(ctx, c, cfg))
@@ -150,7 +143,7 @@ func cookieName(setCookie string) string {
 	return "(unnamed)"
 }
 
-func checkCORSOn(ctx context.Context, c *client, cfg Config, endpoint string) []Finding {
+func checkCORSOn(ctx context.Context, c *client, endpoint string) []Finding {
 	probeOrigin := "https://evil.example"
 	r, err := c.do(ctx, http.MethodGet, endpoint, http.Header{"Origin": []string{probeOrigin}})
 	if err != nil || r == nil {
