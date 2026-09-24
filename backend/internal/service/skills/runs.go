@@ -19,6 +19,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillagent"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillimage"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillreport"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
@@ -411,6 +412,17 @@ func (s *Service) execute(ctx context.Context, runID string, prep preparedRun) {
 func (s *Service) finishUnsuccessful(ctx context.Context, runID string, state store.SkillRunState,
 	code, message string, image store.SkillRunImage,
 ) {
+	// The stored error message is the last sink before a run's diagnostics
+	// become durable. Most callers pass an AO-authored constant, but a few
+	// (the non-agent tool paths -- static scan, active pentest) pass an
+	// executor error that has quoted the tool's own stderr, and a checker's
+	// stderr could, in principle, echo a credential from a target response.
+	// The agent path already redacts its error with the harvested-literal net;
+	// here we run the shape net over every failure message as a storage-layer
+	// backstop. It is idempotent over already-redacted text and never rewrites
+	// AO's diagnostic prose, whose shapes match nothing.
+	message, _ = skillreport.NewRedactor(nil).String(message)
+	message = truncate(message, 2000)
 	if _, err := s.runs.store.FinishSkillRunUnsuccessful(ctx, runID, store.SkillRunFailure{
 		State: state, Image: image, ErrorCode: code, ErrorMessage: message, FinishedAt: s.now(),
 	}); err != nil {
