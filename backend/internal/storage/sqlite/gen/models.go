@@ -1142,6 +1142,7 @@ type SkillRun struct {
 	StartedAt        sql.NullTime
 	FinishedAt       sql.NullTime
 	UpdatedAt        time.Time
+	ParentRunID      sql.NullString
 }
 
 type SkillRunFinding struct {

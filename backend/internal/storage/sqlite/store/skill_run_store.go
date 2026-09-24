@@ -26,6 +26,10 @@ const (
 	SkillRunQueued    SkillRunState = "queued"
 	SkillRunRunning   SkillRunState = "running"
 	SkillRunSucceeded SkillRunState = "succeeded"
+	// SkillRunPartial is an audit (migration 0173) that consolidated a report
+	// while not every mode it planned produced a verified result. It carries a
+	// report and a reason, and it is never the same thing as succeeded.
+	SkillRunPartial   SkillRunState = "partial"
 	SkillRunFailed    SkillRunState = "failed"
 	SkillRunRefused   SkillRunState = "refused"
 	SkillRunCancelled SkillRunState = "cancelled"
@@ -34,7 +38,7 @@ const (
 // Terminal reports whether no further transition is possible.
 func (s SkillRunState) Terminal() bool {
 	switch s {
-	case SkillRunSucceeded, SkillRunFailed, SkillRunRefused, SkillRunCancelled:
+	case SkillRunSucceeded, SkillRunPartial, SkillRunFailed, SkillRunRefused, SkillRunCancelled:
 		return true
 	}
 	return false
@@ -74,6 +78,9 @@ type SkillRunRecord struct {
 	StartedAt        *time.Time
 	FinishedAt       *time.Time
 	UpdatedAt        time.Time
+	// ParentRunID is the audit this run is a child of (migration 0173); empty
+	// for a run that is not part of one.
+	ParentRunID string
 }
 
 // SkillRunFindingRecord is one persisted finding.
@@ -185,6 +192,7 @@ func (s *Store) CreateSkillRun(ctx context.Context, rec SkillRunRecord) (SkillRu
 			OwnerInstance:    rec.OwnerInstance,
 			CreatedAt:        rec.CreatedAt,
 			UpdatedAt:        rec.CreatedAt,
+			ParentRunID:      sql.NullString{String: rec.ParentRunID, Valid: rec.ParentRunID != ""},
 		}); err != nil {
 			return err
 		}
@@ -312,6 +320,77 @@ func (s *Store) FinishSkillRunSucceeded(ctx context.Context, id string, fin Skil
 	return won, nil
 }
 
+// SkillRunPartialResult is how an audit ends with a report that does not cover
+// every mode it planned: the report, its findings and the reason, in one
+// transaction.
+type SkillRunPartialResult struct {
+	Summary      string
+	ReportJSON   []byte
+	ReportSHA256 string
+	Findings     []SkillRunFindingRecord
+	ErrorCode    string
+	ErrorMessage string
+	FinishedAt   time.Time
+}
+
+// FinishSkillRunPartial moves a running audit to partial and records its
+// consolidated findings, in one transaction. It loses (false) when the run is
+// not running.
+func (s *Store) FinishSkillRunPartial(ctx context.Context, id string, fin SkillRunPartialResult) (bool, error) {
+	if strings.TrimSpace(fin.ErrorCode) == "" {
+		return false, fmt.Errorf("finish skill run partial: a partial run must say why")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	won := false
+	err := s.inTx(ctx, "finish skill run partial", func(q *gen.Queries) error {
+		n, err := q.FinishSkillRunPartial(ctx, gen.FinishSkillRunPartialParams{
+			Summary:      fin.Summary,
+			FindingCount: int64(len(fin.Findings)),
+			ReportJson:   sql.NullString{String: string(fin.ReportJSON), Valid: true},
+			ReportSha256: fin.ReportSHA256,
+			ErrorCode:    fin.ErrorCode,
+			ErrorMessage: fin.ErrorMessage,
+			FinishedAt:   sql.NullTime{Time: fin.FinishedAt, Valid: true},
+			ID:           id,
+		})
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return nil
+		}
+		for i, f := range fin.Findings {
+			if err := q.InsertSkillRunFinding(ctx, gen.InsertSkillRunFindingParams{
+				RunID: id, Ordinal: int64(i), RuleID: f.RuleID, Severity: f.Severity,
+				Category: f.Category, Title: f.Title, Path: f.Path, Line: int64(f.Line),
+				Recommendation: f.Recommendation, Confidence: f.Confidence,
+			}); err != nil {
+				return err
+			}
+		}
+		won = true
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("finish skill run partial: %w", err)
+	}
+	return won, nil
+}
+
+// ListSkillRunChildren returns the child runs of one audit, oldest first.
+func (s *Store) ListSkillRunChildren(ctx context.Context, parentID string) ([]SkillRunRecord, error) {
+	rows, err := s.qr.ListSkillRunChildren(ctx, sql.NullString{String: parentID, Valid: true})
+	if err != nil {
+		return nil, fmt.Errorf("list skill run children: %w", err)
+	}
+	out := make([]SkillRunRecord, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, skillRunFromRow(r))
+	}
+	return out, nil
+}
+
 // FinishSkillRunUnsuccessful moves a queued or running run to failed, refused or
 // cancelled. It loses (false) when the run is already terminal.
 func (s *Store) FinishSkillRunUnsuccessful(ctx context.Context, id string, fin SkillRunFailure) (bool, error) {
@@ -382,6 +461,7 @@ func skillRunFromRow(r gen.SkillRun) SkillRunRecord {
 		Truncated: r.Truncated == 1, ReportSHA256: r.ReportSha256,
 		ErrorCode: r.ErrorCode, ErrorMessage: r.ErrorMessage,
 		CancelRequested: r.CancelRequested == 1, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+		ParentRunID: r.ParentRunID.String,
 	}
 	if r.ReportJson.Valid {
 		rec.ReportJSON = []byte(r.ReportJson.String)
