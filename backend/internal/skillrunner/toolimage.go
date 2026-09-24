@@ -151,6 +151,9 @@ func (r *Runner) resolveProbeContract(ctx context.Context, tool Tool) (ToolContr
 	defer cancel()
 	out, err := r.runner.Output(ctx, r.runtime.Binary, "image", "inspect", contract.BaseImage, "--format", "{{.Id}}")
 	if err != nil {
+		if errors.Is(err, ErrRuntimeTimeout) || errors.Is(err, ErrCommandAbandoned) {
+			return ToolContract{}, fmt.Errorf("could not ask the runtime for base image %s: %w", contract.BaseImage, err)
+		}
 		return ToolContract{}, fmt.Errorf("%w: base image %s is not present on this host, "+
 			"and AO does not pull: %v", ErrRuntimeUnavailable, contract.BaseImage, err)
 	}

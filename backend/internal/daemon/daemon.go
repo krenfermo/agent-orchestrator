@@ -322,7 +322,10 @@ func RunWithConfig(cfg config.Config) error {
 	// A bounded context, not the caller's: a wedged container daemon must make
 	// the runner report unavailable, not hold up the boot.
 	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 20*time.Second)
-	skillRunner := skillrunner.New(probeCtx)
+	// Every container the runner starts carries this installation's id, which
+	// is what lets a sweep after a restart remove this installation's leftovers
+	// and nothing another AO (or anything else) on the same runtime started.
+	skillRunner := skillrunner.New(probeCtx).WithOwner(cfg.InstallationID)
 	cancelProbe()
 	// The trust root gets the runner as its inspector: an approval is refused
 	// unless this host can show AO the exact bytes under that digest. Without
@@ -365,6 +368,10 @@ func RunWithConfig(cfg config.Config) error {
 	} else if n > 0 {
 		log.Warn("skills: ended runs interrupted by a previous daemon", "count", n)
 	}
+	// Containers whose removal the runtime did not confirm -- a run's, or a
+	// probe's -- are retried until it does. The first sweep runs immediately,
+	// in the background, so a wedged runtime cannot hold up the boot.
+	skillsSvc.StartContainerSweeper(2 * time.Minute)
 	// Phase 10: the registry / marketplace. It ships with NO registry
 	// configured and no default endpoint, so an installation that configures
 	// nothing can install nothing from one.

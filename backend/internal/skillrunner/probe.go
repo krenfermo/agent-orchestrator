@@ -20,7 +20,9 @@ var ErrRuntimeUnavailable = errors.New("skillrunner: no usable container runtime
 // probeTimeout bounds every probe call. A wedged docker daemon must make the
 // runner report unavailable, not hang the caller — the same reason
 // dockerreap.reapTimeout exists.
-const probeTimeout = 15 * time.Second
+//
+// A var only so tests can shrink it; nothing in the daemon changes it.
+var probeTimeout = 15 * time.Second
 
 // Runtime is the container CLI this package drives. Only the docker CLI is
 // implemented; podman and nerdctl are compatible enough that adding them is a
@@ -55,12 +57,19 @@ type commandRunner interface {
 
 type execRunner struct{}
 
+// Output runs one CLI call through runBounded: a deadline or cancel kills the
+// CLI's process group, and a process that will not die is abandoned rather
+// than waited on, so no caller is held by a wedged runtime.
 func (execRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.Command(name, args...) //nolint:gosec,noctx // name is the probed runtime; runBounded enforces ctx.
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := runBounded(ctx, cmd); err != nil {
+		if errors.Is(err, ErrCommandAbandoned) {
+			// The abandoned process may still write to the buffers.
+			return nil, err
+		}
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w: %s",
 			name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}

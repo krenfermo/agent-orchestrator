@@ -177,6 +177,11 @@ func (r *Runner) effectiveDigest(ctx context.Context, digest string) (string, er
 	defer cancel()
 	out, err := r.runner.Output(ctx, r.runtime.Binary, "image", "inspect", digest, "--format", "{{.Id}}")
 	if err != nil {
+		if errors.Is(err, ErrRuntimeTimeout) || errors.Is(err, ErrCommandAbandoned) {
+			// A stuck runtime has not said the image is absent; refusing the
+			// approval for it would send an operator after the wrong problem.
+			return "", fmt.Errorf("could not ask the runtime what it holds under %s: %w", digest, err)
+		}
 		return "", fmt.Errorf("%w: %s is not present on this host, and AO does not pull: %w",
 			ErrImageNotApproved, digest, err)
 	}

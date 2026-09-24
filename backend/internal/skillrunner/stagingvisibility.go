@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -157,7 +158,23 @@ func within(child, parent string) bool {
 // thing an operator has to go and change.
 //
 // The sentinel is removed whether or not the probe succeeds.
+//
+// Each probe container is named and labelled as AO's (and as runID's, when the
+// probe is part of a durable run). A probe that does not finish cleanly --
+// timed out, cancelled, or the CLI failed -- has its container removed and the
+// removal confirmed; one that cannot be confirmed is recorded as pending, and
+// SweepOwned or ReapRun removes it later. This is the incident's leak: a probe
+// blocked in `cat` on a stalled VM share outlived the killed `docker run` that
+// started it, unnamed and unlabelled by run, so nothing could find it.
+//
+// A probe that times out is ErrRuntimeTimeout, not ErrStagingNotVisible: a
+// stuck runtime says nothing about whether the path is shared, and sending an
+// operator to edit the VM's share list for it would be the wrong remedy.
 func (r *Runner) VerifyStagingVisible(ctx context.Context, root string, image ApprovedImage) error {
+	return r.verifyStagingVisible(ctx, root, image, "")
+}
+
+func (r *Runner) verifyStagingVisible(ctx context.Context, root string, image ApprovedImage, runID string) error {
 	if !r.Available() {
 		return fmt.Errorf("%w: %s", ErrRuntimeUnavailable, r.Unavailable())
 	}
@@ -201,18 +218,26 @@ func (r *Runner) VerifyStagingVisible(ctx context.Context, root string, image Ap
 			}
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		name := "ao-skillprobe-" + randomToken()
 		// The same confinement a real run gets. The probe is not a reason to
 		// relax anything: no network, non-root, read-only rootfs, no caps.
-		out, err := r.runner.Output(probeCtx, r.runtime.Binary,
-			"run", "--rm", "--label", RunLabel+"=1",
+		args := append([]string{"run", "--rm", "--name", name}, r.ownerArgs(kindProbe, runID)...)
+		args = append(args,
 			"--pull=never", "--network", "none", "--user", nobodyUser,
 			"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 			"-v", root+":/probe:ro", "-w", "/probe",
 			image.Ref(), "sh", "-c", "cat /probe/"+sentinelName+" 2>/dev/null || true")
+		r.track(name, runID)
+		out, err := r.runner.Output(probeCtx, r.runtime.Binary, args...)
 		cancel()
 		if err != nil {
-			return fmt.Errorf("%w: %q: the probe container did not run: %v", ErrStagingNotVisible, root, err)
+			// Killing the CLI does not stop the container. Remove it, and
+			// confirm it, whatever ctx allows.
+			cleanup := r.removeContainer(context.WithoutCancel(ctx), name, runID)
+			return probeFailure(ctx, root, name, cleanup, err)
 		}
+		// --rm removed it; nothing is left to track.
+		r.untrack(name)
 		got = strings.TrimSpace(string(out))
 		if got == token {
 			return nil
@@ -230,6 +255,28 @@ func (r *Runner) VerifyStagingVisible(ctx context.Context, root string, image Ap
 	}
 	return fmt.Errorf("%w: %q returned unexpected content through the runtime; "+
 		"the mount is not showing the bytes AO wrote", ErrStagingNotVisible, root)
+}
+
+// probeFailure names why a visibility probe did not answer. A cancel is the
+// caller's; a timeout or an abandoned CLI is the runtime being stuck
+// (ErrRuntimeTimeout); anything else is the probe container failing to run,
+// which is what ErrStagingNotVisible has always meant here.
+func probeFailure(ctx context.Context, root, name string, cleanup CleanupStatus, err error) error {
+	left := ""
+	if cleanup != CleanupConfirmed {
+		left = fmt.Sprintf("; its container %s could not be confirmed removed and is recorded for cleanup", name)
+	}
+	switch {
+	case ctx.Err() != nil:
+		return fmt.Errorf("the staging visibility probe on %q was stopped%s: %w", root, left, ctx.Err())
+	case errors.Is(err, ErrRuntimeTimeout), errors.Is(err, ErrCommandAbandoned):
+		return fmt.Errorf("%w: the staging visibility probe on %q did not finish within %s; "+
+			"the container runtime is stuck (on a VM-backed runtime, often its file share), which says "+
+			"nothing about whether the path is shared%s: %w",
+			ErrRuntimeTimeout, root, probeTimeout, left, err)
+	default:
+		return fmt.Errorf("%w: %q: the probe container did not run%s: %w", ErrStagingNotVisible, root, left, err)
+	}
 }
 
 // stagedInputsDigest is AO's fingerprint of what it staged.

@@ -86,6 +86,12 @@ const (
 	RunErrCancelled   = "SKILL_RUN_CANCELLED"
 	RunErrShutdown    = "SKILL_RUN_DAEMON_SHUTDOWN"
 	RunErrInvalid     = "SKILL_RUN_OUTPUT_INVALID"
+	// RunErrRuntimeTimeout is the container runtime not answering within the
+	// limit AO set for one operation (a probe, an inspect, a teardown). It is a
+	// failure, not a refusal: nothing about the policy was wrong.
+	RunErrRuntimeTimeout = "SKILL_RUNTIME_TIMEOUT"
+	// RunErrTimedOut is a run that used its whole wall clock.
+	RunErrTimedOut = "SKILL_RUN_TIMED_OUT"
 )
 
 // DefaultRunListLimit bounds a history listing.
@@ -113,6 +119,17 @@ type RunStore interface {
 type RunReaper interface {
 	ReapRun(ctx context.Context, runID, projectPath, stagingOverride string) (skillrunner.ReapReport, error)
 }
+
+// ContainerSweeper is the part of the runner that knows which of its
+// containers are not confirmed removed, and retries them. The real runner
+// implements it; a reaper without it simply has nothing pending.
+type ContainerSweeper interface {
+	SweepOwned(ctx context.Context, live func(runID string) bool) (skillrunner.SweepReport, error)
+	PendingCleanupFor(runID string) bool
+}
+
+// sweepTimeout bounds one sweep, whatever the runtime does.
+const sweepTimeout = time.Minute
 
 // runEngine is the durable-run state held by a Service.
 type runEngine struct {
@@ -321,10 +338,10 @@ func (s *Service) execute(ctx context.Context, runID string, prep preparedRun) {
 		switch {
 		case s.cancelWasRequested(runID):
 			s.finishUnsuccessful(wctx, runID, store.SkillRunCancelled, RunErrCancelled,
-				"cancelled while running; the container was stopped and removed", image)
+				"cancelled while running; "+s.containerFate(runID), image)
 		case e.base.Err() != nil:
 			s.finishUnsuccessful(wctx, runID, store.SkillRunFailed, RunErrShutdown,
-				"the daemon shut down while the run was executing; the container was stopped and removed", image)
+				"the daemon shut down while the run was executing; "+s.containerFate(runID), image)
 		default:
 			state, code := classifyExecutionError(err)
 			if state == store.SkillRunRefused {
@@ -576,6 +593,10 @@ func (s *Service) ReconcileRuns(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	ended := 0
+	// Once the runtime has timed out on one reap, asking again for every other
+	// run would only multiply the wait at boot. Their containers carry this
+	// installation's OwnerLabel and their run id, and the sweeper retries.
+	runtimeStuck := false
 	for _, rec := range active {
 		if rec.OwnerInstance == e.owner {
 			continue
@@ -599,10 +620,19 @@ func (s *Service) ReconcileRuns(ctx context.Context) (int, error) {
 				e.log.Info("skills: removed an interrupted agent run's leftovers", "run", rec.ID,
 					"agentStopped", killed, "staging", removed != "")
 			}
+		case runtimeStuck:
+			e.log.Warn("skills: not reaping an interrupted run now; the container runtime is not answering "+
+				"and the sweeper will retry", "run", rec.ID)
 		case e.reaper != nil && skillrunner.ValidRunID(rec.ID):
 			rep, rerr := e.reaper.ReapRun(ctx, rec.ID, projectPath, s.stagingRoot)
+			if errors.Is(rerr, skillrunner.ErrRuntimeTimeout) || errors.Is(rerr, skillrunner.ErrCommandAbandoned) {
+				runtimeStuck = true
+			}
 			if rerr != nil {
-				e.log.Warn("skills: could not reap an interrupted run's leftovers", "run", rec.ID, "err", rerr)
+				// A pending container stays recorded (and labelled with this
+				// run's id), and the sweeper retries it; the run still ends.
+				e.log.Warn("skills: could not reap an interrupted run's leftovers", "run", rec.ID,
+					"removed", len(rep.ContainersRemoved), "pending", rep.ContainersPending, "err", rerr)
 			} else if len(rep.ContainersRemoved) > 0 || rep.StagingRemoved != "" {
 				e.log.Info("skills: removed an interrupted run's leftovers", "run", rec.ID,
 					"containers", len(rep.ContainersRemoved), "staging", rep.StagingRemoved != "")
@@ -622,6 +652,80 @@ func (s *Service) ReconcileRuns(ctx context.Context) (int, error) {
 		}
 	}
 	return ended, nil
+}
+
+// SweepContainers retries every container removal the runner has not
+// confirmed and removes this installation's leftover containers whose run is
+// not executing here. It is bounded by sweepTimeout and never touches a
+// container the runner cannot prove is this installation's.
+func (s *Service) SweepContainers(ctx context.Context) {
+	if s.runs == nil {
+		return
+	}
+	e := s.runs
+	sw, ok := e.reaper.(ContainerSweeper)
+	if !ok || sw == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, sweepTimeout)
+	defer cancel()
+	rep, err := sw.SweepOwned(ctx, e.isLive)
+	if len(rep.Removed) > 0 {
+		e.log.Info("skills: removed leftover skill containers", "containers", rep.Removed)
+	}
+	if err != nil {
+		e.log.Warn("skills: some skill containers are not confirmed removed; they stay recorded and are retried",
+			"pending", rep.Pending, "err", err)
+	}
+}
+
+// StartContainerSweeper runs SweepContainers every interval until the daemon
+// shuts down. The sweep is what turns "the runtime did not confirm the
+// removal" into a removal once the runtime answers again.
+func (s *Service) StartContainerSweeper(interval time.Duration) {
+	if s.runs == nil || interval <= 0 {
+		return
+	}
+	e := s.runs
+	if _, ok := e.reaper.(ContainerSweeper); !ok {
+		return
+	}
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		// The first sweep runs now, off the boot path: a wedged runtime must
+		// not hold up the daemon, and leftovers from a previous instance are
+		// worth removing before the first interval.
+		s.SweepContainers(e.base)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-e.base.Done():
+				return
+			case <-t.C:
+				s.SweepContainers(e.base)
+			}
+		}
+	}()
+}
+
+// isLive reports whether a run is executing in this daemon; its containers are
+// not swept.
+func (e *runEngine) isLive(runID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.inflight[runID]
+	return ok
+}
+
+// containerFate says what AO knows about a stopped run's container: removed,
+// or recorded for cleanup because the runtime did not confirm it.
+func (s *Service) containerFate(runID string) string {
+	if sw, ok := s.runs.reaper.(ContainerSweeper); ok && sw != nil && sw.PendingCleanupFor(runID) {
+		return "the container was stopped; the runtime did not confirm its removal, so it is recorded for cleanup and will be retried"
+	}
+	return "the container was stopped and removed"
 }
 
 // CloseRuns stops accepting runs, cancels every in-flight executor (each
