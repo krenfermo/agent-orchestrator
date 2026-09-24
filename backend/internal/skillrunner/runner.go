@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillcatalog"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillegress/proxybin"
+	"github.com/aoagents/agent-orchestrator/backend/internal/webdast/webdastbin"
 )
 
 // RunLabel marks every container this package starts, so an operator (and the
@@ -204,6 +206,11 @@ type Runner struct {
 	owner string
 	// cleanup tracks containers in flight and removals not yet confirmed.
 	cleanup cleanupState
+	// proxyStore and checkerStore override the embedded artifact stores for the
+	// active-pentest path. Nil means use the embedded stores; the live tests set
+	// them to test-built binaries via WithArtifactStores (pentestrun.go).
+	proxyStore   *proxybin.Store
+	checkerStore *webdastbin.Store
 }
 
 // WithWritableWorkspace records that AO can give a run a writable workspace on
