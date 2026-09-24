@@ -177,6 +177,7 @@ var shippedMigrations = map[int64]string{
 	171: "0171_workflow_attempt_error_class_drift.sql",
 	172: "0172_skill_runs.sql",
 	173: "0173_skill_run_audit.sql",
+	174: "0174_skill_pentest_authorizations.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they
