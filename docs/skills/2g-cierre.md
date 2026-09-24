@@ -38,12 +38,20 @@ reportes/provenance/secretos, y migraciones/versionado. **P0 = ninguno.**
 - frontend: 2G no cambia código de frontend; i18n verificado
 - build por defecto (sin tags) fail-closed ✓ · build con tags compila + E2E pasa ✓
 
-## Pendiente consciente
+## ETAPA 12 — E2E con Claude REAL (ejecutado)
 
-- **ETAPA 12 — E2E de sistema 2A→2F con Claude REAL en `authz-review`:** los modos
-  de agente se prueban con un `fakeAgent` determinista en ECC; no hay test que
-  invoque Claude real. Re-ejecutarlo implica gasto real de API + runner de agente
-  configurado. Los modos **tool** (incl. active-pentest con embeds reales) están
-  probados en vivo en 2G; el camino de agente no lo cambia 2G salvo el chokepoint
-  de redacción (ya probado). Decisión de si ejecutarlo antes del cierre formal:
-  del usuario.
+Por decisión del usuario se ejecutó el E2E de `authz-review` (modo agente) contra
+un Claude real sobre un checkout sintético (`run_agent_live_test.go`), acotado
+(timeout 4m, `MaxBudgetUSD` 2.0; skip si no hay agente). Resultado en vivo:
+`state=succeeded`, 3 hallazgos (SQLi, IDOR/authz, credencial hardcodeada
+**nombrada sin citar el valor**), `integrity=verified`, reporte válido
+`findings.v1`, **canario `ghp_` no filtrado** (ni el valor ni un prefijo ≥16
+chars llegan al almacenamiento), sin residuos de staging. Los modos **tool**
+(incl. active-pentest con embeds reales) ya estaban probados en vivo (ETAPA 3).
+`commit ec7f7660e`.
+
+## Estado de cierre
+
+Sin P0/P1 pendientes. Todos los gates de seguridad verificados. 2A–2F integradas
+en ECC; 2G endurecido y probado en vivo (tool + agente). Producción intacta en
+goose 174. Rama `feat/2g-skills-hardening` lista, sin merge/push.
