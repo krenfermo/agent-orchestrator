@@ -19,11 +19,9 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter"
-	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter/wfrouter"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/integration"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
-	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory/wfdispatch"
 	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	durablememory "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
@@ -313,7 +311,9 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// P5-A phase 2C: workers launch through their own launcher now, so
 		// they get an identity of their own the way reviewers already do.
 		// Spawner above stays wired: it is still the transport this launcher
-		// calls, and every other dispatch site keeps using it directly.
+		// calls. The raw session manager here is only a placeholder --
+		// instrumentAgentDispatch below re-binds the launcher to the DECORATED
+		// Spawner, which is how a worker receives project context.
 		WorkerLauncher: &workflowWorkerLauncher{
 			spawner:     sessionMgr,
 			dataDir:     cfg.DataDir,
@@ -489,38 +489,21 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// not also blind the board.
 		TaskWorktreeRecords: store,
 	}
-	// Phase 0 project-memory baseline: when enabled, every agent dispatch
-	// surface above is wrapped by an observer that records what that dispatch
-	// had available and what it consumed. Off by default, and a wrapper never
-	// changes what it wraps -- see internal/observe/projectmemory.
-	deps = wfdispatch.Instrument(deps, projectMemoryBaselineRecorder(log), log)
-	// Role-aware context routing: when enabled, the surfaces where AO itself
-	// assembles a context payload send a bounded, role-budgeted selection
-	// instead of everything they hold -- the planner's documents, a worker
-	// spawn's pre-fetched issue context (which is also how both Repair Agents
-	// are dispatched), and, since P2-A, the reviewer's standing system prompt,
-	// which had no producer at all before that checkpoint.
+	// Every decorator that observes or shapes what an agent is told, applied in
+	// one step. Baseline evidence (AO_PROJECT_MEMORY_BASELINE), the role-aware
+	// context router (AO_CONTEXT_ROUTER) and project memory (AO_MEMORY_MODE)
+	// are each a no-op when switched off -- which is the default for all three
+	// -- so an unconfigured daemon runs the undecorated pipeline.
 	//
-	// `store` is passed as the durable project-memory repository, which is what
-	// gives the router real memory to route rather than an empty source.
-	//
-	// Off by default -- a disabled flag yields a nil router, and
-	// wfrouter.Instrument then hands the dependencies back untouched, so
-	// provider adapters keep receiving today's full context.
-	deps = wfrouter.Instrument(deps, contextRouterFor(log, store, memory), log)
-	// P2-B: project memory as part of the normal cycle. When AO_MEMORY_MODE is
-	// enabled this wrapper performs the lifecycle freshness check (coalesced
-	// across the four roles that would otherwise each trigger one) and attaches
-	// a bounded, role-budgeted pack, deduplicated against the context the
-	// dispatch was going to send anyway.
-	//
-	// It is installed AFTER the router on purpose. The router budgets what a
-	// dispatch already holds; this layer decides what memory to add to it, and
-	// running last means it sees the payload as it will actually be sent.
-	//
-	// Off by default -- a disabled mode yields a nil provisioner, and
-	// wfmemory.Instrument then hands the dependencies back untouched.
-	deps = wfmemory.Instrument(deps, memoryProvisionerFor(memoryProvisioning), log)
+	// Frente 3 / 3B: this step also re-binds the worker launcher to the
+	// DECORATED Spawner. Before it, the launcher above held the raw session
+	// manager, so workers and both Repair Agents bypassed all three decorators
+	// (see dispatch_instrumentation.go).
+	deps = instrumentAgentDispatch(deps,
+		projectMemoryBaselineRecorder(log),
+		contextRouterFor(log, store, memory),
+		memoryProvisionerFor(memoryProvisioning),
+		log)
 	coordinator := workflowcore.New(deps)
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }
