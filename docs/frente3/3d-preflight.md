@@ -103,3 +103,77 @@ Harness: `~/.ao/scratch/frente3/tools/preflight3d.py`.
 - **Sesiones.** 16 IDs de sesión nativos, 16 únicos, y 0 "already in use".
 - **Contexto externo.** `off` en ambos brazos. El brazo `assisted` recibe solo el pack de memoria, sin contexto externo.
 - **Producción.** Mismo mtime, mismo tamaño y goose 174 antes y después.
+
+## Ciclo 2 (tras la revisión de Codex: NO-GO por un P1)
+
+### P1: hueco entre el claim durable y el registro local
+
+**Hallazgo de Codex.**
+
+- `reviewInFlight.begin` se llamaba **después** de que `ClaimWorkflowOutboxDispatch` volviera.
+- Entre el CAS (la fila ya se lee `dispatched` con la generación nueva) y el registro, una pasada concurrente veía el claim sin marca y lo trataba como abandonado.
+- Además, el mapa guardaba una sola generación por entrada.
+
+**Diseño final, derivado de las invariantes de AO.**
+
+- La generación la acuña el registro durable `AUTHORIZED` de cada dispatch **antes** de disputar la fila (`recordReviewDispatchAuthorized` devuelve `wfc-<id>`). Por eso cada aspirante tiene una clave (entrada, generación) propia y única.
+- La clave se **reserva antes del CAS** y se suelta cuando el dispatch termina, incluido el caso de CAS perdido:
+  - el ganador está vivo desde antes de que la fila pueda leerse `dispatched`;
+  - la reserva de un perdedor nombra una generación que la fila nunca tiene, así que no protege nada;
+  - N y N+1 nunca comparten clave;
+  - la comprobación de recuperación usa la generación que la fila durable nombra como dueña.
+- Se conservan:
+  - la semántica CAS y de generación;
+  - la propiedad ownership-conditioned de liberar y fallar;
+  - la recuperación tras reinicio (conjunto vacío);
+  - un solo lanzamiento.
+- No hay sleeps, ventanas ni reintentos.
+
+**Tests** (`review_dispatch_inflight_test.go`, `review_dispatch_inflight_internal_test.go`):
+
+| Test | Qué demuestra |
+|---|---|
+| `...DurableClaimBeforeLocalRegistrationIsLive` | Pasada concurrente con el claim ya durable y el dispatch sin volver del CAS: no hay ausencia, ni ambigüedad, ni liberación del claim, ni lanzamiento concurrente; al final, un solo reviewer. Es la reproducción de Codex con aserciones completas |
+| `...InProgressIsNotDeclaredAbsentByAConcurrentPass` | Pasada concurrente dentro de la ventana de lanzamiento |
+| `...RecoveryAfterRestartIsUnchanged` | Un Coordinator ajeno (reinicio) sigue recuperando |
+| `...InFlightKeysAreGenerationScoped` | N y N+1 no se protegen, borran ni ocultan entre sí, y un fin repetido de N es inocuo |
+| `...ReservationDoesNotCoverAReclaimedGeneration` | Con N en vuelo, la fila pasa a N+1 ajena: la pasada evalúa N+1 por sus hechos y nunca hay dos reviewers |
+
+**Mutaciones** (`~/.ao/scratch/frente3/reviews/3d-preflight/cycle2/`):
+
+| Mutación | Resultado |
+|---|---|
+| **M1**: registro después del CAS (el diseño refutado) | falla `...DurableClaimBeforeLocalRegistrationIsLive` |
+| **M2**: sin la comprobación de claim vivo | fallan `...InProgress...` (2 reviewers) y `...DurableClaim...` |
+| Control (con el fix) | 5/5 PASS |
+
+### Fuga del brazo al agente (encontrada en este ciclo)
+
+- El servidor tmux de AO hereda el entorno del daemon, así que `AO_MEMORY_MODE=assisted` llegaba al shell del worker y del reviewer.
+- Ahora `AO_MEMORY_MODE`, `AO_MEMORY_EXTERNAL` y `AO_CONTEXT_ROUTER` se retienen junto con las variables de agente anidado (`sanitizeInheritedEnv`), porque solo las lee el daemon al componerse.
+- El harness comprueba con `tmux show-environment -g` que no aparecen en el socket del run.
+
+### Inventario de estado del provider
+
+| Estado | Claude Code | Codex | Tratamiento en 3D |
+|---|---|---|---|
+| HOME | compartido | compartido | constante entre brazos (no se aísla: rompería la autenticación) |
+| Autenticación | keychain | `~/.codex/auth.json` | nunca se lee ni se copia; solo el mtime de `auth.json` |
+| Configuración global | `settings.json`, skills, plugins (no hay `CLAUDE.md` global) | `config.toml`, skills y rules | hash antes y después de cada run; debe ser idéntico |
+| Transcripts e historial de sesión | `~/.claude/projects/<slug-de-cwd>` | `~/.codex/sessions` por id | aislados por ruta e id únicos por run; se verifica `birthtime` e ids únicos |
+| Auto-memoria | por ruta de proyecto | feature `memories` = **false**, 0 filas | aislada por ruta (Claude); desactivada y vacía (Codex), y se verifica por run |
+| Historial de entrada del TUI | `history.jsonl` | `history.jsonl` | compartido; no se inyecta al modelo; residual documentado |
+| Historial de shell | el shell no interactivo de los agentes no escribe historial | igual | residual, no verificado |
+| Goals | — | `goals_1.sqlite`, por conversación | residual |
+| Caché de prompts del servidor | compartida | compartida | no aislable: intercalado balanceado y covariables `cached`/`cacheWrite` |
+| Cuenta y rate limits | compartidos | compartidos | residual; se registran fallos de capacidad |
+
+### Harness endurecido (`tools/preflight3d_v2.py`)
+
+- **A. reviewDepth:** tras crear cada run se lee la política **persistida** (`run.reviewDepth`) y se aborta si no es `light` + `explicit`. El controlador ignora el error de `ApplyReviewDepthPolicy`; queda como deuda separada: la API debería rechazar la creación si la política no se aplica.
+- **B. Provider:** el estado compartido se hashea antes y después de cada run.
+- **C. IDs opacos:** tags `secrets.token_hex(4)`, proyecto `p<hex>` y socket `aolab-<tag>`.
+  - El mapping tag → brazo y los logs del daemon viven solo en `3d-preflight/evidence-*`, fuera del árbol de trabajo `3d-lab/`.
+- **D. Orden:** pares barajados con semilla aleatoria; la semilla y el plan exacto se guardan en `results.json`.
+- **E. Fixture:** por cada repetición se verifican el origen, el SHA exacto y el árbol limpio; se aborta si no coinciden.
+- **F. Contexto externo:** `AO_MEMORY_EXTERNAL=off` se imprime en el preflight y se verifica `externalContext=off` en el snapshot.
