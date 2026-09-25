@@ -14,6 +14,7 @@ Start with [architecture.md](architecture.md) for the current backend model and
 | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
 | [architecture.md](architecture.md)                     | Current backend model, package layout, status derivation, persistence/CDC, and load-bearing rules.                    |
 | [backend-code-structure.md](backend-code-structure.md) | Package ownership rules for the Go backend: domain, services, ports, adapters, storage, HTTP, CLI, and daemon wiring. |
+| [frente3/README.md](frente3/README.md) | Frente 3 / 3A: discovery and design of Project Memory — inventory, per-role context flow, Grae/Graphify evaluation, architecture, threat model, benchmark plan, 3B+ roadmap (Spanish). |
 | [cli/README.md](cli/README.md)                         | CLI commands and daemon control surface.                                                                              |
 | [cloud-development.md](cloud-development.md)           | Optional private checkout workflow, current Cloud foundation, remaining implementation, and recommended build order. |
 | [cloud-refactor.md](cloud-refactor.md)                 | Public contracts, generated Cloud schema types, typed client, reusable product UI, and private implementation boundaries. |

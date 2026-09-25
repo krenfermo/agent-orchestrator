@@ -165,6 +165,7 @@ opt-in por proyecto y por ejecución.
 | Code graph | **Integrado** | `backend/internal/codegraph`, migración 0153 |
 | Context router | **Integrado, `off` por defecto** | `contextrouter`, flag `AO_CONTEXT_ROUTER` |
 | **Grae/Graphify como proveedor real** | **Pendiente** | Rama `feat/grae-graphify-memory` mergeada en ECC, pero **tener un contrato preparado no es tener un proveedor integrado** |
+| **3A — discovery y diseño** | **Hecho (docs, rama `docs/frente3-3a-project-memory`, sin integrar)** | [`frente3/`](frente3/README.md); hallazgos: el Worker no recibe memoria (bypass desde P5-A 2C), grafo de MEDUSA contaminado por un worktree (24,7 %), gaps de secretos/symlinks/framing; [ADR 0012](adr/0012-project-memory-in-tree-core.md) *Proposed* |
 
 **Nota de honestidad exigida:** Grae/Graphify **no** debe marcarse integrado. Lo
 que existe es el contrato/adaptador; falta evaluarlo como proveedor real con
