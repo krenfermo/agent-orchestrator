@@ -31,6 +31,8 @@ import (
 type explorationStore interface {
 	ListRunToolObservations(ctx context.Context, runID string) ([]store.RunToolObservation, error)
 	ListRunExplorationCalls(ctx context.Context, runID string) ([]store.RunExplorationCall, error)
+	ListRunToolCoverage(ctx context.Context, runID string) ([]store.RunToolCoverage, error)
+	ListProjectMemoryContextManifestsForRun(ctx context.Context, projectID domain.ProjectID, runID string) ([]domain.MemoryContextManifest, error)
 	GetWorkflowRun(ctx context.Context, id string) (domain.WorkflowRun, bool, error)
 	ListWorkflowSteps(ctx context.Context, runID string) ([]domain.WorkflowStep, error)
 	ListWorkflowAttempts(ctx context.Context, stepID string) ([]domain.WorkflowAttempt, error)
@@ -72,10 +74,20 @@ func (r *ExplorationReader) WorkflowRun(ctx context.Context, runID string) (doma
 	if err != nil {
 		return domain.RunExploration{}, err
 	}
+	coverageRows, err := r.store.ListRunToolCoverage(ctx, runID)
+	if err != nil {
+		return domain.RunExploration{}, err
+	}
+	coverage := coverageBySubject(coverageRows)
 	out := domain.RunExploration{
-		RunID:     runID,
-		ProjectID: run.ProjectID,
-		Recorded:  len(observations) > 0 || len(calls) > 0,
+		RunID:          runID,
+		ProjectID:      run.ProjectID,
+		Recorded:       len(observations) > 0 || len(calls) > 0,
+		ContextSources: contextSourcesOf(run.PolicySnapshot),
+	}
+	out.MemoryPacks, err = r.memoryPacks(ctx, run)
+	if err != nil {
+		return domain.RunExploration{}, err
 	}
 	groups := map[agentKey]*agentFold{}
 	var order []agentKey
@@ -84,6 +96,7 @@ func (r *ExplorationReader) WorkflowRun(ctx context.Context, runID string) (doma
 			return g
 		}
 		g := newAgentFold(k)
+		g.coverage = coverage.of(k.subject)
 		groups[k] = g
 		order = append(order, k)
 		return g
@@ -109,6 +122,7 @@ func (r *ExplorationReader) WorkflowRun(ctx context.Context, runID string) (doma
 		}
 		return order[i].less(order[j])
 	})
+	totals.coverage = coverage.all(order)
 	for _, k := range order {
 		out.Agents = append(out.Agents, groups[k].result())
 	}
@@ -124,11 +138,133 @@ func (r *ExplorationReader) WorkflowRun(ctx context.Context, runID string) (doma
 		out.Totals.HarnessTokensFirstCall = unavailable(perAgent)
 		out.Totals.OpsBeforeFirstEdit = unavailable(perAgent)
 		out.Totals.CallsBeforeFirstEdit = unavailable(perAgent)
+		if out.Totals.TurnMix.Basis != domain.ExplorationUnavailable && totals.key.harness == "mixed" {
+			out.Totals.TurnMix = domain.ExplorationTurnMix{Basis: domain.ExplorationUnavailable, Method: "harnesses classify turns by different methods; see each agent"}
+		}
 	}
 	out.Quality, err = r.quality(ctx, run)
 	if err != nil {
 		return domain.RunExploration{}, err
 	}
+	return out, nil
+}
+
+// subjectCoverage is what the extractor parsed of each subject's transcripts.
+type subjectCoverage map[domain.UsageSubject]domain.ExplorationCoverage
+
+// coverageBySubject folds per-source coverage rows into one verdict per
+// subject. A subject is covered when, for every one of its sources, no usage
+// event was ingested without the extractor and the extractor has caught up
+// with the cursor -- by a single extractor version. "Parsed from byte zero"
+// would be the wrong test: the collector legitimately starts a new source row
+// mid-file when it resumes a transcript it already knew.
+func coverageBySubject(rows []store.RunToolCoverage) subjectCoverage {
+	out := subjectCoverage{}
+	versions := map[domain.UsageSubject]map[int64]bool{}
+	for _, r := range rows {
+		c, ok := out[r.Subject]
+		if !ok {
+			c = domain.ExplorationCoverage{Complete: true}
+			versions[r.Subject] = map[int64]bool{}
+		}
+		switch {
+		case r.EventsBeforeCoverage > 0:
+			c.Complete = false
+			c.Reason = fmt.Sprintf("%d provider call(s) of transcript source %d were ingested without the 3C extractor (before migration 0175 or by an older binary): the tool activity around them is unknown, not zero", r.EventsBeforeCoverage, r.SourceID)
+		case r.CoveredFrom >= 0 && r.CoveredTo < r.ByteOffset:
+			c.Complete = false
+			c.Reason = fmt.Sprintf("the 3C extractor has parsed transcript source %d to byte %d of %d: the rest is unknown, not zero", r.SourceID, r.CoveredTo, r.ByteOffset)
+		}
+		if r.CoveredFrom >= 0 {
+			versions[r.Subject][r.MinExtractor] = true
+			versions[r.Subject][r.MaxExtractor] = true
+		}
+		out[r.Subject] = c
+	}
+	for subject, vs := range versions {
+		c := out[subject]
+		for v := range vs {
+			c.ExtractorVersions = append(c.ExtractorVersions, v)
+		}
+		sort.Slice(c.ExtractorVersions, func(i, j int) bool { return c.ExtractorVersions[i] < c.ExtractorVersions[j] })
+		if c.Complete && len(c.ExtractorVersions) > 1 {
+			c.Complete = false
+			c.Reason = fmt.Sprintf("observations were classified by extractor versions %v; mixed classifications are not one measurement", c.ExtractorVersions)
+		}
+		out[subject] = c
+	}
+	return out
+}
+
+// of is one subject's coverage. A subject with no source row at all has no
+// transcript AO read, so there is nothing the extractor could have missed.
+func (c subjectCoverage) of(subject domain.UsageSubject) domain.ExplorationCoverage {
+	if v, ok := c[subject]; ok {
+		return v
+	}
+	return domain.ExplorationCoverage{Complete: true}
+}
+
+// all is the coverage of a set of agents: complete only when each is.
+func (c subjectCoverage) all(keys []agentKey) domain.ExplorationCoverage {
+	out := domain.ExplorationCoverage{Complete: true}
+	seen := map[int64]bool{}
+	for _, k := range keys {
+		v := c.of(k.subject)
+		if !v.Complete && out.Complete {
+			out.Complete, out.Reason = false, v.Reason
+		}
+		for _, x := range v.ExtractorVersions {
+			if !seen[x] {
+				seen[x] = true
+				out.ExtractorVersions = append(out.ExtractorVersions, x)
+			}
+		}
+	}
+	sort.Slice(out.ExtractorVersions, func(i, j int) bool { return out.ExtractorVersions[i] < out.ExtractorVersions[j] })
+	if out.Complete && len(out.ExtractorVersions) > 1 {
+		out.Complete = false
+		out.Reason = fmt.Sprintf("the run's agents were classified by extractor versions %v", out.ExtractorVersions)
+	}
+	return out
+}
+
+// contextSourcesOf reads the context-decorator state frozen into a run's
+// policy_snapshot. An unreadable or pre-3C snapshot yields the zero value,
+// which reads as "not recorded".
+func contextSourcesOf(snapshot string) domain.ContextSourcesSnapshot {
+	var policy struct {
+		ContextSources domain.ContextSourcesSnapshot `json:"contextSources"`
+	}
+	if json.Unmarshal([]byte(snapshot), &policy) != nil {
+		return domain.ContextSourcesSnapshot{}
+	}
+	return policy.ContextSources
+}
+
+// memoryPacks summarises the run's project-memory context manifests, oldest
+// first: which pack (digest, indexed commit, generation) each dispatch got.
+func (r *ExplorationReader) memoryPacks(ctx context.Context, run domain.WorkflowRun) ([]domain.RunMemoryPack, error) {
+	manifests, err := r.store.ListProjectMemoryContextManifestsForRun(ctx, domain.ProjectID(run.ProjectID), run.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.RunMemoryPack, 0, len(manifests))
+	for _, m := range manifests {
+		out = append(out, domain.RunMemoryPack{
+			Role:            m.Role,
+			TaskRef:         m.TaskRef,
+			PackDigest:      m.PackDigest,
+			PolicyVersion:   m.PolicyVersion,
+			Generation:      m.Generation,
+			IndexedCommit:   m.IndexedCommit,
+			ItemCount:       len(m.ItemIDs),
+			SelectedBytes:   m.SelectedBytes,
+			EstimatedTokens: m.EstimatedTokens,
+			CreatedAt:       m.CreatedAt,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
 }
 
@@ -177,18 +313,24 @@ type agentFold struct {
 	lastSeen  time.Time
 	timed     int64
 
-	calls, input, output, cached, cacheWrite int64
-	firstCall                                *time.Time
-	firstCallInput                           int64
-	callTimes                                []time.Time
-	untimedCalls                             int64
+	calls, input, uncached, output, cached, cacheWrite int64
+	firstCall                                          *time.Time
+	firstCallInput                                     int64
+	callTimes                                          []time.Time
+	untimedCalls                                       int64
 
 	toolCalls, reads, searches, listings, commands, exploreCommands int64
 	edits, shellEdits, opsBeforeEdit, unattributed                  int64
 	sawEdit, firstEditDerived, sawCodexItems                        bool
 	firstPromptBytes                                                *int64
 	firstPromptOrdinal                                              int64
+	firstPromptAt                                                   *time.Time
 	firstEditAt                                                     *time.Time
+	untimedEdit                                                     bool
+	sources                                                         map[int64]bool
+	coverage                                                        domain.ExplorationCoverage
+	turns                                                           map[domain.TurnClass]int64
+	codexToolCalls                                                  []codexToolCall
 	readsByPath                                                     map[string]int64
 	editedPaths                                                     map[string]bool
 	projectReads                                                    int64
@@ -206,6 +348,13 @@ var codexSubObservation = map[string]bool{
 	"patch_apply_end":   true,
 }
 
+// codexToolCall is one Codex tool call's time and the turn class it implies,
+// kept to derive the per-call turn mix the rollout does not state.
+type codexToolCall struct {
+	at    *time.Time
+	class domain.TurnClass
+}
+
 func newAgentFold(k agentKey) *agentFold {
 	return &agentFold{
 		key:         k,
@@ -213,6 +362,9 @@ func newAgentFold(k agentKey) *agentFold {
 		readsByPath: map[string]int64{},
 		editedPaths: map[string]bool{},
 		scopes:      map[domain.ToolPathScope]int64{},
+		sources:     map[int64]bool{},
+		turns:       map[domain.TurnClass]int64{},
+		coverage:    domain.ExplorationCoverage{Complete: true},
 	}
 }
 
@@ -233,9 +385,11 @@ func (f *agentFold) addCall(c store.RunExplorationCall) {
 	f.calls++
 	f.models[c.ModelID]++
 	f.input += c.Tokens.InputTokens
+	f.uncached += c.Tokens.UncachedInputTokens
 	f.output += c.Tokens.OutputTokens
 	f.cached += c.Tokens.CacheReadTokens
 	f.cacheWrite += c.Tokens.CacheWriteTokens
+	f.turns[c.TurnClass]++
 	if c.ObservedAt == nil {
 		f.untimedCalls++
 		return
@@ -251,15 +405,23 @@ func (f *agentFold) addCall(c store.RunExplorationCall) {
 
 func (f *agentFold) addObservation(o store.RunToolObservation) {
 	f.seen(o.ObservedAt)
+	if o.SourceID > 0 {
+		f.sources[o.SourceID] = true
+	}
 	if o.AttributionBasis == domain.AttributionApproximate {
 		f.approximate++
 	}
 	switch o.Origin {
 	case domain.OriginAOContext:
 		f.aoBytes += deref(o.ResultBytes)
-		if o.ResultBytes != nil && (f.firstPromptBytes == nil || o.Ordinal < f.firstPromptOrdinal) {
+		if o.ResultBytes != nil && f.earlierPrompt(o) {
 			b := *o.ResultBytes
 			f.firstPromptBytes, f.firstPromptOrdinal = &b, o.Ordinal
+			f.firstPromptAt = nil
+			if o.ObservedAt != nil {
+				t := *o.ObservedAt
+				f.firstPromptAt = &t
+			}
 		}
 		return
 	case domain.OriginHarnessContext:
@@ -285,6 +447,9 @@ func (f *agentFold) addObservation(o store.RunToolObservation) {
 		f.toolCalls++
 		if o.ResultBytes == nil {
 			f.unobservedResults++
+		}
+		if f.isCodex() {
+			f.codexToolCalls = append(f.codexToolCalls, codexToolCall{at: o.ObservedAt, class: codexTurnClass(o.Op)})
 		}
 	}
 	if subObservation && o.ToolName == "codex_parsed_cmd" && o.Op == domain.ToolOpCommand {
@@ -331,6 +496,12 @@ func (f *agentFold) addObservation(o store.RunToolObservation) {
 		}
 		return
 	}
+	if f.isCodex() {
+		// A Codex call's exploration is counted from Codex's own parse of it
+		// (the parsed_cmd sub-observations above). Counting the call too would
+		// count one `cat` twice.
+		return
+	}
 	if o.Op.IsExploration() {
 		f.exploreBytes += deref(o.ResultBytes)
 		if o.PathScope == domain.ToolPathProject {
@@ -342,15 +513,59 @@ func (f *agentFold) addObservation(o store.RunToolObservation) {
 	}
 }
 
+func (f *agentFold) isCodex() bool { return f.key.harness == string(domain.HarnessCodex) }
+
+// earlierPrompt reports whether o precedes the first prompt seen so far. Time
+// orders across transcripts; a byte ordinal only within one.
+func (f *agentFold) earlierPrompt(o store.RunToolObservation) bool {
+	switch {
+	case f.firstPromptBytes == nil:
+		return true
+	case o.ObservedAt != nil && f.firstPromptAt != nil:
+		return o.ObservedAt.Before(*f.firstPromptAt)
+	case o.ObservedAt != nil:
+		return true
+	case f.firstPromptAt != nil:
+		return false
+	default:
+		return o.Ordinal < f.firstPromptOrdinal
+	}
+}
+
+// markEdit records an edit. The first edit in fold order ends the "before
+// the first edit" count; the first edit in TIME is what calls are compared
+// against, since a run's transcripts are folded one after another.
 func (f *agentFold) markEdit(o store.RunToolObservation) {
-	if f.sawEdit {
+	f.sawEdit = true
+	if o.ObservedAt == nil {
+		f.untimedEdit = true
 		return
 	}
-	f.sawEdit = true
-	if o.ObservedAt != nil {
+	if f.firstEditAt == nil || o.ObservedAt.Before(*f.firstEditAt) {
 		t := *o.ObservedAt
 		f.firstEditAt = &t
 	}
+}
+
+// codexTurnClass maps a Codex tool call's operation to the turn class the
+// same tool would give a Claude call (turn_class.go classifies by tool, so a
+// shell call is a command whatever it ran).
+func codexTurnClass(op domain.ToolOp) domain.TurnClass {
+	switch op {
+	case domain.ToolOpCommand, domain.ToolOpCommandExplore, domain.ToolOpCommandEdit:
+		return domain.TurnCommand
+	case domain.ToolOpEdit:
+		return domain.TurnEdit
+	case domain.ToolOpRead, domain.ToolOpSearch, domain.ToolOpList, domain.ToolOpWeb:
+		return domain.TurnRead
+	case domain.ToolOpWait:
+		return domain.TurnWait
+	case domain.ToolOpDelegate:
+		return domain.TurnSubagent
+	case domain.ToolOpPlan:
+		return domain.TurnPlan
+	}
+	return domain.TurnUnclassified
 }
 
 func deref(v *int64) int64 {
@@ -425,15 +640,18 @@ func (f *agentFold) result() domain.AgentExploration {
 		Models:                 sortedModels(f.models),
 		PathScopes:             f.scopes,
 		ApproximateAttribution: f.approximate,
+		Sources:                int64(len(f.sources)),
+		ToolCoverage:           f.coverage,
 	}
 	if f.calls > 0 {
 		a.ModelCalls = observed(f.calls, "billed provider messages in the transcript")
 		a.InputTokens = observed(f.input, "provider-reported input incl. cache reads/writes")
+		a.UncachedInputTokens = observed(f.uncached, "provider-reported input that was neither a cache read nor a cache write")
 		a.OutputTokens = observed(f.output, "provider-reported output")
 		a.CachedInputTokens = observed(f.cached, "provider-reported cache reads")
 		a.CacheWriteTokens = observed(f.cacheWrite, "provider-reported cache writes")
 	} else {
-		for _, m := range []*domain.ExplorationMetric{&a.ModelCalls, &a.InputTokens, &a.OutputTokens, &a.CachedInputTokens, &a.CacheWriteTokens} {
+		for _, m := range []*domain.ExplorationMetric{&a.ModelCalls, &a.InputTokens, &a.UncachedInputTokens, &a.OutputTokens, &a.CachedInputTokens, &a.CacheWriteTokens} {
 			*m = unavailable("no provider usage recorded for this agent")
 		}
 	}
@@ -447,6 +665,8 @@ func (f *agentFold) result() domain.AgentExploration {
 		a.HarnessTokensFirstCall = unavailable("no timed provider call")
 	case f.firstPromptBytes == nil:
 		a.HarnessTokensFirstCall = unavailable("no AO prompt observed to subtract")
+	case f.firstPromptAt == nil && len(f.sources) > 1:
+		a.HarnessTokensFirstCall = unavailable(multiSource(len(f.sources)))
 	default:
 		est := f.firstCallInput - (*f.firstPromptBytes+3)/4
 		if est < 0 {
@@ -475,27 +695,31 @@ func (f *agentFold) result() domain.AgentExploration {
 		searchMethod = "Codex parsed_cmd `search` items"
 		listMethod = "Codex parsed_cmd `list_files` items"
 	}
-	if f.unattributed > 0 {
-		lowerBound := fmt.Sprintf("; LOWER BOUND: %d executed command(s) inspected files AO cannot name", f.unattributed)
-		readMethod += lowerBound
-		searchMethod += lowerBound
-		listMethod += lowerBound
+	lowerBound := f.unattributed > 0
+	if lowerBound {
+		note := fmt.Sprintf("; LOWER BOUND: %d executed command(s) inspected files AO cannot name", f.unattributed)
+		readMethod += note
+		searchMethod += note
+		listMethod += note
 	}
 	if caps.structuredFileTools {
 		a.UnattributedCommands = observed(f.unattributed, "commands whose inspected files are not named by the harness")
-		a.FileReads = observed(f.reads, readMethod)
-		a.UniqueFilesRead = observed(int64(len(f.readsByPath)), "distinct project-relative paths read")
-		a.RepeatedReads = observed(f.projectReads-int64(len(f.readsByPath)), "project reads of an already-read path")
-		a.Searches = observed(f.searches, searchMethod)
-		a.Listings = observed(f.listings, listMethod)
-		a.ExplorationOps = observed(f.reads+f.searches+f.listings, "structured read + search + list calls (explore commands reported separately)")
+		a.FileReads = floor(observed(f.reads, readMethod), lowerBound)
+		a.UniqueFilesRead = floor(observed(int64(len(f.readsByPath)), "distinct project-relative paths read"), lowerBound)
+		a.RepeatedReads = floor(observed(f.projectReads-int64(len(f.readsByPath)), "project reads of an already-read path"), lowerBound)
+		a.Searches = floor(observed(f.searches, searchMethod), lowerBound)
+		a.Listings = floor(observed(f.listings, listMethod), lowerBound)
+		a.ExplorationOps = floor(observed(f.reads+f.searches+f.listings, "structured read + search + list calls (explore commands reported separately)"), lowerBound)
+		a.ExplorationOpsAll = f.explorationOpsAll()
 		switch {
 		case !f.sawEdit:
-			a.OpsBeforeFirstEdit = observed(f.opsBeforeEdit, "no edit observed: every exploration call is counted")
+			a.OpsBeforeFirstEdit = unavailable("no edit observed: the sequence is censored, and exploration before an edit that never happened is not a measurement")
+		case len(f.sources) > 1:
+			a.OpsBeforeFirstEdit = unavailable(multiSource(len(f.sources)))
 		case f.firstEditDerived:
-			a.OpsBeforeFirstEdit = derived(f.opsBeforeEdit, "exploration calls before the first edit, which was a shell write classified by program name")
+			a.OpsBeforeFirstEdit = floor(derived(f.opsBeforeEdit, "exploration calls before the first edit, which was a shell write classified by program name"), lowerBound)
 		default:
-			a.OpsBeforeFirstEdit = observed(f.opsBeforeEdit, "exploration calls before the first structured edit, in transcript order")
+			a.OpsBeforeFirstEdit = floor(observed(f.opsBeforeEdit, "exploration calls before the first structured edit, in transcript order"), lowerBound)
 		}
 		a.RepoBytesObserved = observed(f.repoBytes, "text length the harness returned for project-scoped read/search/list calls (includes its line-number formatting)")
 		a.ExplorationResultBytes = observed(f.exploreBytes, "text length returned for all exploration calls")
@@ -509,16 +733,21 @@ func (f *agentFold) result() domain.AgentExploration {
 		if f.key.harness == string(domain.HarnessCodex) {
 			reason = codexNoFileTools
 		}
-		for _, m := range []*domain.ExplorationMetric{&a.UnattributedCommands, &a.FileReads, &a.UniqueFilesRead, &a.RepeatedReads, &a.Searches, &a.Listings, &a.ExplorationOps, &a.OpsBeforeFirstEdit, &a.RepoBytesObserved, &a.ExplorationResultBytes} {
+		for _, m := range []*domain.ExplorationMetric{&a.UnattributedCommands, &a.FileReads, &a.UniqueFilesRead, &a.RepeatedReads, &a.Searches, &a.Listings, &a.ExplorationOps, &a.ExplorationOpsAll, &a.OpsBeforeFirstEdit, &a.RepoBytesObserved, &a.ExplorationResultBytes} {
 			*m = unavailable(reason)
 		}
 	}
 	if len(f.editedPaths) > 0 || caps.structuredFileTools || f.key.harness == string(domain.HarnessCodex) {
-		a.UniqueFilesEdited = observed(int64(len(f.editedPaths)), "distinct project-relative paths edited (Claude edit tools; Codex patch_apply_end)")
+		method := "distinct project-relative paths edited (Claude edit tools; Codex FileChange/patch_apply_end)"
+		if f.shellEdits > 0 {
+			method += fmt.Sprintf("; LOWER BOUND: %d shell write(s) name no path", f.shellEdits)
+		}
+		a.UniqueFilesEdited = floor(observed(int64(len(f.editedPaths)), method), f.shellEdits > 0)
 	} else {
 		a.UniqueFilesEdited = unavailable(noToolTelemetry)
 	}
 	a.CallsBeforeFirstEdit = f.callsBeforeFirstEdit()
+	a.TurnMix = f.turnMix()
 	a.UnobservedResults = observed(f.unobservedResults, "tool calls whose result was never observed")
 
 	a.AOContextBytes = derived(f.aoBytes, "prompt text delivered into the conversation, assumed AO's (a human typing into the pane is indistinguishable)")
@@ -546,7 +775,108 @@ func (f *agentFold) result() domain.AgentExploration {
 		a.ActiveSpanMS = unavailable("fewer than two timed transcript records")
 	}
 	a.TopFiles = topFiles(f.readsByPath)
+	if !f.coverage.Complete {
+		withoutToolTelemetry(&a, f.coverage.Reason)
+	}
 	return a
+}
+
+// explorationOpsAll is M3: every exploration operation AO can classify, by
+// one method per harness (see domain.AgentExploration.ExplorationOpsAll).
+func (f *agentFold) explorationOpsAll() domain.ExplorationMetric {
+	if f.isCodex() {
+		m := observed(f.reads+f.searches+f.listings, "Codex parsed_cmd read + search + list_files items (the provider's own parse of each executed command); commands it could not parse are unattributedCommands")
+		return floor(m, f.unattributed > 0)
+	}
+	return derived(f.reads+f.searches+f.listings+f.exploreCommands,
+		"structured Read/Grep/Glob/LS calls + shell commands whose leading program only inspects (cat, rg, sed -n, git log ...); other shell commands are not counted")
+}
+
+// turnMix is how the agent's calls split by turn class. Claude states a
+// class per billed message (turn_class, observed). A Codex rollout states
+// none: each tool call is assigned to the first provider call timestamped at
+// or after it, which is how a rollout orders a response's items before the
+// token_count that bills it (derived).
+func (f *agentFold) turnMix() domain.ExplorationTurnMix {
+	if f.calls == 0 {
+		return domain.ExplorationTurnMix{Basis: domain.ExplorationUnavailable, Method: "no provider calls"}
+	}
+	if !f.isCodex() {
+		counts := make(map[domain.TurnClass]int64, len(f.turns))
+		for c, n := range f.turns {
+			counts[c] = n
+		}
+		return domain.ExplorationTurnMix{Basis: domain.ExplorationObserved, Method: "turn_class recorded per billed message (tool names only)", Counts: counts}
+	}
+	if f.untimedCalls > 0 {
+		return domain.ExplorationTurnMix{Basis: domain.ExplorationUnavailable, Method: "some Codex calls carry no timestamp to order tool calls against"}
+	}
+	times := append([]time.Time(nil), f.callTimes...)
+	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
+	perCall := make([]map[domain.TurnClass]bool, len(times))
+	for _, tc := range f.codexToolCalls {
+		if tc.at == nil {
+			return domain.ExplorationTurnMix{Basis: domain.ExplorationUnavailable, Method: "some Codex tool calls carry no timestamp"}
+		}
+		i := sort.Search(len(times), func(i int) bool { return !times[i].Before(*tc.at) })
+		if i == len(times) || tc.class == domain.TurnUnclassified {
+			continue
+		}
+		if perCall[i] == nil {
+			perCall[i] = map[domain.TurnClass]bool{}
+		}
+		perCall[i][tc.class] = true
+	}
+	counts := map[domain.TurnClass]int64{}
+	for _, classes := range perCall {
+		switch len(classes) {
+		case 0:
+			counts[domain.TurnMessage]++
+		case 1:
+			for c := range classes {
+				counts[c]++
+			}
+		default:
+			counts[domain.TurnMixed]++
+		}
+	}
+	return domain.ExplorationTurnMix{Basis: domain.ExplorationDerived, Method: "each Codex tool call assigned to the first provider call timestamped at or after it; a call with no tool call is a message", Counts: counts}
+}
+
+// floor marks a metric as a lower bound when unattributed activity may add
+// to it.
+func floor(m domain.ExplorationMetric, lowerBound bool) domain.ExplorationMetric {
+	if lowerBound && m.Basis != domain.ExplorationUnavailable {
+		m.LowerBound = true
+	}
+	return m
+}
+
+func multiSource(n int) string {
+	return fmt.Sprintf("the agent's observations span %d transcripts, whose byte orders are not comparable", n)
+}
+
+// withoutToolTelemetry blanks every figure that depends on the 3C extractor
+// having parsed the agent's transcripts. Token and call counts come from the
+// usage ledger and stand.
+func withoutToolTelemetry(a *domain.AgentExploration, reason string) {
+	for _, m := range []*domain.ExplorationMetric{
+		&a.HarnessTokensFirstCall, &a.ToolCalls, &a.FileReads, &a.UniqueFilesRead, &a.RepeatedReads,
+		&a.Searches, &a.Listings, &a.Commands, &a.ExploreCommands, &a.ExplorationOps, &a.ExplorationOpsAll,
+		&a.UnattributedCommands, &a.Edits, &a.ShellEdits, &a.UniqueFilesEdited, &a.OpsBeforeFirstEdit,
+		&a.CallsBeforeFirstEdit, &a.RepoBytesObserved, &a.ExplorationResultBytes, &a.AOContextBytes,
+		&a.HarnessContextBytes, &a.UnobservedResults,
+	} {
+		*m = unavailable(reason)
+	}
+	for _, r := range []*domain.ExplorationRatio{&a.ExplorationRatio, &a.AOContextRatio, &a.HarnessContextRatio} {
+		*r = domain.ExplorationRatio{Basis: domain.ExplorationUnavailable, Method: reason}
+	}
+	a.PathScopes = map[domain.ToolPathScope]int64{}
+	a.TopFiles = nil
+	if a.Harness == string(domain.HarnessCodex) {
+		a.TurnMix = domain.ExplorationTurnMix{Basis: domain.ExplorationUnavailable, Method: reason}
+	}
 }
 
 // callsBeforeFirstEdit counts provider calls made before the first edit. It
@@ -554,12 +884,9 @@ func (f *agentFold) result() domain.AgentExploration {
 // record streams, so it is DERIVED.
 func (f *agentFold) callsBeforeFirstEdit() domain.ExplorationMetric {
 	if !f.sawEdit {
-		if f.calls == 0 {
-			return unavailable("no provider calls")
-		}
-		return derived(f.calls, "no edit observed: every call preceded it")
+		return unavailable("no edit observed: the sequence is censored, and calls before an edit that never happened is not a measurement")
 	}
-	if f.firstEditAt == nil || f.untimedCalls > 0 {
+	if f.firstEditAt == nil || f.untimedEdit || f.untimedCalls > 0 {
 		return unavailable("the first edit or some calls carry no timestamp")
 	}
 	var n int64

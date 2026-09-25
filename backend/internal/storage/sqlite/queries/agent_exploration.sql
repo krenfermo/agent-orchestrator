@@ -20,6 +20,51 @@ UPDATE agent_tool_observations
 SET result_bytes = ?, result_items = ?, result_error = ?
 WHERE binding_id = ? AND observation_key = ? AND result_bytes IS NULL;
 
+-- name: UpsertAgentToolCoverage :exec
+-- Widens a source's parsed range and extractor-version span. Runs in the
+-- chunk's transaction, so coverage never claims a range whose observations
+-- did not commit.
+INSERT INTO agent_tool_coverage (
+    usage_source_id, binding_id, covered_from, covered_to, min_extractor, max_extractor, first_covered_at, updated_at
+) VALUES (
+    sqlc.arg(usage_source_id), sqlc.arg(binding_id), sqlc.arg(covered_from), sqlc.arg(covered_to),
+    sqlc.arg(extractor), sqlc.arg(extractor), sqlc.arg(updated_at), sqlc.arg(updated_at)
+)
+ON CONFLICT (usage_source_id) DO UPDATE SET
+    covered_from  = MIN(agent_tool_coverage.covered_from, excluded.covered_from),
+    covered_to    = MAX(agent_tool_coverage.covered_to, excluded.covered_to),
+    min_extractor = MIN(agent_tool_coverage.min_extractor, excluded.min_extractor),
+    max_extractor = MAX(agent_tool_coverage.max_extractor, excluded.max_extractor),
+    updated_at    = excluded.updated_at;
+
+-- name: ListRunToolCoverage :many
+-- Every transcript source of one run's subjects with what the extractor has
+-- parsed of it. covered_from is -1 for a source the extractor never saw.
+-- events_before_coverage counts the source's usage events ingested WITHOUT the
+-- extractor: recorded before its first covered chunk, or with no coverage at
+-- all. Events of the first covered chunk carry the same recorded_at as
+-- first_covered_at, so they are not counted.
+SELECT
+    b.subject_kind                                  AS subject_kind,
+    b.subject_id                                    AS subject_id,
+    s.id                                            AS usage_source_id,
+    s.byte_offset                                   AS byte_offset,
+    CAST(COALESCE(c.covered_from, -1) AS INTEGER)   AS covered_from,
+    CAST(COALESCE(c.covered_to, -1) AS INTEGER)     AS covered_to,
+    CAST(COALESCE(c.min_extractor, 0) AS INTEGER)   AS min_extractor,
+    CAST(COALESCE(c.max_extractor, 0) AS INTEGER)   AS max_extractor,
+    CAST((SELECT COUNT(*) FROM model_usage_events e
+           WHERE e.usage_source_id = s.id
+             AND (c.usage_source_id IS NULL OR e.recorded_at < c.first_covered_at)) AS INTEGER) AS events_before_coverage
+FROM usage_bindings b
+JOIN usage_sources s ON s.binding_id = b.id
+LEFT JOIN agent_tool_coverage c ON c.usage_source_id = s.id
+WHERE b.subject_kind || char(31) || b.subject_id IN (
+    SELECT w.subject_kind || char(31) || w.session_id FROM usage_attribution_windows w
+    WHERE w.workflow_run_id = sqlc.arg(workflow_run_id)
+)
+ORDER BY b.subject_kind, b.subject_id, s.id;
+
 -- name: GetUsageSubjectWorkspaceRoot :one
 -- The project root AO itself recorded for a usage subject: the directory an
 -- agent's file paths are normalised against. Never taken from the transcript.
@@ -58,6 +103,7 @@ WITH attributed AS (
     a.subject_id        AS subject_id,
     a.harness           AS harness,
     a.window_id         AS window_id,
+    a.usage_source_id   AS usage_source_id,
     a.observation_key   AS observation_key,
     a.event_key         AS event_key,
     a.ordinal           AS ordinal,
@@ -85,6 +131,7 @@ SELECT
     a.subject_kind      AS subject_kind,
     a.subject_id        AS subject_id,
     a.harness           AS harness,
+    a.usage_source_id   AS usage_source_id,
     a.observation_key   AS observation_key,
     a.event_key         AS event_key,
     a.ordinal           AS ordinal,
@@ -101,7 +148,7 @@ SELECT
 FROM attributed a
 CROSS JOIN usage_attribution_windows w ON w.id = a.window_id
 WHERE w.workflow_run_id = sqlc.arg(workflow_run_id)
-ORDER BY a.subject_kind, a.subject_id, a.ordinal, a.observation_key;
+ORDER BY a.subject_kind, a.subject_id, a.usage_source_id, a.ordinal, a.observation_key;
 
 -- name: ListRunExplorationCalls :many
 -- One row per provider call of one run's subjects, with the subject and the

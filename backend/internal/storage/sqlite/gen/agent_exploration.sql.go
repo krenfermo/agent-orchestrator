@@ -236,6 +236,80 @@ func (q *Queries) ListRunExplorationCalls(ctx context.Context, workflowRunID str
 	return items, nil
 }
 
+const listRunToolCoverage = `-- name: ListRunToolCoverage :many
+SELECT
+    b.subject_kind                                  AS subject_kind,
+    b.subject_id                                    AS subject_id,
+    s.id                                            AS usage_source_id,
+    s.byte_offset                                   AS byte_offset,
+    CAST(COALESCE(c.covered_from, -1) AS INTEGER)   AS covered_from,
+    CAST(COALESCE(c.covered_to, -1) AS INTEGER)     AS covered_to,
+    CAST(COALESCE(c.min_extractor, 0) AS INTEGER)   AS min_extractor,
+    CAST(COALESCE(c.max_extractor, 0) AS INTEGER)   AS max_extractor,
+    CAST((SELECT COUNT(*) FROM model_usage_events e
+           WHERE e.usage_source_id = s.id
+             AND (c.usage_source_id IS NULL OR e.recorded_at < c.first_covered_at)) AS INTEGER) AS events_before_coverage
+FROM usage_bindings b
+JOIN usage_sources s ON s.binding_id = b.id
+LEFT JOIN agent_tool_coverage c ON c.usage_source_id = s.id
+WHERE b.subject_kind || char(31) || b.subject_id IN (
+    SELECT w.subject_kind || char(31) || w.session_id FROM usage_attribution_windows w
+    WHERE w.workflow_run_id = ?1
+)
+ORDER BY b.subject_kind, b.subject_id, s.id
+`
+
+type ListRunToolCoverageRow struct {
+	SubjectKind          string
+	SubjectID            string
+	UsageSourceID        int64
+	ByteOffset           int64
+	CoveredFrom          int64
+	CoveredTo            int64
+	MinExtractor         int64
+	MaxExtractor         int64
+	EventsBeforeCoverage int64
+}
+
+// Every transcript source of one run's subjects with what the extractor has
+// parsed of it. covered_from is -1 for a source the extractor never saw.
+// events_before_coverage counts the source's usage events ingested WITHOUT the
+// extractor: recorded before its first covered chunk, or with no coverage at
+// all. Events of the first covered chunk carry the same recorded_at as
+// first_covered_at, so they are not counted.
+func (q *Queries) ListRunToolCoverage(ctx context.Context, workflowRunID string) ([]ListRunToolCoverageRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRunToolCoverage, workflowRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRunToolCoverageRow{}
+	for rows.Next() {
+		var i ListRunToolCoverageRow
+		if err := rows.Scan(
+			&i.SubjectKind,
+			&i.SubjectID,
+			&i.UsageSourceID,
+			&i.ByteOffset,
+			&i.CoveredFrom,
+			&i.CoveredTo,
+			&i.MinExtractor,
+			&i.MaxExtractor,
+			&i.EventsBeforeCoverage,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRunToolObservations = `-- name: ListRunToolObservations :many
 WITH attributed AS (
     SELECT
@@ -243,6 +317,7 @@ WITH attributed AS (
     a.subject_id        AS subject_id,
     a.harness           AS harness,
     a.window_id         AS window_id,
+    a.usage_source_id   AS usage_source_id,
     a.observation_key   AS observation_key,
     a.event_key         AS event_key,
     a.ordinal           AS ordinal,
@@ -270,6 +345,7 @@ SELECT
     a.subject_kind      AS subject_kind,
     a.subject_id        AS subject_id,
     a.harness           AS harness,
+    a.usage_source_id   AS usage_source_id,
     a.observation_key   AS observation_key,
     a.event_key         AS event_key,
     a.ordinal           AS ordinal,
@@ -286,7 +362,7 @@ SELECT
 FROM attributed a
 CROSS JOIN usage_attribution_windows w ON w.id = a.window_id
 WHERE w.workflow_run_id = ?1
-ORDER BY a.subject_kind, a.subject_id, a.ordinal, a.observation_key
+ORDER BY a.subject_kind, a.subject_id, a.usage_source_id, a.ordinal, a.observation_key
 `
 
 type ListRunToolObservationsRow struct {
@@ -296,6 +372,7 @@ type ListRunToolObservationsRow struct {
 	SubjectKind      string
 	SubjectID        string
 	Harness          string
+	UsageSourceID    sql.NullInt64
 	ObservationKey   string
 	EventKey         string
 	Ordinal          int64
@@ -331,6 +408,7 @@ func (q *Queries) ListRunToolObservations(ctx context.Context, workflowRunID str
 			&i.SubjectKind,
 			&i.SubjectID,
 			&i.Harness,
+			&i.UsageSourceID,
 			&i.ObservationKey,
 			&i.EventKey,
 			&i.Ordinal,
@@ -356,4 +434,43 @@ func (q *Queries) ListRunToolObservations(ctx context.Context, workflowRunID str
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertAgentToolCoverage = `-- name: UpsertAgentToolCoverage :exec
+INSERT INTO agent_tool_coverage (
+    usage_source_id, binding_id, covered_from, covered_to, min_extractor, max_extractor, first_covered_at, updated_at
+) VALUES (
+    ?1, ?2, ?3, ?4,
+    ?5, ?5, ?6, ?6
+)
+ON CONFLICT (usage_source_id) DO UPDATE SET
+    covered_from  = MIN(agent_tool_coverage.covered_from, excluded.covered_from),
+    covered_to    = MAX(agent_tool_coverage.covered_to, excluded.covered_to),
+    min_extractor = MIN(agent_tool_coverage.min_extractor, excluded.min_extractor),
+    max_extractor = MAX(agent_tool_coverage.max_extractor, excluded.max_extractor),
+    updated_at    = excluded.updated_at
+`
+
+type UpsertAgentToolCoverageParams struct {
+	UsageSourceID int64
+	BindingID     int64
+	CoveredFrom   int64
+	CoveredTo     int64
+	Extractor     int64
+	UpdatedAt     time.Time
+}
+
+// Widens a source's parsed range and extractor-version span. Runs in the
+// chunk's transaction, so coverage never claims a range whose observations
+// did not commit.
+func (q *Queries) UpsertAgentToolCoverage(ctx context.Context, arg UpsertAgentToolCoverageParams) error {
+	_, err := q.db.ExecContext(ctx, upsertAgentToolCoverage,
+		arg.UsageSourceID,
+		arg.BindingID,
+		arg.CoveredFrom,
+		arg.CoveredTo,
+		arg.Extractor,
+		arg.UpdatedAt,
+	)
+	return err
 }

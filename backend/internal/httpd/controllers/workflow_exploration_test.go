@@ -76,4 +76,24 @@ func TestWorkflowExplorationRoute(t *testing.T) {
 	if !strings.Contains(string(body), `"scope":"secret","count":2`) {
 		t.Fatalf("path scopes missing: %s", body)
 	}
+
+	// 3C review fixes: lower bounds, coverage, the frozen arm and packs.
+	floor := int64(3)
+	view.Agents[0].FileReads = domain.ExplorationMetric{Value: &floor, Basis: domain.ExplorationObserved, Method: "m", LowerBound: true}
+	view.Agents[0].ToolCoverage = domain.ExplorationCoverage{Complete: false, Reason: "never parsed"}
+	view.ContextSources = domain.ContextSourcesSnapshot{MemoryMode: "off", ContextRouter: "off"}
+	view.MemoryPacks = []domain.RunMemoryPack{{Role: "worker", PackDigest: "d1", IndexedCommit: "c1", ItemCount: 2}}
+	_, body = explorationRequest(t, fakeExploration{view: view}, "/workflows/wf-1/exploration")
+	for _, want := range []string{`"lowerBound":true`, `"toolCoverage":{"complete":false,"reason":"never parsed"`,
+		`"contextSources":{"recorded":true,"memoryMode":"off","contextRouter":"off"}`, `"packDigest":"d1"`} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("response missing %s: %s", want, body)
+		}
+	}
+	// An unavailable metric never carries a lower-bound flag.
+	view.Agents[0].FileReads = domain.ExplorationMetric{Basis: domain.ExplorationUnavailable, LowerBound: true}
+	_, body = explorationRequest(t, fakeExploration{view: view}, "/workflows/wf-1/exploration")
+	if strings.Contains(string(body), `"fileReads":{"value":null,"basis":"unavailable","method":"","lowerBound":true`) {
+		t.Fatalf("unavailable metric flagged as a lower bound: %s", body)
+	}
 }

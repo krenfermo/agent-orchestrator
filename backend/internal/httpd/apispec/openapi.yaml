@@ -13167,6 +13167,8 @@ components:
           $ref: '#/components/schemas/ExplorationMetricResponse'
         explorationOps:
           $ref: '#/components/schemas/ExplorationMetricResponse'
+        explorationOpsAll:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
         explorationRatio:
           $ref: '#/components/schemas/ExplorationRatioResponse'
         explorationResultBytes:
@@ -13213,17 +13215,26 @@ components:
           $ref: '#/components/schemas/ExplorationMetricResponse'
         shellEdits:
           $ref: '#/components/schemas/ExplorationMetricResponse'
+        sources:
+          format: int64
+          type: integer
         subjectId:
           type: string
         subjectKind:
           type: string
         toolCalls:
           $ref: '#/components/schemas/ExplorationMetricResponse'
+        toolCoverage:
+          $ref: '#/components/schemas/ControllersExplorationCoverageResponse'
         topFiles:
           items:
             $ref: '#/components/schemas/ExplorationFileCountResponse'
           type: array
+        turnMix:
+          $ref: '#/components/schemas/ControllersExplorationTurnMixResponse'
         unattributedCommands:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        uncachedInputTokens:
           $ref: '#/components/schemas/ExplorationMetricResponse'
         uniqueFilesEdited:
           $ref: '#/components/schemas/ExplorationMetricResponse'
@@ -13240,6 +13251,7 @@ components:
       - models
       - modelCalls
       - inputTokens
+      - uncachedInputTokens
       - outputTokens
       - cachedInputTokens
       - cacheWriteTokens
@@ -13254,6 +13266,7 @@ components:
       - commands
       - exploreCommands
       - explorationOps
+      - explorationOpsAll
       - unattributedCommands
       - edits
       - shellEdits
@@ -13272,6 +13285,9 @@ components:
       - pathScopes
       - topFiles
       - approximateAttribution
+      - sources
+      - toolCoverage
+      - turnMix
       type: object
     AgentInfo:
       properties:
@@ -14346,6 +14362,52 @@ components:
       - decisionResolverPriority
       - fallbackBehavior
       - reviewIndependence
+      type: object
+    ControllersExplorationCoverageResponse:
+      properties:
+        complete:
+          type: boolean
+        extractorVersions:
+          items:
+            format: int64
+            type: integer
+          type: array
+        reason:
+          type: string
+      required:
+      - complete
+      - reason
+      - extractorVersions
+      type: object
+    ControllersExplorationTurnCountResponse:
+      properties:
+        class:
+          type: string
+        count:
+          format: int64
+          type: integer
+      required:
+      - class
+      - count
+      type: object
+    ControllersExplorationTurnMixResponse:
+      properties:
+        basis:
+          enum:
+          - observed
+          - derived
+          - unavailable
+          type: string
+        counts:
+          items:
+            $ref: '#/components/schemas/ControllersExplorationTurnCountResponse'
+          type: array
+        method:
+          type: string
+      required:
+      - basis
+      - method
+      - counts
       type: object
     ControllersFixDeliveryView:
       properties:
@@ -16323,6 +16385,54 @@ components:
       - reasonCodes
       - policyVersion
       - waiting
+      type: object
+    ControllersRunContextSourcesResponse:
+      properties:
+        contextRouter:
+          type: string
+        memoryMode:
+          type: string
+        recorded:
+          type: boolean
+      required:
+      - recorded
+      - memoryMode
+      - contextRouter
+      type: object
+    ControllersRunMemoryPackResponse:
+      properties:
+        createdAt:
+          type: string
+        estimatedTokens:
+          type: integer
+        generation:
+          format: int64
+          type: integer
+        indexedCommit:
+          type: string
+        itemCount:
+          type: integer
+        packDigest:
+          type: string
+        policyVersion:
+          type: integer
+        role:
+          type: string
+        selectedBytes:
+          type: integer
+        taskRef:
+          type: string
+      required:
+      - role
+      - taskRef
+      - packDigest
+      - policyVersion
+      - generation
+      - indexedCommit
+      - itemCount
+      - selectedBytes
+      - estimatedTokens
+      - createdAt
       type: object
     ControllersRunUsageLineResponse:
       properties:
@@ -19121,6 +19231,8 @@ components:
           - derived
           - unavailable
           type: string
+        lowerBound:
+          type: boolean
         method:
           type: string
         value:
@@ -19131,6 +19243,7 @@ components:
       - value
       - basis
       - method
+      - lowerBound
       type: object
     ExplorationPathScopeCountResponse:
       properties:
@@ -25550,6 +25663,12 @@ components:
           items:
             $ref: '#/components/schemas/AgentExplorationResponse'
           type: array
+        contextSources:
+          $ref: '#/components/schemas/ControllersRunContextSourcesResponse'
+        memoryPacks:
+          items:
+            $ref: '#/components/schemas/ControllersRunMemoryPackResponse'
+          type: array
         projectId:
           type: string
         quality:
@@ -25567,6 +25686,8 @@ components:
       - agents
       - totals
       - quality
+      - contextSources
+      - memoryPacks
       type: object
     WorkflowIntegrationFreshReviewException:
       properties:

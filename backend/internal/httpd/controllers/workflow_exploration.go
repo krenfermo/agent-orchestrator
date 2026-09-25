@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -27,6 +28,54 @@ type ExplorationMetricResponse struct {
 	Value  *int64 `json:"value"`
 	Basis  string `json:"basis" enum:"observed,derived,unavailable"`
 	Method string `json:"method"`
+	// LowerBound is true when value is a floor: activity AO saw but could not
+	// attribute may add to it. Never compare a lower bound as exact.
+	LowerBound bool `json:"lowerBound"`
+}
+
+// ExplorationCoverageResponse says whether the 3C extractor parsed every
+// transcript of an agent from its first byte. When complete is false, every
+// tool figure is unavailable and reason says why.
+type ExplorationCoverageResponse struct {
+	Complete          bool    `json:"complete"`
+	Reason            string  `json:"reason"`
+	ExtractorVersions []int64 `json:"extractorVersions"`
+}
+
+// ExplorationTurnCountResponse is one turn class and its call count.
+type ExplorationTurnCountResponse struct {
+	Class string `json:"class"`
+	Count int64  `json:"count"`
+}
+
+// ExplorationTurnMixResponse counts an agent's provider calls per turn class.
+type ExplorationTurnMixResponse struct {
+	Basis  string                         `json:"basis" enum:"observed,derived,unavailable"`
+	Method string                         `json:"method"`
+	Counts []ExplorationTurnCountResponse `json:"counts"`
+}
+
+// RunContextSourcesResponse is the context-decorator state frozen into the
+// run at creation. recorded=false: the run predates 3C (not "off").
+type RunContextSourcesResponse struct {
+	Recorded      bool   `json:"recorded"`
+	MemoryMode    string `json:"memoryMode"`
+	ContextRouter string `json:"contextRouter"`
+}
+
+// RunMemoryPackResponse is what one dispatch of the run was handed by project
+// memory (identities and sizes only).
+type RunMemoryPackResponse struct {
+	Role            string `json:"role"`
+	TaskRef         string `json:"taskRef"`
+	PackDigest      string `json:"packDigest"`
+	PolicyVersion   int    `json:"policyVersion"`
+	Generation      int64  `json:"generation"`
+	IndexedCommit   string `json:"indexedCommit"`
+	ItemCount       int    `json:"itemCount"`
+	SelectedBytes   int    `json:"selectedBytes"`
+	EstimatedTokens int    `json:"estimatedTokens"`
+	CreatedAt       string `json:"createdAt"`
 }
 
 // ExplorationRatioResponse is one share in [0,1] and how AO came to know it.
@@ -58,8 +107,10 @@ type AgentExplorationResponse struct {
 	Harness     string   `json:"harness"`
 	Models      []string `json:"models"`
 
-	ModelCalls           ExplorationMetricResponse `json:"modelCalls"`
-	InputTokens          ExplorationMetricResponse `json:"inputTokens"`
+	ModelCalls  ExplorationMetricResponse `json:"modelCalls"`
+	InputTokens ExplorationMetricResponse `json:"inputTokens"`
+	// UncachedInputTokens is M1u: neither a cache read nor a cache write.
+	UncachedInputTokens  ExplorationMetricResponse `json:"uncachedInputTokens"`
 	OutputTokens         ExplorationMetricResponse `json:"outputTokens"`
 	CachedInputTokens    ExplorationMetricResponse `json:"cachedInputTokens"`
 	CacheWriteTokens     ExplorationMetricResponse `json:"cacheWriteTokens"`
@@ -68,15 +119,18 @@ type AgentExplorationResponse struct {
 	// minus AO's prompt at ~4 bytes/token.
 	HarnessTokensFirstCall ExplorationMetricResponse `json:"harnessTokensFirstCall"`
 
-	ToolCalls            ExplorationMetricResponse `json:"toolCalls"`
-	FileReads            ExplorationMetricResponse `json:"fileReads"`
-	UniqueFilesRead      ExplorationMetricResponse `json:"uniqueFilesRead"`
-	RepeatedReads        ExplorationMetricResponse `json:"repeatedReads"`
-	Searches             ExplorationMetricResponse `json:"searches"`
-	Listings             ExplorationMetricResponse `json:"listings"`
-	Commands             ExplorationMetricResponse `json:"commands"`
-	ExploreCommands      ExplorationMetricResponse `json:"exploreCommands"`
-	ExplorationOps       ExplorationMetricResponse `json:"explorationOps"`
+	ToolCalls       ExplorationMetricResponse `json:"toolCalls"`
+	FileReads       ExplorationMetricResponse `json:"fileReads"`
+	UniqueFilesRead ExplorationMetricResponse `json:"uniqueFilesRead"`
+	RepeatedReads   ExplorationMetricResponse `json:"repeatedReads"`
+	Searches        ExplorationMetricResponse `json:"searches"`
+	Listings        ExplorationMetricResponse `json:"listings"`
+	Commands        ExplorationMetricResponse `json:"commands"`
+	ExploreCommands ExplorationMetricResponse `json:"exploreCommands"`
+	ExplorationOps  ExplorationMetricResponse `json:"explorationOps"`
+	// ExplorationOpsAll is the 3D exploration figure (M3), one method per
+	// harness; method names it.
+	ExplorationOpsAll    ExplorationMetricResponse `json:"explorationOpsAll"`
 	UnattributedCommands ExplorationMetricResponse `json:"unattributedCommands"`
 	Edits                ExplorationMetricResponse `json:"edits"`
 	ShellEdits           ExplorationMetricResponse `json:"shellEdits"`
@@ -99,6 +153,9 @@ type AgentExplorationResponse struct {
 	PathScopes             []ExplorationPathScopeCountResponse `json:"pathScopes"`
 	TopFiles               []ExplorationFileCountResponse      `json:"topFiles"`
 	ApproximateAttribution int64                               `json:"approximateAttribution"`
+	Sources                int64                               `json:"sources"`
+	ToolCoverage           ExplorationCoverageResponse         `json:"toolCoverage"`
+	TurnMix                ExplorationTurnMixResponse          `json:"turnMix"`
 }
 
 // RunQualitySignalsResponse are the run's outcome facts, for the 3D quality
@@ -126,10 +183,12 @@ type WorkflowExplorationResponse struct {
 	ProjectID string `json:"projectId"`
 	// Recorded is false when AO holds no usage event and no tool observation
 	// for the run: "nothing recorded", never "zero exploration".
-	Recorded bool                       `json:"recorded"`
-	Agents   []AgentExplorationResponse `json:"agents"`
-	Totals   AgentExplorationResponse   `json:"totals"`
-	Quality  RunQualitySignalsResponse  `json:"quality"`
+	Recorded       bool                       `json:"recorded"`
+	Agents         []AgentExplorationResponse `json:"agents"`
+	Totals         AgentExplorationResponse   `json:"totals"`
+	Quality        RunQualitySignalsResponse  `json:"quality"`
+	ContextSources RunContextSourcesResponse  `json:"contextSources"`
+	MemoryPacks    []RunMemoryPackResponse    `json:"memoryPacks"`
 }
 
 // getWorkflowExploration serves GET /workflows/{workflowId}/exploration. A
@@ -172,9 +231,29 @@ func workflowExplorationResponse(v domain.RunExploration) WorkflowExplorationRes
 		Agents:    make([]AgentExplorationResponse, 0, len(v.Agents)),
 		Totals:    agentExplorationResponse(v.Totals),
 		Quality:   runQualityResponse(v.Quality),
+		ContextSources: RunContextSourcesResponse{
+			Recorded:      v.ContextSources.Recorded(),
+			MemoryMode:    v.ContextSources.MemoryMode,
+			ContextRouter: v.ContextSources.ContextRouter,
+		},
+		MemoryPacks: make([]RunMemoryPackResponse, 0, len(v.MemoryPacks)),
 	}
 	for _, a := range v.Agents {
 		out.Agents = append(out.Agents, agentExplorationResponse(a))
+	}
+	for _, p := range v.MemoryPacks {
+		out.MemoryPacks = append(out.MemoryPacks, RunMemoryPackResponse{
+			Role:            p.Role,
+			TaskRef:         p.TaskRef,
+			PackDigest:      p.PackDigest,
+			PolicyVersion:   p.PolicyVersion,
+			Generation:      p.Generation,
+			IndexedCommit:   p.IndexedCommit,
+			ItemCount:       p.ItemCount,
+			SelectedBytes:   p.SelectedBytes,
+			EstimatedTokens: p.EstimatedTokens,
+			CreatedAt:       p.CreatedAt.UTC().Format(time.RFC3339Nano),
+		})
 	}
 	return out
 }
@@ -188,6 +267,7 @@ func explorationMetric(m domain.ExplorationMetric) ExplorationMetricResponse {
 	if basis != domain.ExplorationUnavailable && m.Value != nil {
 		v := *m.Value
 		out.Value = &v
+		out.LowerBound = m.LowerBound
 	}
 	return out
 }
@@ -215,6 +295,7 @@ func agentExplorationResponse(a domain.AgentExploration) AgentExplorationRespons
 		Models:                 append([]string{}, a.Models...),
 		ModelCalls:             explorationMetric(a.ModelCalls),
 		InputTokens:            explorationMetric(a.InputTokens),
+		UncachedInputTokens:    explorationMetric(a.UncachedInputTokens),
 		OutputTokens:           explorationMetric(a.OutputTokens),
 		CachedInputTokens:      explorationMetric(a.CachedInputTokens),
 		CacheWriteTokens:       explorationMetric(a.CacheWriteTokens),
@@ -231,6 +312,7 @@ func agentExplorationResponse(a domain.AgentExploration) AgentExplorationRespons
 		Commands:               explorationMetric(a.Commands),
 		ExploreCommands:        explorationMetric(a.ExploreCommands),
 		ExplorationOps:         explorationMetric(a.ExplorationOps),
+		ExplorationOpsAll:      explorationMetric(a.ExplorationOpsAll),
 		Edits:                  explorationMetric(a.Edits),
 		UniqueFilesEdited:      explorationMetric(a.UniqueFilesEdited),
 		OpsBeforeFirstEdit:     explorationMetric(a.OpsBeforeFirstEdit),
@@ -247,6 +329,13 @@ func agentExplorationResponse(a domain.AgentExploration) AgentExplorationRespons
 		PathScopes:             []ExplorationPathScopeCountResponse{},
 		TopFiles:               []ExplorationFileCountResponse{},
 		ApproximateAttribution: a.ApproximateAttribution,
+		Sources:                a.Sources,
+		ToolCoverage: ExplorationCoverageResponse{
+			Complete:          a.ToolCoverage.Complete,
+			Reason:            a.ToolCoverage.Reason,
+			ExtractorVersions: append([]int64{}, a.ToolCoverage.ExtractorVersions...),
+		},
+		TurnMix: explorationTurnMix(a.TurnMix),
 	}
 	for scope, n := range a.PathScopes {
 		out.PathScopes = append(out.PathScopes, ExplorationPathScopeCountResponse{Scope: string(scope), Count: n})
@@ -255,6 +344,26 @@ func agentExplorationResponse(a domain.AgentExploration) AgentExplorationRespons
 	for _, f := range a.TopFiles {
 		out.TopFiles = append(out.TopFiles, ExplorationFileCountResponse{Path: f.Path, Reads: f.Reads})
 	}
+	return out
+}
+
+func explorationTurnMix(m domain.ExplorationTurnMix) ExplorationTurnMixResponse {
+	basis := m.Basis
+	if basis == "" {
+		basis = domain.ExplorationUnavailable
+	}
+	out := ExplorationTurnMixResponse{Basis: string(basis), Method: m.Method, Counts: []ExplorationTurnCountResponse{}}
+	if basis == domain.ExplorationUnavailable {
+		return out
+	}
+	for class, n := range m.Counts {
+		name := string(class)
+		if name == "" {
+			name = "unclassified"
+		}
+		out.Counts = append(out.Counts, ExplorationTurnCountResponse{Class: name, Count: n})
+	}
+	sort.Slice(out.Counts, func(i, j int) bool { return out.Counts[i].Class < out.Counts[j].Class })
 	return out
 }
 

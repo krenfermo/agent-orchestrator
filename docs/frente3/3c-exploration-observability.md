@@ -2,7 +2,7 @@
 
 Fecha: 2026-09-24
 Branch: `feat/frente3-3c-exploration-observability`, creada desde ECC `8b8b1665c`.
-Estado: implementado y validado con Claude y Codex reales sobre un fixture. **Sin merge.**
+Estado: implementado y validado con Claude y Codex reales sobre un fixture. Revisión independiente de Codex: ciclo 1 **NO-GO** (1 P0, 3 P1), corregido; ver §11. **Sin merge.**
 
 Regla heredada de 3A/3B: **nunca se presenta como medido un número que AO no midió.**
 Cada cifra lleva su `basis`:
@@ -105,7 +105,7 @@ Una fila por observación:
 - `observed_at`;
 - `origin`: `agent_exploration`, `ao_context`, `harness_context` o `unknown`;
 - `op`: `read`, `search`, `list`, `command_explore`, `command_edit`, `command`, `edit`, `delegate`, `web`, `wait`, `plan`, `other`, `prompt` o `injected`;
-- `tool_name`, validado con charset restringido y un máximo de 96 bytes;
+- `tool_name`, de un **vocabulario cerrado**: el nombre de una herramienta conocida (`Read`, `Bash`, `exec`...), `mcp` para cualquier herramienta MCP, un tipo de attachment conocido de Claude Code, o vacío (= other). Un nombre libre del transcript nunca se persiste tal cual (P0 del ciclo 1);
 - `path_scope`: `project`, `secret`, `excluded`, `outside_harness`, `outside`, `unresolved` o `none`;
 - `path`, **solo** si el scope es `project`;
 - `result_bytes`, `result_items` y `result_error`: `NULL` hasta que se observan, nunca 0 por defecto.
@@ -126,17 +126,37 @@ Una fila por observación:
 1. **Parser.** Los tipos decodifican solo los campos necesarios. El comando solo se lee para nombrar el programa principal, y el resultado solo para medir su longitud.
 2. **Store.** `AgentToolObservation.Valid()` rechaza la escritura completa, sin mover el cursor, en estos casos:
    - un path en un scope que no es `project`;
-   - un path absoluto o que escapa de la raíz;
-   - un valor fuera del vocabulario.
+   - un path absoluto, que escapa de la raíz, no normalizado, con backslash, letra de unidad o caracteres de control;
+   - un valor fuera del vocabulario;
+   - un `tool_name` o un path que el redactor 3B reescribiría (con forma de credencial).
 
 **Frontera de paths (3B)**, en orden:
 
-1. Normalización léxica contra la raíz registrada por AO. Incluye el alias de symlink `/private/var` ↔ `/var`.
+1. Normalización léxica contra la raíz registrada por AO. Incluye los alias `/private/var` ↔ `/var`, `/private/tmp` ↔ `/tmp` en **ambas** direcciones. Un path con forma de otra plataforma (`C:\...`, backslash) o con caracteres de control queda `unresolved`.
+   Si el path todavía existe, se resuelven sus symlinks (lstat de cada componente, sin abrir el fichero): un symlink que sale del proyecto se clasifica `outside`.
 2. `repoaccess.CheckPath`: secretos y directorios excluidos (`.git`, `node_modules`, `.claude/worktrees`…).
 3. `repoaccess.Redact` sobre el propio path: un path con forma de credencial se trata como `secret`.
 4. `~/…` se clasifica como `outside`.
 5. Sin raíz conocida el resultado es `unresolved`, nunca "outside".
 6. El fichero no se abre nunca, porque el worktree puede haber desaparecido.
+
+**Cobertura (P1 del ciclo 1).** `agent_tool_coverage` registra, por fuente de transcript:
+
+- el rango de bytes que ha parseado el extractor 3C;
+- las versiones del extractor (`ExplorationExtractorVersion`);
+- cuándo cubrió por primera vez (`first_covered_at`).
+
+Se escribe en la misma transacción que las observaciones.
+
+El read model reporta cifras de herramientas de un agente solo si cumple las tres condiciones:
+
+1. **ningún** evento de uso de sus fuentes se ingirió sin el extractor (`recorded_at < first_covered_at`, o fuente sin cobertura);
+2. el extractor alcanzó el cursor;
+3. una sola versión del extractor clasificó todo.
+
+No se exige "desde el byte 0": el colector reanuda legítimamente un transcript ya conocido en una fila de fuente nueva, a mitad de fichero.
+
+Si falla cualquiera de las tres (transcript ingerido antes de 0175, binario anterior, versiones mezcladas), esas cifras son `unavailable` con el motivo. Los tokens y las llamadas, que vienen del ledger de uso, se mantienen.
 
 **Retención.** Se borra en cascada junto con el binding de uso, igual que `model_usage_events`.
 
@@ -163,6 +183,7 @@ Una fila por observación:
 | Tokens de harness en la 1.ª llamada | DERIVED (input de la 1.ª llamada − prompt de AO/4) | DERIVED (mismo método) |
 | Ratios de exploración, AO y harness (bytes) | DERIVED | UNAVAILABLE |
 | Duración | Run: OBSERVED (reloj de AO). Por agente: DERIVED (span de timestamps del transcript) | Igual |
+| Clase de turno por llamada (I2) | OBSERVED (`turn_class`, por nombre de herramienta) | DERIVED: cada tool call se asigna a la primera llamada con timestamp ≥ al suyo (el rollout escribe los ítems de una respuesta antes de su `token_count`) |
 | Planner (`claude --print --tools ""`) | Sin herramientas por construcción. Tokens por uso directo; sin transcript | n/a |
 
 ## 5. Métricas (read model) y su basis
@@ -176,17 +197,25 @@ Una fila por observación:
 | `toolCalls`, `commands`, `edits` | O |
 | `exploreCommands`, `shellEdits` | D |
 | `fileReads`, `uniqueFilesRead`, `repeatedReads`, `searches`, `listings`, `explorationOps` | O, o U según la matriz |
+| `explorationOpsAll` (**M3**) | Claude: D (Read/Grep/Glob/LS + comandos de inspección por programa). Codex: O (ítems `parsed_cmd` read/search/list; la llamada shell no se suma otra vez) |
 | `unattributedCommands` | O |
 | `uniqueFilesEdited` | O |
-| `opsBeforeFirstEdit` | O si la 1.ª edición es estructurada; D si fue por shell |
-| `callsBeforeFirstEdit` | D (ordena dos flujos por timestamp) |
+| `opsBeforeFirstEdit` | O si la 1.ª edición es estructurada; D si fue por shell; **U si no hubo edición** (secuencia censurada) o si las observaciones vienen de más de un transcript |
+| `callsBeforeFirstEdit` | D (ordena dos flujos por timestamp); **U si no hubo edición** |
+| `turnMix` (I2) | O (Claude) / D (Codex) |
+| `sources`, `toolCoverage` | — |
 | `repoBytesObserved`, `explorationResultBytes` | O (Claude) / U (Codex) |
 | `aoContextBytes`, `harnessContextBytes` | D |
 | ratios | D o U |
 | `activeSpanMs` | D |
 | `pathScopes` (conteos), `topFiles` (solo paths del proyecto) | — |
 
-Cuando `unattributedCommands > 0`, el `method` de las métricas de ficheros dice **"LOWER BOUND"**.
+Cuando `unattributedCommands > 0`, las métricas de ficheros llevan `lowerBound: true` y su `method` dice **"LOWER BOUND"**. Lo mismo `uniqueFilesEdited` cuando hubo escrituras por shell sin path. Una cota inferior nunca se compara como exacta.
+
+**Nivel de run (I3, I5).**
+
+- `contextSources`: modo de memoria y estado del router **efectivos** del daemon que creó el run, congelados en `policy_snapshot.contextSources` en la misma escritura que crea el run. Sobrevive a la congelación de la política de ejecución. `recorded: false` = run anterior a 3C (no "off").
+- `memoryPacks`: resumen de los `project_memory_context_manifests` del run (rol, digest del pack, commit indexado, generación, ítems, bytes, tokens estimados). Es la unión "lo que AO entregó ↔ lo que el agente consumió" que I5 pedía, hecha en la DB por run en vez de en el recorder de fichero opt-in (`ObserveProviderUsage` sigue sin llamador: el span de dispatch termina antes de que el uso se ingiera, así que no hay nada que unir en él).
 
 **Totales del run.** Las métricas de secuencia (primera edición, primera llamada) son `unavailable` si hay más de un agente. Un run con varios harnesses reporta solo lo que todos pueden observar.
 
@@ -281,15 +310,22 @@ No usó ni Read, ni Grep, ni Edit.
 
 `0175_agent_tool_observations`:
 
-- es aditiva: una tabla, 2 índices y una vista;
+- es aditiva: dos tablas (`agent_tool_observations`, `agent_tool_coverage`), 2 índices y una vista;
 - no hace backfill;
 - tiene Down (probado en up→down);
 - no reconstruye ninguna tabla;
-- añade una FK entrante a `usage_bindings` y a `usage_sources` con `ON DELETE CASCADE`. El inventario de `migrate_rebuild_fk_safety_test` se deriva del esquema, así que un rebuild futuro de esas tablas la verá.
+- añade FKs entrantes a `usage_bindings` y a `usage_sources` con `ON DELETE CASCADE` (desde ambas tablas). El inventario de `migrate_rebuild_fk_safety_test` se deriva del esquema, así que un rebuild futuro de esas tablas la verá.
 
-No hay colisión de número con ninguna rama local ni remota. **No se ha aplicado en producción.** El `parser_state` no cambió de formato, por lo que hacer rollback del binario es seguro.
+No hay colisión de número con ninguna rama local ni remota. El `parser_state` no cambió de formato, por lo que hacer rollback del binario es seguro.
+
+**INCIDENTE (2026-09-25 07:04 UTC): 0175 quedó aplicada en producción por accidente.** Durante la preparación del E2E del ciclo 2, se invocó el binario recién compilado con `--version`, que no es un flag. El binario arrancó su comando por defecto: un daemon con el data dir por defecto `~/.ao/data`. Ese daemon migró la DB de producción de goose 174 a 175 y estuvo vivo unos 5 minutos, hasta que se detuvo. Consecuencias:
+
+- El fichero `0175_agent_tool_observations.sql` de esta rama es idéntico al esquema aplicado y queda **congelado**. Cualquier cambio posterior necesita una migración nueva.
+- El inventario forense y la decisión pendiente están en el reporte de la noche.
 
 ## 8. Producción (solo lectura, apertura `immutable=1`)
+
+> Estado hasta el 2026-09-24. Desde el incidente del 2026-09-25 (§7), producción está en goose **175**. `integrity_check` es ok y hay 0 violaciones de FK.
 
 - goose **174**
 - `integrity_check` **ok**
@@ -304,84 +340,125 @@ No se migró ni se hizo rebuild de MEDUSA. No hubo limpieza. No se activó ni la
 
 **P1:** ninguno.
 
-**P2:**
+**P2 (tras el ciclo 1):**
 
-1. **Clasificación inmutable.** Una observación se clasifica una sola vez. Mejorar el clasificador no reclasifica lo ya ingerido: en el run 1, el `sed -i` quedó como `command`. Para 3D hay que fijar el binario antes del experimento.
-2. **Bytes de harness sobrestimados en Claude.** Proceden de los attachments registrados en el transcript (`prompt_snapshot`, `skill_listing`…), no de lo que se envía. Por eso el ratio es DERIVED, y la estimación en tokens de la 1.ª llamada es la cifra preferible.
-3. **Parser de Codex.** El `parsed_cmd` de Codex marca `unknown` los comandos compuestos. En el fixture, eso fue el 100 % de los comandos. La exploración de Codex queda casi siempre como cota inferior.
+1. **Clasificación inmutable.** Una observación se clasifica una sola vez. Mitigado: la cobertura registra la versión del extractor y un agente con versiones mezcladas queda `unavailable`. Para 3D se fija el binario.
+2. **Bytes de harness sobrestimados en Claude.** Proceden de los attachments registrados en el transcript, no de lo que se envía. Por eso el ratio es DERIVED, y la estimación en tokens de la 1.ª llamada es la cifra preferible.
+3. **Parser de Codex.** `parsed_cmd` marca `unknown` los comandos compuestos; la exploración de Codex queda casi siempre como cota inferior (`lowerBound: true`).
 4. **Root del resolver.** Se toma del worktree de la sesión que pregunta. Si el resolver corre en otro worktree de placement, sus paths caen en `outside`.
-5. **Codex nunca como worker en un run.** Con la política por defecto, el router de complejidad nunca asignó Codex como worker de un run. Se validó como reviewer dentro de un run y como sesión de worker.
+5. **Codex nunca como worker en un run** con la política por defecto. 3D fija el harness del worker por la prioridad de la política de ejecución (congelada en el snapshot).
+6. **Symlinks de paths ya borrados.** Si el path ya no existe al ingerir, vale la respuesta léxica.
+
+Resueltos en el ciclo 1: `tool_name` libre (P0); I2/I3/I5; cobertura; M3 y censura de la 1.ª edición; `uniqueFilesEdited` como cota; paths de otra plataforma y alias; secuencias sobre varios transcripts.
 
 **P3:**
 
 - Vista en la UI, en el detalle del run.
 - Endpoint por sesión.
 - Retención propia, distinta de la del binding.
-- `turn_class` para Codex.
 
-## 10. Diseño exacto propuesto para 3D (no ejecutado)
+## 10. Diseño propuesto para 3D (pre-registro; no ejecutado)
+
+Revisado tras la crítica metodológica del ciclo 1 (§11). Todo lo de esta sección se fija **antes** de ver ningún resultado.
 
 **Brazos:**
 
-- CONTROL: `AO_MEMORY_MODE=off`.
-- TREATMENT: `AO_MEMORY_MODE=assisted`. `preferred` solo si `assisted` no degrada la calidad.
+- CONTROL: memoria `off`, router `off`.
+- TREATMENT: memoria `assisted`, router `off`.
+- `preferred` y el router quedan fuera de 3D.
 
-El router sigue OFF en ambos.
+Cada run declara su brazo en `contextSources` (congelado en el snapshot), y el de TREATMENT prueba en `memoryPacks` qué pack recibió cada dispatch (digest y commit indexado).
 
-**Invariantes:**
+**Aislamiento por run** (contaminación entre repeticiones):
 
-- mismo binario de AO, con hash registrado, y mismo `parser`/clasificador;
-- mismo fixture y mismo commit;
-- mismo modelo, fijado con `--model`/`project set-config --model`;
-- misma política de ejecución, congelada en el snapshot;
-- mismo harness por rol;
-- HOME del provider aislado (`AO_PROVIDER_RUNTIME_ISOLATION=strict`), para que `~/.claude` no domine el contexto del harness;
-- daemon de scratch sin nada más corriendo.
+- **Data dir nuevo por run**, clonado de un snapshot dorado común a los dos brazos: proyecto registrado, índice de memoria ya construido en el commit del fixture y política de ejecución fijada. Motivo: la memoria **aprende de cada tarea terminada incluso con el modo en `off`** (`TaskMemory` graba resultados; solo el consumo depende del modo). Sin data dir nuevo, la repetición *n* de TREATMENT recibiría lo aprendido en las anteriores, incluida la solución.
+- **Worktree nuevo** por run, desde el mismo commit del fixture.
+- Mismo binario de AO (SHA registrado) y misma `ExplorationExtractorVersion`, visible en `toolCoverage.extractorVersions`.
+- Harness por rol fijado en la política de ejecución del snapshot dorado: worker Claude, reviewer Codex, `fallback = wait_for_preferred`. Un run cuyo worker o reviewer no use el harness previsto se excluye y se reporta.
+- Modelo fijado.
+- HOME del provider aislado (`AO_PROVIDER_RUNTIME_ISOLATION=strict`).
+- Ningún otro daemon ni AO vivo durante el experimento.
 
-**Fixture:** el de doc 06 §4, con 150–400 ficheros en Go+TS y trampas. `ledgerlite` es demasiado pequeño para medir ahorro, y sirve solo como control D.
+**Orden y caché:**
+
+- Bloques emparejados por (tarea, repetición). Dentro de cada par, el orden CONTROL/TREATMENT se sortea con una semilla registrada.
+- La caché de prompt del provider no se puede aislar entre runs, porque el prefijo del harness es idéntico en los dos brazos. El emparejamiento y el sorteo reparten la calidez de la caché entre brazos.
+- Se reportan por run `cachedInputTokens` y `cacheWriteTokens` como covariables. M1 incluye la caché, así que no depende de ella.
+
+**Fixture:** repo propio de 195 ficheros (Go + TS, 13 migraciones SQL, tests, `CLAUDE.md`/`AGENTS.md` cortos). Tiene dos trampas: un `Normalize` duplicado en dos módulos, y un `ARCHITECTURE.md` que sitúa mal los descuentos. Los tests ocultos están fuera del repo y los ejecuta un oráculo **después** del run, sobre la rama final. El agente nunca los ve, ni siquiera a través del verify de AO.
 
 **Tareas:**
 
 | Tarea | Tipo |
 |---|---|
-| A | bugfix localizado |
-| B | cambio transversal |
-| C | review de un diff sembrado |
-| D (control) | fichero nombrado |
+| A | bugfix localizado (off-by-one del bloqueo de login; el objetivo no nombra ficheros) |
+| B | cambio transversal (migración + store + 2 rutas + cliente TS + test + docs) |
+| C | revisión del commit HEAD contra `docs/API.md`, corrigiendo el defecto sembrado |
+| D (control) | cambio de una constante en un fichero nombrado |
 
-Cada tarea lleva tests ocultos que ejecuta el verify de AO.
+**Métricas por run y rol** (worker y reviewer por separado, nunca agrupadas). Salen del JSON de `GET /workflows/{id}/exploration`, que se archiva sin modificar:
 
-**Diseño:** N ≥ 5 por tarea y brazo, en orden aleatorio intercalado y con ≥ 6 min entre runs (TTL de caché), o con el estado de caché reportado aparte.
-
-**Métricas por run**, todas de `GET /workflows/{id}/exploration`:
-
-- **M1:** Σ `inputTokens`. **M1u:** input sin caché, del ledger.
-- **M2:** `modelCalls` por rol.
-- **M3:** `explorationOps` + `unattributedCommands`, `opsBeforeFirstEdit` y `callsBeforeFirstEdit`.
-- `uniqueFilesRead` y `repeatedReads`, cuando haya lecturas estructuradas.
-- `harnessTokensFirstCall`: debe **bajar o mantenerse**; la memoria no debería inflar el harness.
-- Duración del run.
+- **M1:** `inputTokens`.
+- **M1u:** `uncachedInputTokens`.
+- **M2:** `modelCalls`.
+- **M3:** `explorationOpsAll`.
+  - Es un método por harness, y los dos brazos usan el mismo harness por rol.
+  - `unattributedCommands` se reporta aparte como sensibilidad. Nunca se suma a M3.
+- Secundarias: `opsBeforeFirstEdit` y `callsBeforeFirstEdit` (solo si ambos brazos editaron; si no, están censuradas), `harnessTokensFirstCall`, `outputTokens`, `uniqueFilesRead`/`repeatedReads` (solo si no son cota inferior), `turnMix` y la duración.
+- Un run cuya `toolCoverage` no sea completa no aporta cifras de herramientas.
 
 **Calidad:**
 
 - Q1: `verifyPassed`;
 - Q2: `finalReviewVerdict`;
 - Q3: `fixCycles`;
-- Q4: tests ocultos;
+- Q4: oráculo de tests ocultos;
 - `retries` y `providerFailovers`.
 
-**Decisión** (criterio de doc 06 §5, fijado antes de correr):
+**Estadística pre-registrada.** N = 5 pares por tarea; es un piloto sin potencia para significancia formal. Con 5 pares un test de signos bilateral no baja de p = 0,0625. Por tarea se reportan:
+
+- la mediana y el rango por brazo;
+- la diferencia relativa de medianas;
+- cuántos de los 5 pares van en la dirección del efecto.
+
+Un efecto cuenta como **consistente** solo si supera el umbral en la mediana **y** va en la misma dirección en ≥ 4 de 5 pares.
+
+**Exclusiones pre-registradas:**
+
+- Se repite (y se reporta) un run que falla por infraestructura: el harness no arranca, caída del provider o crash del daemon.
+- Un fallo de calidad del agente **nunca** se excluye.
+
+**Decisión** (doc 06 §5):
 
 | Resultado | Condición |
 |---|---|
-| **GO** | M1u −15 % **y** (M2 o M3) −20 % en A/B/C, sin degradación de Q1–Q4 y con D ≈ 0 |
-| **ITERATE** | Mejora parcial |
-| **NO-GO** | M1u sin mejora o calidad peor |
+| **GO** | En A, B y C: M1u −15 % **y** (M2 o M3) −20 %, consistentes. Q1/Q4 sin degradación (pass-rate ≥ CONTROL) y ciclos de fix ≤ CONTROL + 0,5 de mediana. D dentro de ±10 %. Las trampas no inducen errores solo con memoria |
+| **ITERATE** | Mejora parcial o inconsistente, mejora en un rol con regresión en otro, o varianza que impide concluir |
+| **NO-GO** | M1u sin mejora o peor en ≥ 2 de 3 tareas, o cualquier degradación de Q1/Q4, o una trampa que induce errores con memoria |
 
-Una métrica cuyo basis sea `unavailable` en un brazo **no entra en la comparación**. Una métrica `derived` se compara solo contra otra `derived` con el mismo `method`.
+Una métrica `unavailable` en un brazo **no entra en la comparación**. Una `derived` se compara solo con otra del mismo `method`, y una cota inferior nunca se compara como exacta.
 
-**Necesario antes de 3D:**
+**Prerequisitos que ya cubre 3C:** `contextSources` (I3), `memoryPacks` (I5), cobertura, M1u y M3.
 
-- añadir `memory_mode` a `policy_snapshot` (I3), para que cada run declare su brazo;
-- decidir si se fuerza el harness del worker por run, porque la política actual solo enruta a Codex en tareas "trivial";
-- autorizar la migración 0175 en la DB que vaya a usar el piloto (scratch; producción no hace falta).
+**Pendiente para 3D:**
+
+- construir el snapshot dorado;
+- aplicar 0175 **solo** en la DB de scratch.
+
+## 11. Revisión independiente (Codex CLI)
+
+Codex CLI 0.153.4 hizo de revisor, en modo de solo lectura y con el encargo explícito de **refutar** el GO. El prompt, la respuesta, el JSONL y la salida de los gates están en `~/.ao/scratch/frente3/reviews/3c/`.
+
+**Ciclo 1: NO-GO.**
+
+| Sev. | Hallazgo | Resolución |
+|---|---|---|
+| P0 | `tool_name` libre persistido: un nombre de herramienta MCP o de un plugin podía llevar un secreto | Vocabulario cerrado en el parser (herramientas conocidas, `mcp`, attachments conocidos, o vacío) y, en el store, rechazo de todo chunk con un `tool_name` o un path con forma de credencial |
+| P1 | Faltaban I2, I3 e I5 del roadmap | I3: `contextSources` en el snapshot. I5: `memoryPacks` por run. I2: `turnMix` (observed en Claude, derived en Codex) |
+| P1 | Telemetría ausente reportada como 0 observado | Tabla `agent_tool_coverage` y `toolCoverage`: sin cobertura completa desde el byte 0, las cifras de herramientas son `unavailable` |
+| P1 | M3 sumaba comandos no clasificados; la 1.ª edición inexistente se contaba | M3 = `explorationOpsAll`, sin comandos genéricos. Sin edición, las secuencias son `unavailable` (censura) |
+| P2 | `uniqueFilesEdited = 0` pese a una edición por shell | `lowerBound: true` y "LOWER BOUND" en el método |
+| P2 | Paths de Windows, alias en una sola dirección, symlinks | `unresolved` para lo foráneo; alias en ambas direcciones; symlink de salida = `outside` |
+| P2 | Secuencias mezclando varios transcripts | `sources`; la secuencia sobre > 1 transcript es `unavailable`; el primer prompt se elige por tiempo |
+
+Codex marcó como **UNVERIFIED** build, vet, lint, short suite y el flake de tmux: su sandbox de solo lectura no deja compilar. En el ciclo 2 recibe los logs completos de los gates.

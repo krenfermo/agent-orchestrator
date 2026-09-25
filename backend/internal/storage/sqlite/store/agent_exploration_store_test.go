@@ -193,3 +193,63 @@ func TestGetUsageSourceForIngestionCarriesTheSubjectWorkspaceRoot(t *testing.T) 
 		t.Fatalf("workspace root = %q (ok=%v), want the session's recorded workspace /ws", got.WorkspaceRoot, ok)
 	}
 }
+
+// Codex 3C review, P0 defence in depth: a credential-shaped tool name or
+// project path fails the whole chunk (cursor unmoved) instead of persisting.
+func TestToolObservations_StoreRefusesCredentialShapedStrings(t *testing.T) {
+	s := newTestStore(t)
+	base := time.Unix(1700000000, 0).UTC()
+	_, source := seedAttributionSession(t, s, base)
+	before := currentUsageSource(t, s, source)
+	for name, o := range map[string]domain.AgentToolObservation{
+		"tool name": {Key: "k1", Origin: domain.OriginAgentExploration, Op: domain.ToolOpOther, ToolName: "AKIAIOSFODNN7EXAMPLE", PathScope: domain.ToolPathNone},
+		"path":      {Key: "k2", Origin: domain.OriginAgentExploration, Op: domain.ToolOpRead, ToolName: "Read", PathScope: domain.ToolPathProject, Path: "AKIAIOSFODNN7EXAMPLE/x.go"},
+		"windows":   {Key: "k3", Origin: domain.OriginAgentExploration, Op: domain.ToolOpRead, ToolName: "Read", PathScope: domain.ToolPathProject, Path: `C:\Users\a.go`},
+	} {
+		if err := applyTools(t, s, source, base, nil, domain.AgentToolFacts{Observations: []domain.AgentToolObservation{o}, ExtractorVersion: 1}); err == nil {
+			t.Fatalf("%s: credential-shaped/foreign observation accepted", name)
+		}
+	}
+	after := currentUsageSource(t, s, source)
+	if after.ByteOffset != before.ByteOffset {
+		t.Fatalf("cursor moved %d -> %d on a refused chunk", before.ByteOffset, after.ByteOffset)
+	}
+}
+
+// Coverage widens monotonically and records the extractor versions.
+func TestToolObservations_CoverageWidensAndRecordsVersions(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	base := time.Unix(1700000000, 0).UTC()
+	sess, source := seedAttributionSession(t, s, base)
+	openWindow(t, s, window{key: "w-worker", session: string(sess.ID), role: domain.WorkflowRoleWorker, opened: base, harness: "claude-code"})
+
+	// A chunk without an extractor version claims nothing.
+	mustNoError(t, applyTools(t, s, source, base, nil, domain.AgentToolFacts{}))
+	rows, err := s.ListRunToolCoverage(ctx, attrRunID)
+	mustNoError(t, err)
+	if len(rows) != 1 || rows[0].CoveredFrom != -1 {
+		t.Fatalf("coverage after an unversioned chunk = %+v, want one source never covered", rows)
+	}
+	// An event ingested WITHOUT the extractor is what makes coverage
+	// incomplete, whatever byte range is covered later.
+	mustNoError(t, applyTools(t, s, source, base, []domain.ModelUsageEvent{attrEvent("pre", 100, 1, base)}, domain.AgentToolFacts{}))
+	mustNoError(t, applyTools(t, s, source, base.Add(time.Second), nil, domain.AgentToolFacts{ExtractorVersion: 1}))
+	mustNoError(t, applyTools(t, s, source, base.Add(2*time.Second), nil, domain.AgentToolFacts{ExtractorVersion: 2}))
+	rows, err = s.ListRunToolCoverage(ctx, attrRunID)
+	mustNoError(t, err)
+	r := rows[0]
+	if r.CoveredFrom != 20 || r.CoveredTo != 40 || r.ByteOffset != 40 || r.MinExtractor != 1 || r.MaxExtractor != 2 {
+		t.Fatalf("coverage = %+v, want bytes 20-40 of a source read to 40, versions 1..2", r)
+	}
+	if r.EventsBeforeCoverage != 1 {
+		t.Fatalf("events before coverage = %d, want the one pre-extractor event", r.EventsBeforeCoverage)
+	}
+	// Events of covered chunks are never counted, including the first one.
+	mustNoError(t, applyTools(t, s, source, base.Add(time.Minute), []domain.ModelUsageEvent{attrEvent("post", 100, 1, base.Add(time.Minute))}, domain.AgentToolFacts{ExtractorVersion: 2}))
+	rows, err = s.ListRunToolCoverage(ctx, attrRunID)
+	mustNoError(t, err)
+	if rows[0].EventsBeforeCoverage != 1 {
+		t.Fatalf("events before coverage = %d after a covered event, want still 1", rows[0].EventsBeforeCoverage)
+	}
+}

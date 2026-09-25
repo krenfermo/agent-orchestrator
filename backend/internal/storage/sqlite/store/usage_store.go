@@ -453,7 +453,7 @@ func (s *Store) ApplyUsageChunk(
 	}
 	for _, facts := range tools {
 		for _, obs := range facts.Observations {
-			if !obs.Valid() {
+			if !obs.Valid() || credentialShaped(obs.ToolName) || credentialShaped(obs.Path) {
 				return fmt.Errorf("usage source %d: invalid tool observation %q", sourceID, obs.Key)
 			}
 		}
@@ -516,6 +516,9 @@ func (s *Store) ApplyUsageChunk(
 		recordedAt := timeOrNow(nextState.UpdatedAt)
 		for _, facts := range tools {
 			if err := applyAgentToolFacts(ctx, q, source.BindingID, source.SourceID, facts, recordedAt); err != nil {
+				return err
+			}
+			if err := recordAgentToolCoverage(ctx, q, source.BindingID, source.SourceID, expectedOffset, nextState.ByteOffset, facts.ExtractorVersion, recordedAt); err != nil {
 				return err
 			}
 		}

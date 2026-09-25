@@ -60,7 +60,7 @@ func (c *Coordinator) CreateObjectiveRunWithStrategy(ctx stdctx.Context, project
 	// objective is exactly where the silent autonomous->manual downgrade
 	// hurts most.
 	// P1-A: an objective's strategy is frozen by this same creation write.
-	snapshot, _ := json.Marshal(withStrategy(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now), strategy))
+	snapshot, _ := json.Marshal(c.withContextSources(withStrategy(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now), strategy)))
 	run := domain.WorkflowRun{ID: runID, ProjectID: projectID, Objective: strings.TrimSpace(objective), State: domain.WorkflowRunPending, PolicyVersion: policyVersionV1, PolicySnapshot: string(snapshot), CreatedAt: now, UpdatedAt: now}
 	step := domain.WorkflowStep{ID: "wfs-" + c.newID(), WorkflowRunID: runID, Kind: domain.WorkflowStepPlan, Ordinal: 1, State: domain.WorkflowStepReady, ArtifactJSON: "{}", CreatedAt: now, UpdatedAt: now}
 	// CP1: the run, its plan step and its plan row land together or not at all.

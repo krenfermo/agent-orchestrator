@@ -92,6 +92,17 @@ type AgentSwitch struct {
 	FinalHandoffHash        string
 }
 
+type AgentToolCoverage struct {
+	UsageSourceID  int64
+	BindingID      int64
+	CoveredFrom    int64
+	CoveredTo      int64
+	MinExtractor   int64
+	MaxExtractor   int64
+	FirstCoveredAt time.Time
+	UpdatedAt      time.Time
+}
+
 type AgentToolObservation struct {
 	ID             int64
 	BindingID      int64
@@ -114,6 +125,7 @@ type AgentToolObservation struct {
 type AgentToolObservationAttribution struct {
 	ObservationID    int64
 	BindingID        int64
+	UsageSourceID    sql.NullInt64
 	SubjectKind      string
 	SubjectID        string
 	Harness          string

@@ -42,6 +42,7 @@ func parseRecordsWithState(
 ) parseResult {
 	result := parseResult{Cursor: cursorFromSource(source.Source, nextOffset, now)}
 	scope := newExplorationScope(source.WorkspaceRoot, source.Source.ArtifactPath, source.Source.Kind)
+	result.Tools.ExtractorVersion = ExplorationExtractorVersion
 	switch source.Source.Kind {
 	case domain.UsageSourceClaudeMain, domain.UsageSourceClaudeSubagent:
 		parseClaude(source, scope, records, state.Claude, &result)

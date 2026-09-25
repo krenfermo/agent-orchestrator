@@ -4238,6 +4238,7 @@ export interface components {
             cycle: number;
             edits: components["schemas"]["ExplorationMetricResponse"];
             explorationOps: components["schemas"]["ExplorationMetricResponse"];
+            explorationOpsAll: components["schemas"]["ExplorationMetricResponse"];
             explorationRatio: components["schemas"]["ExplorationRatioResponse"];
             explorationResultBytes: components["schemas"]["ExplorationMetricResponse"];
             exploreCommands: components["schemas"]["ExplorationMetricResponse"];
@@ -4259,11 +4260,16 @@ export interface components {
             role: string;
             searches: components["schemas"]["ExplorationMetricResponse"];
             shellEdits: components["schemas"]["ExplorationMetricResponse"];
+            /** Format: int64 */
+            sources: number;
             subjectId: string;
             subjectKind: string;
             toolCalls: components["schemas"]["ExplorationMetricResponse"];
+            toolCoverage: components["schemas"]["ControllersExplorationCoverageResponse"];
             topFiles: components["schemas"]["ExplorationFileCountResponse"][];
+            turnMix: components["schemas"]["ControllersExplorationTurnMixResponse"];
             unattributedCommands: components["schemas"]["ExplorationMetricResponse"];
+            uncachedInputTokens: components["schemas"]["ExplorationMetricResponse"];
             uniqueFilesEdited: components["schemas"]["ExplorationMetricResponse"];
             uniqueFilesRead: components["schemas"]["ExplorationMetricResponse"];
             unobservedResults: components["schemas"]["ExplorationMetricResponse"];
@@ -4690,6 +4696,22 @@ export interface components {
             reviewerPriority: string[];
             updatedAt?: string;
             workerPriority: string[];
+        };
+        ControllersExplorationCoverageResponse: {
+            complete: boolean;
+            extractorVersions: number[];
+            reason: string;
+        };
+        ControllersExplorationTurnCountResponse: {
+            class: string;
+            /** Format: int64 */
+            count: number;
+        };
+        ControllersExplorationTurnMixResponse: {
+            /** @enum {string} */
+            basis: "observed" | "derived" | "unavailable";
+            counts: components["schemas"]["ControllersExplorationTurnCountResponse"][];
+            method: string;
         };
         ControllersFixDeliveryView: {
             acknowledged: boolean;
@@ -5435,6 +5457,24 @@ export interface components {
             selectedHarness?: string;
             stepKind: string;
             waiting: boolean;
+        };
+        ControllersRunContextSourcesResponse: {
+            contextRouter: string;
+            memoryMode: string;
+            recorded: boolean;
+        };
+        ControllersRunMemoryPackResponse: {
+            createdAt: string;
+            estimatedTokens: number;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit: string;
+            itemCount: number;
+            packDigest: string;
+            policyVersion: number;
+            role: string;
+            selectedBytes: number;
+            taskRef: string;
         };
         ControllersRunUsageLineResponse: {
             cost: components["schemas"]["ControllersUsageCostResponse"];
@@ -6496,6 +6536,7 @@ export interface components {
         ExplorationMetricResponse: {
             /** @enum {string} */
             basis: "observed" | "derived" | "unavailable";
+            lowerBound: boolean;
             method: string;
             value: null | number;
         };
@@ -8895,6 +8936,8 @@ export interface components {
         };
         WorkflowExplorationResponse: {
             agents: components["schemas"]["AgentExplorationResponse"][];
+            contextSources: components["schemas"]["ControllersRunContextSourcesResponse"];
+            memoryPacks: components["schemas"]["ControllersRunMemoryPackResponse"][];
             projectId: string;
             quality: components["schemas"]["RunQualitySignalsResponse"];
             recorded: boolean;

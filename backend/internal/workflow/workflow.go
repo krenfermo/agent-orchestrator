@@ -296,6 +296,12 @@ type Deps struct {
 	Store    Store
 	Projects Projects
 
+	// ContextSources is the effective state of the context decorators this
+	// daemon composed (project-memory mode, context router), stamped into
+	// every run's policy_snapshot at creation as evidence (Frente 3 / 3C).
+	// The zero value records nothing, which a reader treats as unknown.
+	ContextSources domain.ContextSourcesSnapshot
+
 	// Sessions and ReviewRuns back Reconcile's best-effort integrity check
 	// (see recovery.go). Both optional: a nil dependency simply skips its check.
 	Sessions   Sessions
@@ -645,6 +651,8 @@ type Coordinator struct {
 	clock    func() time.Time
 	newID    func() string
 
+	contextSources domain.ContextSourcesSnapshot
+
 	// sessions, reviewRuns, and log back Reconcile's best-effort integrity
 	// check (see recovery.go). All optional.
 	sessions   Sessions
@@ -879,6 +887,7 @@ func New(d Deps) *Coordinator {
 	return &Coordinator{
 		store:                    d.Store,
 		projects:                 d.Projects,
+		contextSources:           d.ContextSources,
 		sessions:                 d.Sessions,
 		reviewRuns:               d.ReviewRuns,
 		log:                      d.Logger,
@@ -1314,7 +1323,7 @@ func (c *Coordinator) createRunWithPlanArtifact(ctx stdctx.Context, projectID, o
 	// P1-A: the execution strategy is frozen HERE, in the same marshalled
 	// snapshot as the freeze-owed marker, so a run can never durably exist
 	// without one. Nothing downstream recomputes it.
-	policySnapshot, err := json.Marshal(withStrategy(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now), strategy))
+	policySnapshot, err := json.Marshal(c.withContextSources(withStrategy(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now), strategy)))
 	if err != nil {
 		return RunDetail{}, fmt.Errorf("marshal default workflow policy: %w", err)
 	}

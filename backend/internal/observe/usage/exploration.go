@@ -25,6 +25,13 @@ import (
 // is read only to name its leading PROGRAM, and a result only to measure its
 // length.
 
+// ExplorationExtractorVersion identifies this classifier. Observations are
+// classified once, at ingestion, and never reclassified; bump it whenever a
+// change would classify the same transcript differently, so coverage records
+// which version produced a source's rows and a comparison can refuse to mix
+// them.
+const ExplorationExtractorVersion = 1
+
 // explorationScope is what the parser needs to place a path. It is built once
 // per ingestion from facts AO owns, never from the transcript alone: a
 // transcript's own `cwd` is trusted as a base for relative paths only when it
@@ -44,15 +51,60 @@ func newExplorationScope(root, artifactPath string, kind domain.UsageSourceKind)
 		clean := filepath.Clean(root)
 		scope.roots = append(scope.roots, clean)
 		// macOS reaches /var through /private/var and /tmp through
-		// /private/tmp; a harness reports whichever spelling its cwd had. The
-		// resolved form is added so the same file is not counted as outside
-		// the project under its other name.
-		if resolved, err := filepath.EvalSymlinks(clean); err == nil && resolved != clean {
-			scope.roots = append(scope.roots, resolved)
+		// /private/tmp; a harness reports whichever spelling its cwd had. Both
+		// spellings are added -- in both directions, and whether or not the
+		// root still exists -- so the same file is not counted as outside the
+		// project under its other name.
+		scope.roots = appendRoot(scope.roots, privateAlias(clean))
+		if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+			scope.roots = appendRoot(scope.roots, resolved)
+			scope.roots = appendRoot(scope.roots, privateAlias(resolved))
 		}
 	}
 	scope.harnessHome = harnessHomeOf(artifactPath, kind)
 	return scope
+}
+
+// privateAlias returns the other macOS spelling of a path under /var, /tmp or
+// /etc (the /private symlinks), or "" when there is none.
+func privateAlias(p string) string {
+	for _, top := range []string{"/var", "/tmp", "/etc"} {
+		switch {
+		case p == top || strings.HasPrefix(p, top+"/"):
+			return "/private" + p
+		case p == "/private"+top || strings.HasPrefix(p, "/private"+top+"/"):
+			return strings.TrimPrefix(p, "/private")
+		}
+	}
+	return ""
+}
+
+func appendRoot(roots []string, root string) []string {
+	if root == "" {
+		return roots
+	}
+	for _, r := range roots {
+		if r == root {
+			return roots
+		}
+	}
+	return append(roots, root)
+}
+
+// foreignPath reports a path spelled for another platform or carrying bytes no
+// path AO records should: a backslash, a drive letter, a control character.
+// On a Unix host such a value would otherwise be joined under the worktree as
+// if it were relative and persisted verbatim.
+func foreignPath(raw string) bool {
+	if len(raw) >= 2 && raw[1] == ':' && ((raw[0] >= 'a' && raw[0] <= 'z') || (raw[0] >= 'A' && raw[0] <= 'Z')) {
+		return true
+	}
+	for _, r := range raw {
+		if r == '\\' || r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // harnessHomeOf derives the harness configuration home from where its
@@ -107,7 +159,7 @@ const maxRawToolPathBytes = 4096
 // ToolPathProject.
 func (s explorationScope) classify(raw, base string) (domain.ToolPathScope, string) {
 	raw = strings.TrimSpace(raw)
-	if raw == "" || len(raw) > maxRawToolPathBytes || strings.ContainsRune(raw, 0) {
+	if raw == "" || len(raw) > maxRawToolPathBytes || foreignPath(raw) {
 		return domain.ToolPathUnresolved, ""
 	}
 	if strings.HasPrefix(raw, "~") {
@@ -125,6 +177,9 @@ func (s explorationScope) classify(raw, base string) (domain.ToolPathScope, stri
 	p = filepath.Clean(p)
 	for _, root := range s.roots {
 		if rel, ok := within(root, p); ok {
+			if s.escapesThroughSymlink(p) {
+				return domain.ToolPathOutside, ""
+			}
 			return classifyProjectRel(filepath.ToSlash(rel))
 		}
 	}
@@ -139,6 +194,25 @@ func (s explorationScope) classify(raw, base string) (domain.ToolPathScope, stri
 		return domain.ToolPathUnresolved, ""
 	}
 	return domain.ToolPathOutside, ""
+}
+
+// escapesThroughSymlink reports a path that lies inside the project lexically
+// but resolves outside it through a symlink -- the filesystem half of the 3B
+// boundary, which refuses to follow a symlink out of the repository. It only
+// resolves names (EvalSymlinks lstat's each component); the file is never
+// opened. When the path no longer exists (a removed worktree, a file the agent
+// deleted) nothing can be resolved and the lexical answer stands.
+func (s explorationScope) escapesThroughSymlink(p string) bool {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return false
+	}
+	for _, root := range s.roots {
+		if _, ok := within(root, resolved); ok {
+			return false
+		}
+	}
+	return true
 }
 
 // classifyProjectRel applies the path-only half of the 3B boundary to a path
@@ -159,7 +233,7 @@ func classifyProjectRel(rel string) (domain.ToolPathScope, string) {
 			return domain.ToolPathUnresolved, ""
 		}
 	}
-	if len(rel) > domain.MaxToolObservationPathBytes {
+	if !domain.ValidProjectRelativePath(rel) {
 		return domain.ToolPathUnresolved, ""
 	}
 	// A path whose own spelling looks like a credential (a token used as a
@@ -215,6 +289,41 @@ var toolOpOf = map[string]domain.ToolOp{
 	"local_shell_call":  domain.ToolOpCommand,
 	"image_generation":  domain.ToolOpOther,
 	"mcp_tool_call_end": domain.ToolOpOther,
+}
+
+// knownAttachmentType is the closed set of Claude Code attachment types whose
+// name is kept. The names are the harness's own identifiers, gathered from real
+// transcripts; anything else is recorded as the generic "attachment".
+var knownAttachmentType = map[string]bool{
+	"agent_listing_delta": true, "auto_mode": true, "compact_file_reference": true,
+	"credential_org": true, "date": true, "deferred_tools_delta": true,
+	"deferred_tools_record": true, "edited_text_file": true, "environment": true,
+	"file": true, "hook_additional_context": true, "hook_success": true,
+	"instructions": true, "mcp_instructions_delta": true, "model": true,
+	"nested_memory": true, "prompt_snapshot": true, "queued_command": true,
+	"remote_session_change": true, "session_context": true, "silent_turn_reminder": true,
+	"skill_listing": true, "task_status": true, "thinking_drop": true,
+	"todo_reminder": true, "total_tokens_reminder": true,
+}
+
+// mcpToolName is what every MCP tool is recorded as. An MCP tool's name embeds
+// an operator-chosen server name, which is free text AO does not control.
+const mcpToolName = "mcp"
+
+// canonicalToolName is the ONLY way a transcript-supplied name reaches
+// agent_tool_observations.tool_name. A tool name is free text the harness,
+// an MCP server or a plugin chose, and a free-text column can carry anything
+// -- including a credential-shaped string. So nothing is persisted verbatim
+// unless it is one of AO's own known identifiers: a known tool keeps its name,
+// an MCP tool becomes "mcp", and everything else becomes "" (read as other).
+func canonicalToolName(name string) string {
+	if _, ok := toolOpOf[name]; ok {
+		return name
+	}
+	if strings.HasPrefix(name, "mcp__") {
+		return mcpToolName
+	}
+	return ""
 }
 
 func opOfTool(name string) domain.ToolOp {
@@ -508,9 +617,7 @@ func observeClaudeRecord(
 				Op:         opOfTool(b.Name),
 				PathScope:  domain.ToolPathNone,
 			}
-			if domain.ValidToolName(b.Name) {
-				obs.ToolName = b.Name
-			}
+			obs.ToolName = canonicalToolName(b.Name)
 			if obs.Op == domain.ToolOpCommand && b.Name == "Bash" {
 				obs.Op = commandOp(rawString(b.Input.Command))
 			}
@@ -594,7 +701,7 @@ func observeClaudeRecord(
 			PathScope:   domain.ToolPathNone,
 			ResultBytes: &size,
 		}
-		if domain.ValidToolName(shape.Type) {
+		if knownAttachmentType[shape.Type] {
 			obs.ToolName = shape.Type
 		}
 		if target := firstNonEmpty(shape.Path, shape.Filename); target != "" {
@@ -706,9 +813,7 @@ func observeCodexResponseItem(
 			Op:         opOfTool(name),
 			PathScope:  domain.ToolPathNone,
 		}
-		if domain.ValidToolName(name) {
-			obs.ToolName = name
-		}
+		obs.ToolName = canonicalToolName(name)
 		if obs.Op == domain.ToolOpCommand {
 			if command, ok := codexCommandOf(p); ok {
 				obs.Op = commandOp(command)

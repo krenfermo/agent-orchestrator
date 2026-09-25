@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
 )
 
@@ -68,6 +69,85 @@ func applyAgentToolFacts(
 	return nil
 }
 
+// recordAgentToolCoverage widens the byte range of one source the extractor
+// has parsed. Facts that name no extractor version claim nothing.
+func recordAgentToolCoverage(
+	ctx context.Context,
+	q *gen.Queries,
+	bindingID, sourceID, from, to, extractor int64,
+	at time.Time,
+) error {
+	if extractor <= 0 || sourceID <= 0 {
+		return nil
+	}
+	if to < from {
+		to = from
+	}
+	if err := q.UpsertAgentToolCoverage(ctx, gen.UpsertAgentToolCoverageParams{
+		UsageSourceID: sourceID,
+		BindingID:     bindingID,
+		CoveredFrom:   from,
+		CoveredTo:     to,
+		Extractor:     extractor,
+		UpdatedAt:     at,
+	}); err != nil {
+		return fmt.Errorf("record tool coverage: %w", err)
+	}
+	return nil
+}
+
+// RunToolCoverage is what the extractor has parsed of one transcript source
+// of a run's subject.
+type RunToolCoverage struct {
+	Subject      domain.UsageSubject
+	SourceID     int64
+	ByteOffset   int64
+	CoveredFrom  int64 // -1: never parsed by the extractor
+	CoveredTo    int64
+	MinExtractor int64
+	MaxExtractor int64
+	// EventsBeforeCoverage counts the source's usage events ingested without
+	// the extractor (before its first covered chunk, or with no coverage).
+	EventsBeforeCoverage int64
+}
+
+// ListRunToolCoverage returns every transcript source of one run's subjects
+// with its extractor coverage.
+func (s *Store) ListRunToolCoverage(ctx context.Context, runID string) ([]RunToolCoverage, error) {
+	rows, err := s.qr.ListRunToolCoverage(ctx, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list tool coverage for run %s: %w", runID, err)
+	}
+	out := make([]RunToolCoverage, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, RunToolCoverage{
+			Subject:              domain.UsageSubject{Kind: domain.UsageSubjectKind(r.SubjectKind), ID: r.SubjectID},
+			SourceID:             r.UsageSourceID,
+			ByteOffset:           r.ByteOffset,
+			CoveredFrom:          r.CoveredFrom,
+			CoveredTo:            r.CoveredTo,
+			MinExtractor:         r.MinExtractor,
+			MaxExtractor:         r.MaxExtractor,
+			EventsBeforeCoverage: r.EventsBeforeCoverage,
+		})
+	}
+	return out, nil
+}
+
+// credentialShaped is the store's own last line against a credential reaching
+// agent_tool_observations: the two free-ish strings a row carries (tool name
+// and project path) are refused outright when the 3B redactor would rewrite
+// them. The parser already reduces both to closed or checked values; this is
+// defence in depth, so a future parser bug fails the chunk instead of
+// persisting a secret.
+func credentialShaped(v string) bool {
+	if v == "" {
+		return false
+	}
+	redacted, n := repoaccess.Redact(v)
+	return n > 0 || redacted != v
+}
+
 // RunToolObservation is one stored observation, resolved to the role window
 // of the run it was read for.
 type RunToolObservation struct {
@@ -76,6 +156,7 @@ type RunToolObservation struct {
 	ProjectID        string
 	Subject          domain.UsageSubject
 	Harness          string
+	SourceID         int64 // 0 when the row names no source
 	Key              string
 	EventKey         string
 	Ordinal          int64
@@ -106,6 +187,7 @@ func (s *Store) ListRunToolObservations(ctx context.Context, runID string) ([]Ru
 			ProjectID:        r.ProjectID,
 			Subject:          domain.UsageSubject{Kind: domain.UsageSubjectKind(r.SubjectKind), ID: r.SubjectID},
 			Harness:          r.Harness,
+			SourceID:         r.UsageSourceID.Int64,
 			Key:              r.ObservationKey,
 			EventKey:         r.EventKey,
 			Ordinal:          r.Ordinal,

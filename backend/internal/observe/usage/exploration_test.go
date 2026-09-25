@@ -60,6 +60,13 @@ func TestExplorationScopeClassifiesPaths(t *testing.T) {
 		{"code that handles secrets is not a secret", filepath.Join(root, "internal", "secrets.go"), "", domain.ToolPathProject, "internal/secrets.go"},
 		{"empty", "", "", domain.ToolPathUnresolved, ""},
 		{"nul byte", root + "/a\x00b", "", domain.ToolPathUnresolved, ""},
+		// Codex 3C review, P2: a path spelled for another platform must not be
+		// joined under the worktree and persisted verbatim.
+		{"windows absolute", `C:\Users\Alice\Documents\x.go`, root, domain.ToolPathUnresolved, ""},
+		{"windows drive slash", "D:/work/x.go", root, domain.ToolPathUnresolved, ""},
+		{"backslash relative", `src\a.go`, root, domain.ToolPathUnresolved, ""},
+		{"control character", "src/a\x1b.go", root, domain.ToolPathUnresolved, ""},
+		{"newline", "src/a\n.go", root, domain.ToolPathUnresolved, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,6 +80,35 @@ func TestExplorationScopeClassifiesPaths(t *testing.T) {
 		unknown := newExplorationScope("", "/tmp/x.jsonl", domain.UsageSourceClaudeMain)
 		if s, p := unknown.classify("/etc/hosts", ""); s != domain.ToolPathUnresolved || p != "" {
 			t.Fatalf("without a root = %q %q, want unresolved", s, p)
+		}
+	})
+	t.Run("a symlink out of the project is outside", func(t *testing.T) {
+		outside := t.TempDir()
+		mustNoError(t, os.WriteFile(filepath.Join(outside, "notes.txt"), []byte("x"), 0o600))
+		mustNoError(t, os.Symlink(outside, filepath.Join(root, "linked")))
+		mustNoError(t, os.WriteFile(filepath.Join(root, "real.go"), []byte("x"), 0o600))
+		mustNoError(t, os.Symlink(filepath.Join(root, "real.go"), filepath.Join(root, "alias.go")))
+		if s, p := scope.classify(filepath.Join(root, "linked", "notes.txt"), ""); s != domain.ToolPathOutside || p != "" {
+			t.Fatalf("symlink escape = %q %q, want outside", s, p)
+		}
+		if s, p := scope.classify(filepath.Join(root, "alias.go"), ""); s != domain.ToolPathProject || p != "alias.go" {
+			t.Fatalf("in-project symlink = %q %q, want project alias.go", s, p)
+		}
+		// A path that no longer exists keeps its lexical answer.
+		if s, p := scope.classify(filepath.Join(root, "gone", "x.go"), ""); s != domain.ToolPathProject || p != "gone/x.go" {
+			t.Fatalf("missing path = %q %q, want project gone/x.go", s, p)
+		}
+	})
+	t.Run("both macOS private spellings of a root", func(t *testing.T) {
+		for _, tc := range []struct{ root, raw string }{
+			{"/private/var/folders/x/wt", "/var/folders/x/wt/a.go"},
+			{"/var/folders/x/wt", "/private/var/folders/x/wt/a.go"},
+			{"/tmp/wt", "/private/tmp/wt/a.go"},
+		} {
+			sc := newExplorationScope(tc.root, "/h/.claude/projects/s/x.jsonl", domain.UsageSourceClaudeMain)
+			if s, p := sc.classify(tc.raw, ""); s != domain.ToolPathProject || p != "a.go" {
+				t.Fatalf("root %q, path %q = %q %q, want project a.go", tc.root, tc.raw, s, p)
+			}
 		}
 	})
 	t.Run("an untrusted cwd is not a base", func(t *testing.T) {
@@ -464,6 +500,18 @@ func TestIngestorPersistsToolObservationsExactlyOnceAcrossRestart(t *testing.T) 
 		t.Fatalf("after restart rows/paths/results = %d/%d/%d, want %d/%d/%d (exactly once)", rows2, withPath2, withResult2, rows, withPath, withResult)
 	}
 
+	// Coverage: every source the ingestor read was parsed by the extractor
+	// from byte zero to its cursor, by one extractor version.
+	var uncovered int64
+	mustNoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_sources s
+		LEFT JOIN agent_tool_coverage c ON c.usage_source_id = s.id
+		WHERE s.byte_offset > 0 AND (c.usage_source_id IS NULL OR c.covered_from <> 0
+		   OR c.covered_to < s.byte_offset OR c.min_extractor <> ? OR c.max_extractor <> ?)`,
+		ExplorationExtractorVersion, ExplorationExtractorVersion).Scan(&uncovered))
+	if uncovered != 0 {
+		t.Fatalf("%d read source(s) lack full extractor coverage", uncovered)
+	}
+
 	// Nothing but project-relative paths, and no sentinel anywhere in the table.
 	dump, err := db.QueryContext(ctx, `SELECT observation_key, event_key, origin, op, tool_name, path_scope, COALESCE(path,'') FROM agent_tool_observations`)
 	mustNoError(t, err)
@@ -479,4 +527,67 @@ func TestIngestorPersistsToolObservationsExactlyOnceAcrossRestart(t *testing.T) 
 		}
 	}
 	mustNoError(t, dump.Err())
+}
+
+// Codex 3C review, P0: tool_name is free text a harness, an MCP server or a
+// plugin chose. Only AO's own known identifiers are ever persisted.
+func TestToolNamesAreAClosedVocabulary(t *testing.T) {
+	root := t.TempDir()
+	lines := []string{
+		`{"type":"assistant","uuid":"u1","timestamp":"2026-09-24T10:00:00Z","cwd":"` + root + `","message":{"id":"m1","content":[` +
+			`{"type":"tool_use","id":"t1","name":"` + sentinelSecret + `","input":{}},` +
+			`{"type":"tool_use","id":"t2","name":"mcp__acme-` + sentinelSecret + `__search","input":{}},` +
+			`{"type":"tool_use","id":"t3","name":"Read","input":{"file_path":"` + root + `/a.go"}},` +
+			`{"type":"tool_use","id":"t4","name":"ghp_abcdefghijklmnopqrstuvwxyz0123456789","input":{}}]}}`,
+		`{"type":"attachment","uuid":"u2","timestamp":"2026-09-24T10:00:01Z","attachment":{"type":"` + sentinelSecret + `"}}`,
+		`{"type":"attachment","uuid":"u3","timestamp":"2026-09-24T10:00:01Z","attachment":{"type":"skill_listing"}}`,
+	}
+	result := parseRecords(claudeSource(root), toRecords(lines), 0, time.Now())
+	names := map[string]string{}
+	for _, o := range result.Tools.Observations {
+		names[o.Key] = o.ToolName
+		if strings.Contains(o.ToolName, "AKIA") || strings.Contains(o.ToolName, "ghp_") || strings.Contains(o.ToolName, "acme") {
+			t.Fatalf("free-text tool name persisted: %q", o.ToolName)
+		}
+	}
+	want := map[string]bool{"": true, "mcp": true, "Read": true, "attachment": true, "skill_listing": true}
+	for _, n := range names {
+		if !want[n] {
+			t.Fatalf("unexpected tool name %q; want only canonical names", n)
+		}
+	}
+	for _, n := range []string{"mcp", "Read", "attachment", "skill_listing"} {
+		found := false
+		for _, got := range names {
+			found = found || got == n
+		}
+		if !found {
+			t.Fatalf("expected canonical name %q among %v", n, names)
+		}
+	}
+	assertNoSentinels(t, result.Tools)
+
+	codex := []string{
+		`{"timestamp":"2026-09-24T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"` + sentinelSecret + `","call_id":"c1","arguments":"{}"}}`,
+		`{"timestamp":"2026-09-24T10:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"c2"}}`,
+	}
+	cr := parseRecords(codexSource(root), toRecords(codex), 0, time.Now())
+	for _, o := range cr.Tools.Observations {
+		if o.ToolName != "" && o.ToolName != "exec" {
+			t.Fatalf("codex tool name %q persisted", o.ToolName)
+		}
+	}
+	if cr.Tools.ExtractorVersion != ExplorationExtractorVersion || result.Tools.ExtractorVersion != ExplorationExtractorVersion {
+		t.Fatal("every parsed chunk must name its extractor version")
+	}
+}
+
+func codexSource(root string) domain.UsageSourceContext {
+	return domain.UsageSourceContext{
+		Source: domain.UsageSourceRecord{
+			Kind: domain.UsageSourceCodexRollout, NativeSessionID: "codex-root",
+			ArtifactPath: "/home/x/.codex/sessions/2026/09/24/rollout.jsonl", ParserStateJSON: "{}",
+		},
+		NativeRootID: "codex-root", WorkspaceRoot: root,
+	}
 }

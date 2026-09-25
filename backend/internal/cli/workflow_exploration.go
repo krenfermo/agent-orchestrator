@@ -18,9 +18,10 @@ import (
 // boundary (AGENTS.md).
 
 type explorationMetricPayload struct {
-	Value  *int64 `json:"value"`
-	Basis  string `json:"basis"`
-	Method string `json:"method"`
+	Value      *int64 `json:"value"`
+	Basis      string `json:"basis"`
+	Method     string `json:"method"`
+	LowerBound bool   `json:"lowerBound"`
 }
 
 type explorationRatioPayload struct {
@@ -39,6 +40,7 @@ type agentExplorationPayload struct {
 
 	ModelCalls           explorationMetricPayload `json:"modelCalls"`
 	InputTokens          explorationMetricPayload `json:"inputTokens"`
+	UncachedInputTokens  explorationMetricPayload `json:"uncachedInputTokens"`
 	OutputTokens         explorationMetricPayload `json:"outputTokens"`
 	CachedInputTokens    explorationMetricPayload `json:"cachedInputTokens"`
 	FirstCallInputTokens explorationMetricPayload `json:"firstCallInputTokens"`
@@ -51,6 +53,7 @@ type agentExplorationPayload struct {
 	Commands             explorationMetricPayload `json:"commands"`
 	ExploreCommands      explorationMetricPayload `json:"exploreCommands"`
 	ExplorationOps       explorationMetricPayload `json:"explorationOps"`
+	ExplorationOpsAll    explorationMetricPayload `json:"explorationOpsAll"`
 	Edits                explorationMetricPayload `json:"edits"`
 	ShellEdits           explorationMetricPayload `json:"shellEdits"`
 	Unattributed         explorationMetricPayload `json:"unattributedCommands"`
@@ -73,6 +76,19 @@ type agentExplorationPayload struct {
 		Path  string `json:"path"`
 		Reads int64  `json:"reads"`
 	} `json:"topFiles"`
+	Sources      int64 `json:"sources"`
+	ToolCoverage struct {
+		Complete          bool    `json:"complete"`
+		Reason            string  `json:"reason"`
+		ExtractorVersions []int64 `json:"extractorVersions"`
+	} `json:"toolCoverage"`
+	TurnMix struct {
+		Basis  string `json:"basis"`
+		Counts []struct {
+			Class string `json:"class"`
+			Count int64  `json:"count"`
+		} `json:"counts"`
+	} `json:"turnMix"`
 }
 
 type runQualityPayload struct {
@@ -97,6 +113,20 @@ type workflowExplorationPayload struct {
 	Agents    []agentExplorationPayload `json:"agents"`
 	Totals    agentExplorationPayload   `json:"totals"`
 	Quality   runQualityPayload         `json:"quality"`
+
+	ContextSources struct {
+		Recorded      bool   `json:"recorded"`
+		MemoryMode    string `json:"memoryMode"`
+		ContextRouter string `json:"contextRouter"`
+	} `json:"contextSources"`
+	MemoryPacks []struct {
+		Role            string `json:"role"`
+		PackDigest      string `json:"packDigest"`
+		IndexedCommit   string `json:"indexedCommit"`
+		ItemCount       int    `json:"itemCount"`
+		SelectedBytes   int    `json:"selectedBytes"`
+		EstimatedTokens int    `json:"estimatedTokens"`
+	} `json:"memoryPacks"`
 }
 
 func newWorkflowExplorationCommand(ctx *commandContext) *cobra.Command {
@@ -108,7 +138,8 @@ func newWorkflowExplorationCommand(ctx *commandContext) *cobra.Command {
 			"reads, searches, listings, commands, edits, exploration before the first edit, bytes returned to\n" +
 			"the model by origin, model calls and tokens -- then the run's quality signals.\n\n" +
 			"Every figure carries its basis. `~` marks DERIVED (an inference); `n/a` marks UNAVAILABLE (the\n" +
-			"harness does not expose it), never 0. Paths are project-relative and only for files inside the\n" +
+			"harness does not expose it, or AO never parsed the transcript), never 0; `>=` marks a LOWER\n" +
+			"BOUND (activity AO could not attribute may add to it). Paths are project-relative and only for files inside the\n" +
 			"project that pass the repository boundary; no content, command or prompt is stored.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -142,6 +173,9 @@ func fmtMetric(m explorationMetricPayload) string {
 		return "n/a"
 	}
 	v := humanCount(*m.Value)
+	if m.LowerBound {
+		v = ">=" + v
+	}
 	if m.Basis == "derived" {
 		return "~" + v
 	}
@@ -166,6 +200,22 @@ func fmtRatio(m explorationRatioPayload) string {
 func printWorkflowExploration(w io.Writer, res workflowExplorationPayload) error {
 	out := &strings.Builder{}
 	linef(out, "workflow %s  (project %s)\n", res.RunID, res.ProjectID)
+	if res.ContextSources.Recorded {
+		linef(out, "Context sources  memory=%s  router=%s  (frozen at run creation)\n", res.ContextSources.MemoryMode, res.ContextSources.ContextRouter)
+	} else {
+		line(out, "Context sources  not recorded (run predates 3C)")
+	}
+	for _, p := range res.MemoryPacks {
+		digest := p.PackDigest
+		if len(digest) > 12 {
+			digest = digest[:12]
+		}
+		commit := p.IndexedCommit
+		if len(commit) > 12 {
+			commit = commit[:12]
+		}
+		linef(out, "  Memory pack  %-10s digest %s  commit %s  %d items  %d bytes  ~%d tokens\n", p.Role, digest, commit, p.ItemCount, p.SelectedBytes, p.EstimatedTokens)
+	}
 	if !res.Recorded {
 		line(out, "\nNo exploration or usage recorded for this run.")
 		line(out, "That is not zero exploration -- AO holds no transcript facts for it.")
@@ -193,14 +243,30 @@ func writeAgentExploration(out *strings.Builder, a agentExplorationPayload) {
 	}
 	linef(tw, "  Files read\t%s\tUnique files\t%s\tRepeated\t%s\n", fmtMetric(a.FileReads), fmtMetric(a.UniqueFilesRead), fmtMetric(a.RepeatedReads))
 	linef(tw, "  Searches\t%s\tListings\t%s\tExplore cmds\t%s\n", fmtMetric(a.Searches), fmtMetric(a.Listings), fmtMetric(a.ExploreCommands))
+	linef(tw, "  Exploration (M3)\t%s\tSources\t%d\t\t\n", fmtMetric(a.ExplorationOpsAll), a.Sources)
 	linef(tw, "  Tool calls\t%s\tCommands\t%s\tEdits\t%s (shell ~%s)\n", fmtMetric(a.ToolCalls), fmtMetric(a.Commands), fmtMetric(a.Edits), strings.TrimPrefix(fmtMetric(a.ShellEdits), "~"))
 	linef(tw, "  Files edited\t%s\tOps before 1st edit\t%s\tCalls before 1st edit\t%s\n", fmtMetric(a.UniqueFilesEdited), fmtMetric(a.OpsBeforeFirstEdit), fmtMetric(a.CallsBeforeFirstEdit))
 	linef(tw, "  Model calls\t%s\tInput tokens\t%s\tCached\t%s\n", fmtMetric(a.ModelCalls), fmtMetric(a.InputTokens), fmtMetric(a.CachedInputTokens))
+	linef(tw, "  Uncached input (M1u)\t%s\t\t\t\t\n", fmtMetric(a.UncachedInputTokens))
 	linef(tw, "  Output tokens\t%s\t1st-call input\t%s\tActive span ms\t%s\n", fmtMetric(a.OutputTokens), fmtMetric(a.FirstCallInputTokens), fmtMetric(a.ActiveSpanMs))
 	linef(tw, "  Harness tokens (1st call)\t%s\tUnattributed cmds\t%s\n", fmtMetric(a.HarnessTokens1st), fmtMetric(a.Unattributed))
 	linef(tw, "  Repo bytes\t%s\tAO bytes\t%s\tHarness bytes\t%s\n", fmtMetric(a.RepoBytesObserved), fmtMetric(a.AOContextBytes), fmtMetric(a.HarnessContextBytes))
 	linef(tw, "  Exploration share\t%s\tAO share\t%s\tHarness share\t%s\n", fmtRatio(a.ExplorationRatio), fmtRatio(a.AOContextRatio), fmtRatio(a.HarnessContextRatio))
 	_ = tw.Flush()
+	if !a.ToolCoverage.Complete && a.ToolCoverage.Reason != "" {
+		linef(out, "  Tool telemetry unavailable: %s\n", a.ToolCoverage.Reason)
+	}
+	if len(a.TurnMix.Counts) > 0 {
+		parts := make([]string, 0, len(a.TurnMix.Counts))
+		for _, c := range a.TurnMix.Counts {
+			parts = append(parts, c.Class+"="+strconv.FormatInt(c.Count, 10))
+		}
+		prefix := ""
+		if a.TurnMix.Basis == "derived" {
+			prefix = "~"
+		}
+		linef(out, "  Turn mix     %s%s\n", prefix, strings.Join(parts, "  "))
+	}
 	if len(a.PathScopes) > 0 {
 		parts := make([]string, 0, len(a.PathScopes))
 		for _, s := range a.PathScopes {

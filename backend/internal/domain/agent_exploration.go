@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"path"
 	"strings"
 	"time"
 )
@@ -210,6 +211,11 @@ type AgentToolResult struct {
 type AgentToolFacts struct {
 	Observations []AgentToolObservation
 	Results      []AgentToolResult
+	// ExtractorVersion names the classifier that produced these facts. The
+	// store records it per source (agent_tool_coverage) together with the byte
+	// range parsed, so a read model can tell "the extractor saw nothing" from
+	// "the extractor never ran here". Zero means the facts claim no coverage.
+	ExtractorVersion int64
 }
 
 // Empty reports whether there is nothing to write.
@@ -245,8 +251,32 @@ func (o AgentToolObservation) Valid() bool {
 	if o.PathScope != ToolPathProject {
 		return o.Path == ""
 	}
-	return o.Path != "" && len(o.Path) <= MaxToolObservationPathBytes &&
-		!strings.HasPrefix(o.Path, "/") && !strings.HasPrefix(o.Path, "../") && o.Path != ".."
+	return ValidProjectRelativePath(o.Path)
+}
+
+// ValidProjectRelativePath reports whether p may be stored as a project path:
+// slash-separated, relative, already clean (no `..` segment, no `//`), and
+// free of anything that could make it name a place outside the project on
+// some platform -- a backslash, a drive letter, a control character.
+func ValidProjectRelativePath(p string) bool {
+	if p == "" || len(p) > MaxToolObservationPathBytes || strings.HasPrefix(p, "/") {
+		return false
+	}
+	if p != "." && path.Clean(p) != p {
+		return false
+	}
+	if p == ".." || strings.HasPrefix(p, "../") {
+		return false
+	}
+	if len(p) >= 2 && p[1] == ':' && ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) {
+		return false
+	}
+	for _, r := range p {
+		if r == '\\' || r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // ExplorationBasis says how an exploration figure came to be known. It is
@@ -288,6 +318,11 @@ type ExplorationMetric struct {
 	Value  *int64
 	Basis  ExplorationBasis
 	Method string
+	// LowerBound is set when the value is a floor, not a count: activity AO
+	// saw but could not attribute (a shell command whose files are not named,
+	// a shell write with no path) may add to it. A lower bound is never
+	// compared as if it were exact.
+	LowerBound bool
 }
 
 // ExplorationRatio is one share in [0,1] plus how it was obtained.
@@ -306,12 +341,15 @@ type AgentExploration struct {
 	Harness string
 	Models  []string
 
-	ModelCalls        ExplorationMetric
-	InputTokens       ExplorationMetric
-	OutputTokens      ExplorationMetric
-	CachedInputTokens ExplorationMetric
-	CacheWriteTokens  ExplorationMetric
-	FirstCallInput    ExplorationMetric
+	ModelCalls  ExplorationMetric
+	InputTokens ExplorationMetric
+	// UncachedInputTokens is M1u: input the provider billed as neither a
+	// cache read nor a cache write.
+	UncachedInputTokens ExplorationMetric
+	OutputTokens        ExplorationMetric
+	CachedInputTokens   ExplorationMetric
+	CacheWriteTokens    ExplorationMetric
+	FirstCallInput      ExplorationMetric
 	// HarnessTokensFirstCall estimates how much of the first call's input
 	// the harness contributed (system prompt, tool schemas, injected
 	// instructions): first-call input minus the AO prompt at ~4 bytes/token.
@@ -326,6 +364,14 @@ type AgentExploration struct {
 	Commands        ExplorationMetric
 	ExploreCommands ExplorationMetric
 	ExplorationOps  ExplorationMetric
+	// ExplorationOpsAll is the 3D exploration figure (M3): every exploration
+	// operation AO can classify, by ONE method per harness. Claude: structured
+	// Read/Grep/Glob/LS calls plus shell commands classified as inspection by
+	// their program name (derived). Codex: the provider's own parsed_cmd
+	// read/search/list items; its shell calls are not added again, because
+	// parsed_cmd already describes them. Commands AO cannot classify are NOT
+	// in it -- they are UnattributedCommands, a sensitivity figure.
+	ExplorationOpsAll ExplorationMetric
 	// UnattributedCommands counts executed commands whose inspected files AO
 	// cannot name: every Claude shell call, and every command Codex's own
 	// parser marked unknown. File counts are a lower bound whenever it is > 0.
@@ -356,6 +402,49 @@ type AgentExploration struct {
 	// ApproximateAttribution counts observations placed in a role window by
 	// the subject-earliest fallback rather than by their own time.
 	ApproximateAttribution int64
+	// Sources is how many transcript sources the agent's observations came
+	// from. Byte orders of different transcripts are not comparable, so a
+	// sequence figure over more than one is unavailable.
+	Sources int64
+	// ToolCoverage says whether the 3C extractor parsed every transcript of
+	// this agent from its first byte. When it did not, every tool figure is
+	// unavailable: an unparsed transcript is not zero exploration.
+	ToolCoverage ExplorationCoverage
+	// TurnMix is how the agent's provider calls split by turn class, and how
+	// that was known.
+	TurnMix ExplorationTurnMix
+}
+
+// ExplorationCoverage is the extractor's coverage of one agent's transcripts.
+type ExplorationCoverage struct {
+	Complete bool
+	// Reason is empty when Complete.
+	Reason string
+	// ExtractorVersions are the classifier versions that produced the rows.
+	ExtractorVersions []int64
+}
+
+// ExplorationTurnMix counts provider calls per turn class.
+type ExplorationTurnMix struct {
+	Basis  ExplorationBasis
+	Method string
+	Counts map[TurnClass]int64
+}
+
+// RunMemoryPack is what one dispatch of a run was handed by project memory: a
+// summary of its context manifest. It is how 3D proves which memory a
+// treatment run actually received -- identities and sizes only, no facts.
+type RunMemoryPack struct {
+	Role            string
+	TaskRef         string
+	PackDigest      string
+	PolicyVersion   int
+	Generation      int64
+	IndexedCommit   string
+	ItemCount       int
+	SelectedBytes   int
+	EstimatedTokens int
+	CreatedAt       time.Time
 }
 
 // ExplorationFileCount is one project-relative path and how often it was read.
@@ -394,4 +483,12 @@ type RunExploration struct {
 	Agents   []AgentExploration
 	Totals   AgentExploration
 	Quality  RunQualitySignals
+	// ContextSources is the context-decorator state frozen into the run's
+	// policy_snapshot at creation (zero value: not recorded -- a run created
+	// before 3C, or by a daemon that did not stamp it).
+	ContextSources ContextSourcesSnapshot
+	// MemoryPacks are the run's project-memory context manifests, oldest
+	// first. Empty with memory off; with memory on, an empty list means no
+	// dispatch was handed a pack.
+	MemoryPacks []RunMemoryPack
 }

@@ -158,6 +158,35 @@ type WorkflowPolicy struct {
 	// A snapshot decoded from before P5-A has this at its zero value; callers
 	// must use EffectiveReviewDepthPolicy, never read ReviewDepth directly.
 	ReviewDepth ReviewDepthPolicySnapshot `json:"reviewDepth,omitempty"`
+	// ContextSources is Frente 3 / 3C's frozen record of which context
+	// decorators the creating daemon had active: the project-memory mode and
+	// whether the context router was routing. Both are daemon-wide switches
+	// read once at composition, so before this a run could not say, after the
+	// fact, which arm of a memory A/B it belonged to.
+	//
+	// It is EVIDENCE, never a switch: nothing reads it to decide a dispatch.
+	// What a dispatch actually received is in project_memory_context_manifests
+	// (pack digest, indexed commit, generation) keyed by run and role.
+	//
+	// A snapshot decoded from before 3C has this at its zero value, which
+	// means "not recorded" -- never "off".
+	ContextSources ContextSourcesSnapshot `json:"contextSources,omitempty"`
+}
+
+// ContextSourcesSnapshot is the effective state of the context decorators when
+// a run was created. Effective means after composition: a mode that was
+// requested but could not be enabled (a rejected budget, no memory service) is
+// recorded as off, because off is what the run's dispatches got.
+type ContextSourcesSnapshot struct {
+	// MemoryMode is off, assisted or preferred.
+	MemoryMode string `json:"memoryMode,omitempty"`
+	// ContextRouter is on or off.
+	ContextRouter string `json:"contextRouter,omitempty"`
+}
+
+// Recorded reports whether the creating daemon stamped this snapshot.
+func (s ContextSourcesSnapshot) Recorded() bool {
+	return s.MemoryMode != "" && s.ContextRouter != ""
 }
 
 // EffectiveReviewDepthPolicy returns p.ReviewDepth with the forward-compatible

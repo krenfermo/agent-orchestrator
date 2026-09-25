@@ -21,6 +21,15 @@ type fakeExplorationStore struct {
 	checkpoints  []domain.WorkflowCheckpoint
 	providers    []domain.ProviderAttempt
 	reviews      map[string]domain.ReviewRun
+	coverage     []store.RunToolCoverage
+	manifests    []domain.MemoryContextManifest
+}
+
+func (f *fakeExplorationStore) ListRunToolCoverage(context.Context, string) ([]store.RunToolCoverage, error) {
+	return f.coverage, nil
+}
+func (f *fakeExplorationStore) ListProjectMemoryContextManifestsForRun(context.Context, domain.ProjectID, string) ([]domain.MemoryContextManifest, error) {
+	return f.manifests, nil
 }
 
 func (f *fakeExplorationStore) ListRunToolObservations(context.Context, string) ([]store.RunToolObservation, error) {
@@ -84,7 +93,7 @@ func callAt(sec int, input, cached, output int64) store.RunExplorationCall {
 	return store.RunExplorationCall{
 		Role: domain.WorkflowRoleWorker, Subject: domain.SessionSubject("s1"), Harness: "claude-code",
 		ModelID: "claude-opus-5", ObservedAt: at(sec),
-		Tokens: domain.UsageTokenTotals{InputTokens: input, CacheReadTokens: cached, OutputTokens: output, EventCount: 1},
+		Tokens: domain.UsageTokenTotals{InputTokens: input, UncachedInputTokens: input - cached, CacheReadTokens: cached, OutputTokens: output, EventCount: 1},
 	}
 }
 
@@ -146,12 +155,17 @@ func TestExplorationAggregatesOneClaudeAgent(t *testing.T) {
 	val(t, "exploreCommands", a.ExploreCommands, 1, domain.ExplorationDerived)
 	val(t, "explorationOps", a.ExplorationOps, 6, domain.ExplorationObserved)
 	val(t, "opsBeforeFirstEdit", a.OpsBeforeFirstEdit, 6, domain.ExplorationObserved)
+	val(t, "explorationOpsAll", a.ExplorationOpsAll, 7, domain.ExplorationDerived)
+	if !a.FileReads.LowerBound || !a.ExplorationOps.LowerBound {
+		t.Fatal("a shell command explored: structured file counts are lower bounds")
+	}
 	val(t, "callsBeforeFirstEdit", a.CallsBeforeFirstEdit, 3, domain.ExplorationDerived)
 	val(t, "edits", a.Edits, 1, domain.ExplorationObserved)
 	val(t, "uniqueFilesEdited", a.UniqueFilesEdited, 1, domain.ExplorationObserved)
 	val(t, "modelCalls", a.ModelCalls, 4, domain.ExplorationObserved)
 	val(t, "inputTokens", a.InputTokens, 9500, domain.ExplorationObserved)
 	val(t, "cachedInputTokens", a.CachedInputTokens, 7000, domain.ExplorationObserved)
+	val(t, "uncachedInputTokens", a.UncachedInputTokens, 2500, domain.ExplorationObserved)
 	val(t, "firstCallInput", a.FirstCallInput, 1000, domain.ExplorationObserved)
 	val(t, "repoBytes", a.RepoBytesObserved, 280, domain.ExplorationObserved)
 	val(t, "unobservedResults", a.UnobservedResults, 1, domain.ExplorationObserved)
@@ -201,6 +215,14 @@ func TestExplorationShellEditIsADerivedFirstEdit(t *testing.T) {
 	}
 	val(t, "opsBeforeFirstEdit", a.OpsBeforeFirstEdit, 2, domain.ExplorationDerived)
 	val(t, "harnessTokensFirstCall", a.HarnessTokensFirstCall, 39000, domain.ExplorationDerived)
+	// M3 counts the three inspecting commands; the write is not exploration.
+	val(t, "explorationOpsAll", a.ExplorationOpsAll, 3, domain.ExplorationDerived)
+	// The shell write changed a file AO cannot name: zero named files is a
+	// floor, not a count (Codex 3C review, P2).
+	val(t, "uniqueFilesEdited", a.UniqueFilesEdited, 0, domain.ExplorationObserved)
+	if !a.UniqueFilesEdited.LowerBound || !strings.Contains(a.UniqueFilesEdited.Method, "LOWER BOUND") {
+		t.Fatalf("uniqueFilesEdited must be a lower bound after a shell write: %+v", a.UniqueFilesEdited)
+	}
 }
 
 func codexObs(sec int, kind domain.ToolOp, tool string, scope domain.ToolPathScope, path string) store.RunToolObservation {
@@ -265,7 +287,204 @@ func TestExplorationCurrentCodexParsedCommandsAreObservedNotExtraCalls(t *testin
 	val(t, "opsBeforeFirstEdit", a.OpsBeforeFirstEdit, 2, domain.ExplorationObserved)
 	val(t, "uniqueFilesEdited", a.UniqueFilesEdited, 1, domain.ExplorationObserved)
 	val(t, "unattributedCommands", a.UnattributedCommands, 1, domain.ExplorationObserved)
+	val(t, "explorationOpsAll", a.ExplorationOpsAll, 3, domain.ExplorationObserved)
 	unavail(t, "repoBytes", a.RepoBytesObserved)
+}
+
+// A structured Codex shell call (`shell` with `cat f`) is described twice: by
+// AO's program-name classification of the call, and by Codex's own parsed_cmd
+// item. It is one exploration, not two.
+func TestExplorationCodexShellExplorationIsNotDoubleCounted(t *testing.T) {
+	f := &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf"},
+		observations: []store.RunToolObservation{
+			codexObs(1, domain.ToolOpCommandExplore, "shell", domain.ToolPathNone, ""),
+			codexObs(1, domain.ToolOpRead, "codex_parsed_cmd", domain.ToolPathProject, "a.go"),
+			codexObs(2, domain.ToolOpEdit, "codex_file_change", domain.ToolPathProject, "a.go"),
+		}}
+	got, err := NewExplorationReader(f).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := got.Agents[0]
+	val(t, "opsBeforeFirstEdit", a.OpsBeforeFirstEdit, 1, domain.ExplorationObserved)
+	val(t, "explorationOpsAll", a.ExplorationOpsAll, 1, domain.ExplorationObserved)
+	val(t, "fileReads", a.FileReads, 1, domain.ExplorationObserved)
+}
+
+// Codex 3C review, P1: an agent with usage calls but whose transcript the 3C
+// extractor never parsed (ingested before 0175) must not report observed zero
+// tool activity. Token figures come from the usage ledger and stand.
+func TestExplorationUncoveredTranscriptIsUnavailableNotZero(t *testing.T) {
+	for name, row := range map[string]store.RunToolCoverage{
+		"never parsed":   {Subject: domain.SessionSubject("s1"), SourceID: 7, ByteOffset: 5000, CoveredFrom: -1, CoveredTo: -1, EventsBeforeCoverage: 3},
+		"parsed partway": {Subject: domain.SessionSubject("s1"), SourceID: 7, ByteOffset: 5000, CoveredFrom: 1200, CoveredTo: 5000, MinExtractor: 1, MaxExtractor: 1, EventsBeforeCoverage: 2},
+		"not caught up":  {Subject: domain.SessionSubject("s1"), SourceID: 7, ByteOffset: 5000, CoveredFrom: 0, CoveredTo: 4000, MinExtractor: 1, MaxExtractor: 1},
+		"mixed versions": {Subject: domain.SessionSubject("s1"), SourceID: 7, ByteOffset: 5000, CoveredFrom: 0, CoveredTo: 5000, MinExtractor: 1, MaxExtractor: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf"},
+				calls:    []store.RunExplorationCall{callAt(0, 1000, 0, 10), callAt(5, 2000, 1500, 20)},
+				coverage: []store.RunToolCoverage{row}}
+			got, err := NewExplorationReader(f).WorkflowRun(context.Background(), "wf")
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := got.Agents[0]
+			if a.ToolCoverage.Complete || a.ToolCoverage.Reason == "" {
+				t.Fatalf("coverage = %+v, want incomplete with a reason", a.ToolCoverage)
+			}
+			for n, m := range map[string]domain.ExplorationMetric{
+				"toolCalls": a.ToolCalls, "fileReads": a.FileReads, "commands": a.Commands, "edits": a.Edits,
+				"explorationOpsAll": a.ExplorationOpsAll, "unattributed": a.UnattributedCommands,
+				"uniqueFilesEdited": a.UniqueFilesEdited, "aoBytes": a.AOContextBytes, "shellEdits": a.ShellEdits,
+				"exploreCommands": a.ExploreCommands, "harnessTokensFirstCall": a.HarnessTokensFirstCall,
+			} {
+				unavail(t, n, m)
+			}
+			val(t, "modelCalls", a.ModelCalls, 2, domain.ExplorationObserved)
+			val(t, "inputTokens", a.InputTokens, 3000, domain.ExplorationObserved)
+			if got.Totals.ToolCoverage.Complete {
+				t.Fatal("the run totals inherit an agent's missing coverage")
+			}
+			unavail(t, "totals.toolCalls", got.Totals.ToolCalls)
+		})
+	}
+}
+
+func TestExplorationFullCoverageKeepsObservedZero(t *testing.T) {
+	f := &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf"},
+		calls: []store.RunExplorationCall{callAt(0, 1000, 0, 10)},
+		coverage: []store.RunToolCoverage{
+			{Subject: domain.SessionSubject("s1"), SourceID: 7, ByteOffset: 5000, CoveredFrom: 0, CoveredTo: 5000, MinExtractor: 1, MaxExtractor: 1},
+			{Subject: domain.SessionSubject("s1"), SourceID: 8, ByteOffset: 0, CoveredFrom: -1, CoveredTo: -1}, // not read by anybody yet
+			// A resumed transcript: the collector started this row mid-file,
+			// and every one of its events went through the extractor.
+			{Subject: domain.SessionSubject("s1"), SourceID: 9, ByteOffset: 9000, CoveredFrom: 4000, CoveredTo: 9000, MinExtractor: 1, MaxExtractor: 1},
+		}}
+	got, err := NewExplorationReader(f).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := got.Agents[0]
+	if !a.ToolCoverage.Complete || len(a.ToolCoverage.ExtractorVersions) != 1 {
+		t.Fatalf("coverage = %+v, want complete at one version", a.ToolCoverage)
+	}
+	val(t, "toolCalls", a.ToolCalls, 0, domain.ExplorationObserved)
+}
+
+// Codex 3C review, P1: with no edit, "before the first edit" is censored,
+// never a count of everything.
+func TestExplorationNoEditCensorsFirstEditSequences(t *testing.T) {
+	f := &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf"},
+		observations: []store.RunToolObservation{read(1, "a.go", 10), read(2, "b.go", 10)},
+		calls:        []store.RunExplorationCall{callAt(0, 1000, 0, 10), callAt(3, 1000, 0, 10)}}
+	got, err := NewExplorationReader(f).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := got.Agents[0]
+	unavail(t, "opsBeforeFirstEdit", a.OpsBeforeFirstEdit)
+	unavail(t, "callsBeforeFirstEdit", a.CallsBeforeFirstEdit)
+	val(t, "explorationOpsAll", a.ExplorationOpsAll, 2, domain.ExplorationDerived)
+}
+
+// Codex 3C review, P2: byte ordinals of two transcripts of one agent are not
+// one order.
+func TestExplorationMultipleTranscriptsMakeSequencesUnavailable(t *testing.T) {
+	first := worker("claude-code")
+	first.Origin, first.Op, first.ResultBytes, first.ObservedAt, first.Ordinal, first.SourceID = domain.OriginAOContext, domain.ToolOpPrompt, i64(400), at(0), 900, 1
+	later := worker("claude-code")
+	later.Origin, later.Op, later.ResultBytes, later.ObservedAt, later.Ordinal, later.SourceID = domain.OriginAOContext, domain.ToolOpPrompt, i64(9000), at(50), 0, 2
+	r1, r2 := read(1, "a.go", 10), read(51, "b.go", 10)
+	r1.SourceID, r2.SourceID = 1, 2
+	e := op(52, domain.ToolOpEdit, domain.ToolPathProject, "b.go")
+	e.SourceID = 2
+	f := &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf"},
+		observations: []store.RunToolObservation{first, r1, later, r2, e},
+		calls:        []store.RunExplorationCall{callAt(0, 1000, 0, 10), callAt(51, 1000, 0, 10), callAt(53, 1000, 0, 10)}}
+	got, err := NewExplorationReader(f).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := got.Agents[0]
+	if a.Sources != 2 {
+		t.Fatalf("sources = %d, want 2", a.Sources)
+	}
+	unavail(t, "opsBeforeFirstEdit", a.OpsBeforeFirstEdit)
+	// Time orders across transcripts: the first prompt is the one at t=0,
+	// although its byte ordinal is the larger.
+	val(t, "harnessTokensFirstCall", a.HarnessTokensFirstCall, 900, domain.ExplorationDerived)
+	val(t, "callsBeforeFirstEdit", a.CallsBeforeFirstEdit, 2, domain.ExplorationDerived)
+}
+
+// I2: Claude's turn mix is the recorded turn_class; Codex's is derived by
+// placing each tool call in the provider call that billed it.
+func TestExplorationTurnMix(t *testing.T) {
+	c1, c2 := callAt(0, 100, 0, 1), callAt(5, 100, 0, 1)
+	c1.TurnClass, c2.TurnClass = domain.TurnRead, domain.TurnEdit
+	f := &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf"}, calls: []store.RunExplorationCall{c1, c2}}
+	got, err := NewExplorationReader(f).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mix := got.Agents[0].TurnMix
+	if mix.Basis != domain.ExplorationObserved || mix.Counts[domain.TurnRead] != 1 || mix.Counts[domain.TurnEdit] != 1 {
+		t.Fatalf("claude mix = %+v", mix)
+	}
+
+	codexCall := func(sec int) store.RunExplorationCall {
+		c := callAt(sec, 100, 0, 1)
+		c.Harness = "codex"
+		return c
+	}
+	f = &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf"},
+		calls: []store.RunExplorationCall{codexCall(2), codexCall(4), codexCall(6)},
+		observations: []store.RunToolObservation{
+			codexObs(1, domain.ToolOpCommand, "exec", domain.ToolPathNone, ""),
+			codexObs(1, domain.ToolOpRead, "codex_parsed_cmd", domain.ToolPathProject, "a.go"), // not a call
+			codexObs(3, domain.ToolOpEdit, "apply_patch", domain.ToolPathNone, ""),
+			codexObs(3, domain.ToolOpCommand, "exec", domain.ToolPathNone, ""),
+		}}
+	got, err = NewExplorationReader(f).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mix = got.Agents[0].TurnMix
+	if mix.Basis != domain.ExplorationDerived || mix.Counts[domain.TurnCommand] != 1 ||
+		mix.Counts[domain.TurnMixed] != 1 || mix.Counts[domain.TurnMessage] != 1 {
+		t.Fatalf("codex mix = %+v, want command, mixed, message", mix)
+	}
+}
+
+// I3/I5: the run carries its frozen arm and the packs its dispatches got.
+func TestExplorationReportsContextSourcesAndMemoryPacks(t *testing.T) {
+	f := &fakeExplorationStore{found: true,
+		run: domain.WorkflowRun{ID: "wf", ProjectID: "p1",
+			PolicySnapshot: `{"version":"v1","contextSources":{"memoryMode":"assisted","contextRouter":"off"}}`},
+		manifests: []domain.MemoryContextManifest{
+			{Role: "reviewer", PackDigest: "d2", IndexedCommit: "c1", ItemIDs: []string{"x"}, SelectedBytes: 10, CreatedAt: explBase.Add(time.Minute)},
+			{Role: "worker", PackDigest: "d1", IndexedCommit: "c1", Generation: 3, ItemIDs: []string{"a", "b"}, SelectedBytes: 900, EstimatedTokens: 225, CreatedAt: explBase},
+		}}
+	got, err := NewExplorationReader(f).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ContextSources.Recorded() || got.ContextSources.MemoryMode != "assisted" || got.ContextSources.ContextRouter != "off" {
+		t.Fatalf("context sources = %+v", got.ContextSources)
+	}
+	if len(got.MemoryPacks) != 2 || got.MemoryPacks[0].Role != "worker" || got.MemoryPacks[0].ItemCount != 2 ||
+		got.MemoryPacks[0].IndexedCommit != "c1" || got.MemoryPacks[0].PackDigest != "d1" {
+		t.Fatalf("memory packs = %+v, want oldest (worker) first", got.MemoryPacks)
+	}
+
+	legacy := &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf", PolicySnapshot: `{"version":"v1"}`}}
+	got, err = NewExplorationReader(legacy).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ContextSources.Recorded() {
+		t.Fatal("a pre-3C snapshot must read as not recorded, never as off")
+	}
 }
 
 func TestExplorationMissingProviderDataIsUnavailableNotZero(t *testing.T) {
@@ -278,6 +497,7 @@ func TestExplorationMissingProviderDataIsUnavailableNotZero(t *testing.T) {
 	a := got.Agents[0]
 	unavail(t, "modelCalls", a.ModelCalls)
 	unavail(t, "inputTokens", a.InputTokens)
+	unavail(t, "uncachedInputTokens", a.UncachedInputTokens)
 	unavail(t, "firstCallInput", a.FirstCallInput)
 	unavail(t, "callsBeforeFirstEdit", a.CallsBeforeFirstEdit)
 
