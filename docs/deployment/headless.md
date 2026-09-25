@@ -13,8 +13,13 @@ From the repository root:
 npm --prefix frontend install
 npm --prefix frontend run build:web
 cd backend
-go run ./cmd/ao server --port 3001 --web-root ../frontend/dist/web
+# The data dir must be chosen explicitly: `ao server` refuses to fall back to
+# the default ~/.ao/data (your real state) unless the desktop app launched it.
+go run ./cmd/ao server --port 3001 --data-dir "$HOME/.ao/headless/data" --web-root ../frontend/dist/web
 ```
+
+To serve your real state on purpose, name it: `--data-dir "$HOME/.ao/data"`
+(or `AO_DATA_DIR=$HOME/.ao/data`), with the desktop daemon stopped.
 
 Open <http://127.0.0.1:3001>. Deep links such as
 <http://127.0.0.1:3001/workflows> and

@@ -107,6 +107,13 @@ func Run() error {
 // already-resolved configuration. It exists for the foreground `ao server`
 // command; Electron continues to use Run and environment-based discovery.
 func RunWithConfig(cfg config.Config) error {
+	// Production guardrail (Frente 3 incident): refuse the default data dir
+	// unless the desktop app launched us or someone chose it explicitly. It
+	// runs first -- before the working directory, the lock or the database
+	// are touched -- so a refused start leaves no trace.
+	if err := config.AuthorizeDefaultDataDir(cfg, os.LookupEnv); err != nil {
+		return err
+	}
 	var err error
 	if cwd, err := os.Getwd(); err == nil {
 		cfg.StartupWorkingDirectory = cwd
@@ -1074,8 +1081,9 @@ func RunWithConfig(cfg config.Config) error {
 		// "193 calls against a context that grew from 54k to 324k" is the
 		// explanation a total cannot carry. It shares the ledger's pricing so
 		// a per-step cost and the run total can never name different rates.
-		UsageDynamics: usagesvc.NewDynamicsReader(store, usagePricing(cfg.DataDir, log)),
-		Capacity:      capacitysvc.NewReader(store),
+		UsageDynamics:    usagesvc.NewDynamicsReader(store, usagePricing(cfg.DataDir, log)),
+		UsageExploration: usagesvc.NewExplorationReader(store),
+		Capacity:         capacitysvc.NewReader(store),
 		// ONE service instance backs both surfaces: the memory routes and the
 		// code-graph routes are two views of the same subsystem, and giving
 		// them separate resolvers would give them separate opinions about

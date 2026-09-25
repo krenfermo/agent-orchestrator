@@ -66,6 +66,8 @@ func newWorkflowCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newWorkflowPlacementCommand(ctx))
 	// P3-E: what this run has spent, and how well AO knows it.
 	cmd.AddCommand(newWorkflowUsageCommand(ctx))
+	// Frente 3 / 3C: what each agent looked at, beside what it spent.
+	cmd.AddCommand(newWorkflowExplorationCommand(ctx))
 	return cmd
 }
 

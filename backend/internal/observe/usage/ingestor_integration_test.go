@@ -994,12 +994,13 @@ func (s *applyInterleavingStore) ApplyUsageChunk(
 	expectedRevision time.Time,
 	nextState domain.SourceCursorState,
 	events []domain.ModelUsageEvent,
+	tools ...domain.AgentToolFacts,
 ) error {
 	if beforeApply := s.beforeApply; beforeApply != nil {
 		s.beforeApply = nil
 		beforeApply()
 	}
-	return s.Store.ApplyUsageChunk(ctx, sourceID, expectedOffset, expectedRevision, nextState, events)
+	return s.Store.ApplyUsageChunk(ctx, sourceID, expectedOffset, expectedRevision, nextState, events, tools...)
 }
 
 func assertTokenAggregate(t *testing.T, store *sqlite.Store, sessionID domain.SessionID, total int64) {

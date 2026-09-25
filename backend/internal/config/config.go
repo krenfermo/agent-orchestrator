@@ -117,6 +117,10 @@ type Config struct {
 	// DataDir is the directory holding durable SQLite state: DB and WAL files.
 	// It is created on first use by the storage layer.
 	DataDir string
+	// DataDirExplicit is true when the data dir was named explicitly
+	// (AO_DATA_DIR, or `ao server --data-dir`) rather than defaulted. The
+	// default is the operator's real state; see AuthorizeDefaultDataDir.
+	DataDirExplicit bool
 	// SkillStagingRoot optionally overrides where a skill run stages its
 	// inputs (AO_SKILL_STAGING_ROOT). Empty means the runner's own default:
 	// the project's parent directory, which is the one place AO can reason
@@ -518,6 +522,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.DataDir = dataDir
+	if v, ok := os.LookupEnv("AO_DATA_DIR"); ok && v != "" {
+		cfg.DataDirExplicit = true
+	}
 
 	cfg.TmuxSocket = resolveTmuxSocket(dataDir)
 

@@ -204,6 +204,11 @@ type UsageSourceContext struct {
 	NativeRootID   string
 	InitialModelID string
 	BindingState   UsageBindingState
+	// WorkspaceRoot is the project root AO itself recorded for the subject
+	// (a session's worktree, a reviewed session's worktree, the project
+	// checkout for a planner). Tool-observation paths are normalised against
+	// it; empty means AO has none and every path stays unresolved.
+	WorkspaceRoot string
 }
 
 // UsageTokenMetrics is the normalized token vector stored on every usage event

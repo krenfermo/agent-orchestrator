@@ -363,7 +363,16 @@ func (s *Store) GetUsageSourceForIngestion(ctx context.Context, id int64) (domai
 	if err != nil {
 		return domain.UsageSourceContext{}, false, fmt.Errorf("get usage source %d: %w", id, err)
 	}
-	return usageSourceContextFromGen(row), true, nil
+	out := usageSourceContextFromGen(row)
+	root, err := s.qr.GetUsageSubjectWorkspaceRoot(ctx, gen.GetUsageSubjectWorkspaceRootParams{
+		SubjectKind: row.SubjectKind,
+		SubjectID:   row.SubjectID,
+	})
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.UsageSourceContext{}, false, fmt.Errorf("get usage source %d workspace root: %w", id, err)
+	}
+	out.WorkspaceRoot = root
+	return out, true, nil
 }
 
 // MarkUsageSourceState updates only the source lifecycle/error state.
@@ -424,16 +433,29 @@ func (s *Store) MarkUsageSourceFailure(ctx context.Context, id, failureCount int
 
 // ApplyUsageChunk atomically writes parsed usage events and advances the source
 // cursor/baselines. The cursor never moves unless all event writes commit.
+//
+// tools carries the chunk's agent tool observations (3C). They commit in the
+// same transaction as the events and the cursor, so a crash can never leave a
+// cursor past observations that were not written, and a re-read after a reset
+// re-derives the same keys and inserts nothing twice.
 func (s *Store) ApplyUsageChunk(
 	ctx context.Context,
 	sourceID, expectedOffset int64,
 	expectedRevision time.Time,
 	nextState domain.SourceCursorState,
 	events []domain.ModelUsageEvent,
+	tools ...domain.AgentToolFacts,
 ) error {
 	if nextState.ParserStateJSON != "" {
 		if err := validateParserStateObject(nextState.ParserStateJSON); err != nil {
 			return err
+		}
+	}
+	for _, facts := range tools {
+		for _, obs := range facts.Observations {
+			if !obs.Valid() || credentialShaped(obs.ToolName) || credentialShaped(obs.Path) {
+				return fmt.Errorf("usage source %d: invalid tool observation %q", sourceID, obs.Key)
+			}
 		}
 	}
 	s.writeMu.Lock()
@@ -453,6 +475,17 @@ func (s *Store) ApplyUsageChunk(
 		if !source.SourceUpdatedAt.Equal(expectedRevision) ||
 			(source.SourceState == domain.UsageSourceComplete && source.SourceLastErrorCode == domain.UsageErrorArtifactReplaced) {
 			return fmt.Errorf("%w: source %d changed while its chunk was being read", domain.ErrUsageSourceRevisionConflict, sourceID)
+		}
+		// 3C coverage: how many of this source's events already exist before
+		// this chunk writes any. Recorded only when the extractor covers the
+		// source for the first time, it is the count of events a binary
+		// without the extractor ingested -- counted here, in the same
+		// transaction, so no clock ordering is involved.
+		var preCoverageEvents int64
+		if len(tools) > 0 {
+			if preCoverageEvents, err = q.CountUsageEventsForSource(ctx, sql.NullInt64{Int64: source.SourceID, Valid: source.SourceID > 0}); err != nil {
+				return err
+			}
 		}
 		insertedEvent := false
 		for _, ev := range events {
@@ -490,6 +523,15 @@ func (s *Store) ApplyUsageChunk(
 				return err
 			}
 			insertedEvent = true
+		}
+		recordedAt := timeOrNow(nextState.UpdatedAt)
+		for _, facts := range tools {
+			if err := applyAgentToolFacts(ctx, q, source.BindingID, source.SourceID, facts, recordedAt); err != nil {
+				return err
+			}
+			if err := recordAgentToolCoverage(ctx, q, source.BindingID, source.SourceID, expectedOffset, nextState.ByteOffset, facts.ExtractorVersion, preCoverageEvents, recordedAt); err != nil {
+				return err
+			}
 		}
 		if err := q.UpdateUsageSourceCursor(ctx, gen.UpdateUsageSourceCursorParams{
 			ID:              sourceID,

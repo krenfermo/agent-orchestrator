@@ -1144,6 +1144,10 @@ type WorkflowsController struct {
 	// this says how the conversation MOVED; adding any two of them produces a
 	// number that is none of them.
 	UsageDynamics UsageDynamicsService
+	// UsageExploration backs Frente 3 / 3C: what each agent of a run looked
+	// at (files read, searches, edits) beside what it spent, and the run's
+	// quality signals. Optional; nil answers 501.
+	UsageExploration UsageExplorationService
 	// boardUsage memoizes the per-project usage fold for a few seconds. The
 	// Board polls every two seconds while anything moves, and the fold covers
 	// the project's whole append-only ledger -- see workflow_board_usage.go.
@@ -1564,6 +1568,7 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	// Separate routes rather than only an embedded section: a client polling a
 	// cost figure must not have to fetch the whole run detail to get it.
 	r.Get("/workflows/{workflowId}/usage", c.run(domain.PermUsageRead, c.getWorkflowUsage))
+	r.Get("/workflows/{workflowId}/exploration", c.run(domain.PermUsageRead, c.getWorkflowExploration))
 	r.Get("/projects/{projectId}/usage", c.project(domain.PermUsageRead, c.getProjectUsage))
 	r.Get("/workflows/{workflowId}/recovery", c.run(domain.PermWorkflowRead, c.getRecovery))
 	// P3-C §24: the "what do I do now" surface, composed on the server so no

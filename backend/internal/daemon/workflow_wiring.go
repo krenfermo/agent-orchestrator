@@ -499,13 +499,30 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 	// DECORATED Spawner. Before it, the launcher above held the raw session
 	// manager, so workers and both Repair Agents bypassed all three decorators
 	// (see dispatch_instrumentation.go).
+	router := contextRouterFor(log, store, memory)
 	deps = instrumentAgentDispatch(deps,
 		projectMemoryBaselineRecorder(log),
-		contextRouterFor(log, store, memory),
+		router,
 		memoryProvisionerFor(memoryProvisioning),
 		log)
+	deps.ContextSources = effectiveContextSources(memoryProvisioning != nil, memoryConfig(log).Mode, router != nil)
 	coordinator := workflowcore.New(deps)
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
+}
+
+// effectiveContextSources is what the composed decorators will actually do,
+// recorded into every run's policy_snapshot (Frente 3 / 3C). A mode that was
+// requested but produced no provisioner (a rejected budget, no memory service)
+// is recorded as off, because off is what the run's dispatches receive.
+func effectiveContextSources(provisioned bool, mode durablememory.MemoryMode, routing bool) domain.ContextSourcesSnapshot {
+	out := domain.ContextSourcesSnapshot{MemoryMode: string(durablememory.ModeOff), ContextRouter: "off"}
+	if provisioned && mode.Enabled() {
+		out.MemoryMode = string(mode)
+	}
+	if routing {
+		out.ContextRouter = "on"
+	}
+	return out
 }
 
 // memoryConfig resolves the P2-B policy, falling back to the conservative
