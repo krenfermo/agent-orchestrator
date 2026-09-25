@@ -116,7 +116,10 @@ gastar el turno. Coste bajo, evita exactamente el bloqueo observado.
 
 ---
 
-## Frente 2 — Skills y seguridad a demanda
+## Frente 2 — Skills y seguridad a demanda — **CERRADO**
+
+Fases 1-13 y 2A-2G integradas en ECC. Producción en goose 174. El siguiente
+frente es Frente 3 (Grae/Graphify), aún no iniciado.
 
 | Elemento | Estado | Evidencia |
 | --- | --- | --- |
@@ -128,7 +131,7 @@ gastar el turno. Coste bajo, evita exactamente el bloqueo observado.
 | 2D — scanners deterministas (secret-scan, dependencies) | **Integrado en ECC** | egress empaquetado (D4) para `dependencies`; `secret-scan` estructural |
 | 2E — Security Audit SAST completo | **Integrado en ECC** | `static-code` + `full-audit` compuesto, reportes verificados por SHA |
 | 2F — DAST / pentest activo con autorización explícita | **Integrado en ECC** (`c4cf7ba2`, migración productiva 173→174) | `net.active_scan` + checker propio `ao-web-dast` aislado tras proxy de egreso; autorización persistida de dos pasos (0174); [`skills/security-audit-and-active-pentest.md`](skills/security-audit-and-active-pentest.md), [`active-pentest-design.md`](active-pentest-design.md) |
-| 2G — hardening y cierre | **En curso** en `feat/2g-skills-hardening` (sin merge) | builder canónico/provenance re-registrada, E2E release-like con embeds reales, fail-closed de redes privadas, reclamación de redes huérfanas por propiedad, redacción de errores; auditoría de cierre sin P0/P1 |
+| 2G — hardening y cierre | **Integrado en ECC** (merge `5a6e782c`, sin migración: prod queda en goose 174) | builder canónico/provenance re-registrada, E2E release-like con embeds reales, fail-closed de redes privadas, reclamación de redes huérfanas por propiedad, redacción de errores, E2E authz-review con Claude real; auditoría de cierre sin P0/P1; [`skills/2g-cierre.md`](skills/2g-cierre.md) |
 
 **Decisiones de 2A (aprobadas):** D1 — arquitectura objetivo: agente dentro del
 runner; paso intermedio en 2C: agente en el host de solo lectura únicamente para
