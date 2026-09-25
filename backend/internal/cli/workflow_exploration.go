@@ -41,6 +41,8 @@ type agentExplorationPayload struct {
 	ModelCalls           explorationMetricPayload `json:"modelCalls"`
 	InputTokens          explorationMetricPayload `json:"inputTokens"`
 	UncachedInputTokens  explorationMetricPayload `json:"uncachedInputTokens"`
+	FreshInputTokens     explorationMetricPayload `json:"freshInputTokens"`
+	CacheWriteTokens     explorationMetricPayload `json:"cacheWriteTokens"`
 	OutputTokens         explorationMetricPayload `json:"outputTokens"`
 	CachedInputTokens    explorationMetricPayload `json:"cachedInputTokens"`
 	FirstCallInputTokens explorationMetricPayload `json:"firstCallInputTokens"`
@@ -247,7 +249,7 @@ func writeAgentExploration(out *strings.Builder, a agentExplorationPayload) {
 	linef(tw, "  Tool calls\t%s\tCommands\t%s\tEdits\t%s (shell ~%s)\n", fmtMetric(a.ToolCalls), fmtMetric(a.Commands), fmtMetric(a.Edits), strings.TrimPrefix(fmtMetric(a.ShellEdits), "~"))
 	linef(tw, "  Files edited\t%s\tOps before 1st edit\t%s\tCalls before 1st edit\t%s\n", fmtMetric(a.UniqueFilesEdited), fmtMetric(a.OpsBeforeFirstEdit), fmtMetric(a.CallsBeforeFirstEdit))
 	linef(tw, "  Model calls\t%s\tInput tokens\t%s\tCached\t%s\n", fmtMetric(a.ModelCalls), fmtMetric(a.InputTokens), fmtMetric(a.CachedInputTokens))
-	linef(tw, "  Uncached input (M1u)\t%s\t\t\t\t\n", fmtMetric(a.UncachedInputTokens))
+	linef(tw, "  Fresh input (M1u)\t%s\tUncached\t%s\tCache writes\t%s\n", fmtMetric(a.FreshInputTokens), fmtMetric(a.UncachedInputTokens), fmtMetric(a.CacheWriteTokens))
 	linef(tw, "  Output tokens\t%s\t1st-call input\t%s\tActive span ms\t%s\n", fmtMetric(a.OutputTokens), fmtMetric(a.FirstCallInputTokens), fmtMetric(a.ActiveSpanMs))
 	linef(tw, "  Harness tokens (1st call)\t%s\tUnattributed cmds\t%s\n", fmtMetric(a.HarnessTokens1st), fmtMetric(a.Unattributed))
 	linef(tw, "  Repo bytes\t%s\tAO bytes\t%s\tHarness bytes\t%s\n", fmtMetric(a.RepoBytesObserved), fmtMetric(a.AOContextBytes), fmtMetric(a.HarnessContextBytes))

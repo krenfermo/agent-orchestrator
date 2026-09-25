@@ -109,8 +109,10 @@ type AgentExplorationResponse struct {
 
 	ModelCalls  ExplorationMetricResponse `json:"modelCalls"`
 	InputTokens ExplorationMetricResponse `json:"inputTokens"`
-	// UncachedInputTokens is M1u: neither a cache read nor a cache write.
-	UncachedInputTokens  ExplorationMetricResponse `json:"uncachedInputTokens"`
+	// UncachedInputTokens is neither a cache read nor a cache write.
+	UncachedInputTokens ExplorationMetricResponse `json:"uncachedInputTokens"`
+	// FreshInputTokens is M1u: input minus cache reads (uncached + cache writes).
+	FreshInputTokens     ExplorationMetricResponse `json:"freshInputTokens"`
 	OutputTokens         ExplorationMetricResponse `json:"outputTokens"`
 	CachedInputTokens    ExplorationMetricResponse `json:"cachedInputTokens"`
 	CacheWriteTokens     ExplorationMetricResponse `json:"cacheWriteTokens"`
@@ -296,6 +298,7 @@ func agentExplorationResponse(a domain.AgentExploration) AgentExplorationRespons
 		ModelCalls:             explorationMetric(a.ModelCalls),
 		InputTokens:            explorationMetric(a.InputTokens),
 		UncachedInputTokens:    explorationMetric(a.UncachedInputTokens),
+		FreshInputTokens:       explorationMetric(a.FreshInputTokens),
 		OutputTokens:           explorationMetric(a.OutputTokens),
 		CachedInputTokens:      explorationMetric(a.CachedInputTokens),
 		CacheWriteTokens:       explorationMetric(a.CacheWriteTokens),

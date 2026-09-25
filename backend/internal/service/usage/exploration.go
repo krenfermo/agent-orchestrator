@@ -647,11 +647,12 @@ func (f *agentFold) result() domain.AgentExploration {
 		a.ModelCalls = observed(f.calls, "billed provider messages in the transcript")
 		a.InputTokens = observed(f.input, "provider-reported input incl. cache reads/writes")
 		a.UncachedInputTokens = observed(f.uncached, "provider-reported input that was neither a cache read nor a cache write")
+		a.FreshInputTokens = observed(f.input-f.cached, "input not served from the cache: input minus cache reads (uncached + cache writes)")
 		a.OutputTokens = observed(f.output, "provider-reported output")
 		a.CachedInputTokens = observed(f.cached, "provider-reported cache reads")
 		a.CacheWriteTokens = observed(f.cacheWrite, "provider-reported cache writes")
 	} else {
-		for _, m := range []*domain.ExplorationMetric{&a.ModelCalls, &a.InputTokens, &a.UncachedInputTokens, &a.OutputTokens, &a.CachedInputTokens, &a.CacheWriteTokens} {
+		for _, m := range []*domain.ExplorationMetric{&a.ModelCalls, &a.InputTokens, &a.UncachedInputTokens, &a.FreshInputTokens, &a.OutputTokens, &a.CachedInputTokens, &a.CacheWriteTokens} {
 			*m = unavailable("no provider usage recorded for this agent")
 		}
 	}

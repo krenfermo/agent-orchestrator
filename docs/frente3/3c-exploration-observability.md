@@ -411,7 +411,9 @@ Cada run declara su brazo en `contextSources` (congelado en el snapshot), y el d
 **Métricas por run y rol** (worker y reviewer por separado, nunca agrupadas). Salen del JSON de `GET /workflows/{id}/exploration`, que se archiva sin modificar:
 
 - **M1:** `inputTokens`.
-- **M1u:** `uncachedInputTokens`.
+- **M1u:** `freshInputTokens` = input − lecturas de caché (= sin caché + escrituras de caché).
+  - **No** se usa `uncachedInputTokens`: en Claude casi todo el input nuevo se factura como escritura de caché. En el E2E del ciclo 2, `uncached` fue de **10 tokens** sobre 214 278 de input, así que un umbral de −15 % sobre esa cifra sería ruido.
+  - En Codex, `fresh` y `uncached` coinciden.
 - **M2:** `modelCalls`.
 - **M3:** `explorationOpsAll`.
   - Es un método por harness, y los dos brazos usan el mismo harness por rol.
@@ -502,3 +504,23 @@ Las dos son decisiones de arquitectura y release, y quedan para Joaquín. Mitiga
 - `aoexp.py` compila siempre `./cmd/ao`;
 - rechaza rutas fuera de `~/.ao/scratch`;
 - fija e imprime `AO_DATA_DIR`, `AO_RUN_FILE` y el puerto antes de arrancar.
+
+## 13. E2E real del ciclo 2 (scratch, HEAD con guardrail)
+
+Se usó el script `~/.ao/scratch/frente3/tools/smoke3c.py`, con el binario compilado desde `./cmd/ao`. Antes de arrancar, el preflight imprimió y validó `AO_DATA_DIR`, `AO_RUN_FILE`, el puerto y el modo, y comprobó que el binario rechaza un flag inválido. Hubo un daemon de scratch por brazo, sobre el fixture `ledgerlite`.
+
+| Brazo | Run | Estado | Cobertura | Nombres de herramienta | Paths absolutos | `contextSources` | Packs de memoria |
+|---|---|---|---|---|---|---|---|
+| off | `wf-c3f49d59` | completed, verify ✓ | 1 fuente completa, 0 eventos sin extractor | solo canónicos | 0 | off/off | ninguno |
+| assisted | `wf-38cc5f74` | **needs_attention** (review failed) | 2 fuentes completas (worker Claude y reviewer Codex) | solo canónicos | 0 | assisted/off | worker 9 ítems/1 828 B y reviewer 8 ítems/1 649 B, commit indexado = HEAD del fixture |
+
+Producción no se tocó: el mtime de `ao.db` no cambió durante todo el E2E.
+
+**Hallazgos para 3D. No son defectos de 3C, pero condicionan la validez del piloto:**
+
+1. **Carrera en el dispatch de review con la memoria activa.** En el brazo assisted, la review se creó a las 15:21:45.348. A las 45.504 se liberó su claim, con el motivo "the review run was created but no reviewer launch was ever recorded". Pero el aprovisionamiento del pack del reviewer acabó a las 45.524, y el reviewer sí arrancó (hubo actividad a las 45:48). La review terminó `failed` y el run pasó a `needs_attention`.
+   - La latencia añadida por la memoria (pack más contexto externo de GitHub "degraded") parece destapar una carrera del dispatch (`review_launch_phases.go`).
+   - Si no se entiende y se corrige antes, **el brazo TREATMENT sufrirá fallos de calidad por infraestructura**. Esa diferencia no debe atribuirse a la memoria.
+2. **Review asimétrica.** En el brazo off el run hizo verify pero sin review (0 review runs). En assisted sí se lanzó el reviewer.
+   - La profundidad de review depende del riesgo del cambio.
+   - 3D tiene que registrar la review por run y, si difiere entre brazos, comparar calidad solo sobre runs con la misma ruta de review.

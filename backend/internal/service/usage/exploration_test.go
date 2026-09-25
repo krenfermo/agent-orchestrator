@@ -166,6 +166,7 @@ func TestExplorationAggregatesOneClaudeAgent(t *testing.T) {
 	val(t, "inputTokens", a.InputTokens, 9500, domain.ExplorationObserved)
 	val(t, "cachedInputTokens", a.CachedInputTokens, 7000, domain.ExplorationObserved)
 	val(t, "uncachedInputTokens", a.UncachedInputTokens, 2500, domain.ExplorationObserved)
+	val(t, "freshInputTokens", a.FreshInputTokens, 2500, domain.ExplorationObserved)
 	val(t, "firstCallInput", a.FirstCallInput, 1000, domain.ExplorationObserved)
 	val(t, "repoBytes", a.RepoBytesObserved, 280, domain.ExplorationObserved)
 	val(t, "unobservedResults", a.UnobservedResults, 1, domain.ExplorationObserved)
@@ -498,6 +499,7 @@ func TestExplorationMissingProviderDataIsUnavailableNotZero(t *testing.T) {
 	unavail(t, "modelCalls", a.ModelCalls)
 	unavail(t, "inputTokens", a.InputTokens)
 	unavail(t, "uncachedInputTokens", a.UncachedInputTokens)
+	unavail(t, "freshInputTokens", a.FreshInputTokens)
 	unavail(t, "firstCallInput", a.FirstCallInput)
 	unavail(t, "callsBeforeFirstEdit", a.CallsBeforeFirstEdit)
 

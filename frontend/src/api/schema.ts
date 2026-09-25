@@ -4244,6 +4244,7 @@ export interface components {
             exploreCommands: components["schemas"]["ExplorationMetricResponse"];
             fileReads: components["schemas"]["ExplorationMetricResponse"];
             firstCallInputTokens: components["schemas"]["ExplorationMetricResponse"];
+            freshInputTokens: components["schemas"]["ExplorationMetricResponse"];
             harness: string;
             harnessContextBytes: components["schemas"]["ExplorationMetricResponse"];
             harnessContextRatio: components["schemas"]["ExplorationRatioResponse"];

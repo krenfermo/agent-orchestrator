@@ -343,13 +343,18 @@ type AgentExploration struct {
 
 	ModelCalls  ExplorationMetric
 	InputTokens ExplorationMetric
-	// UncachedInputTokens is M1u: input the provider billed as neither a
-	// cache read nor a cache write.
+	// UncachedInputTokens is input the provider billed as neither a cache
+	// read nor a cache write. On Claude nearly all new input is written to the
+	// cache, so this is tiny there; M1u is FreshInputTokens.
 	UncachedInputTokens ExplorationMetric
-	OutputTokens        ExplorationMetric
-	CachedInputTokens   ExplorationMetric
-	CacheWriteTokens    ExplorationMetric
-	FirstCallInput      ExplorationMetric
+	// FreshInputTokens is M1u: input NOT served from the cache (input minus
+	// cache reads = uncached + cache writes). It is the input the provider
+	// actually had to process anew, on either harness.
+	FreshInputTokens  ExplorationMetric
+	OutputTokens      ExplorationMetric
+	CachedInputTokens ExplorationMetric
+	CacheWriteTokens  ExplorationMetric
+	FirstCallInput    ExplorationMetric
 	// HarnessTokensFirstCall estimates how much of the first call's input
 	// the harness contributed (system prompt, tool schemas, injected
 	// instructions): first-call input minus the AO prompt at ~4 bytes/token.

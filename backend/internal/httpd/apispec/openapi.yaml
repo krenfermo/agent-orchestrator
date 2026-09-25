@@ -13179,6 +13179,8 @@ components:
           $ref: '#/components/schemas/ExplorationMetricResponse'
         firstCallInputTokens:
           $ref: '#/components/schemas/ExplorationMetricResponse'
+        freshInputTokens:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
         harness:
           type: string
         harnessContextBytes:
@@ -13252,6 +13254,7 @@ components:
       - modelCalls
       - inputTokens
       - uncachedInputTokens
+      - freshInputTokens
       - outputTokens
       - cachedInputTokens
       - cacheWriteTokens
