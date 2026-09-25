@@ -110,6 +110,7 @@ func WithIndexerLimits(l IndexLimits) ServiceOption {
 // written in, which is the kind of bug that only shows up in the one test that
 // happens to pass its options the other way round.
 func NewService(repo Repository, opts ...ServiceOption) *Service {
+	repo = withRedaction(repo)
 	s := &Service{
 		repo:         repo,
 		now:          func() time.Time { return time.Now().UTC() },

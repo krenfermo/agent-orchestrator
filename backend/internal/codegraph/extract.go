@@ -3,6 +3,8 @@ package codegraph
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // Extraction is what an extractor found in one file.
@@ -76,4 +78,26 @@ func newExtractorSet(extractors []Extractor) extractorSet {
 func (s extractorSet) find(relPath string) (Extractor, bool) {
 	ex, ok := s.byExt[strings.ToLower(filepath.Ext(relPath))]
 	return ex, ok
+}
+
+// extractRedacted runs an extractor and passes every free-text field it
+// produced -- doc comments, signatures, derived summaries -- through the
+// repository redaction boundary before anything is persisted or served.
+//
+// Frente 3 / 3B: it is the ONLY way the indexers call Extract, so a new
+// extractor (a future Java one included) cannot produce unredacted text by
+// forgetting to redact. Names and edge targets are identifiers and are left
+// as they are.
+func extractRedacted(extractor Extractor, rel string, data []byte) (Extraction, error) {
+	extraction, err := extractor.Extract(rel, data)
+	if err != nil {
+		return extraction, err
+	}
+	for i := range extraction.Symbols {
+		sym := &extraction.Symbols[i]
+		sym.Doc = repoaccess.RedactString(sym.Doc)
+		sym.Signature = repoaccess.RedactString(sym.Signature)
+		sym.Summary = repoaccess.RedactString(sym.Summary)
+	}
+	return extraction, nil
 }

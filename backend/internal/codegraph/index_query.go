@@ -452,7 +452,7 @@ func (ix *Index) AnalyzeChanged(ctx context.Context, worktreeRoot string, paths 
 			continue
 		}
 		scanned++
-		extraction, err := extractor.Extract(rel, data)
+		extraction, err := extractRedacted(extractor, rel, data)
 		if err != nil {
 			return Neighborhood{}, err
 		}

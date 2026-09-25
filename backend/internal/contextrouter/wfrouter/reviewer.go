@@ -9,6 +9,8 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	baseline "github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // reviewer.go — P2-A: reaching the Reviewer, the one role the audit found no
@@ -150,9 +152,12 @@ func (r *reviewerLauncher) route(
 		return ctx, req
 	}
 
+	// Frente 3 / 3B: routed sections are repository-derived, so they are
+	// framed as untrusted data and redacted -- never AO's own instructions.
 	req.SystemPrompt = "The following is what AO already knows about this project. " +
 		"It is a summary derived from the repository at an earlier commit, not the repository itself: " +
-		"where it and the worktree in front of you disagree, the worktree is correct.\n\n" + b.String()
+		"where it and the worktree in front of you disagree, the worktree is correct.\n\n" +
+		repoaccess.FrameUntrusted("AO routed project context", b.String())
 	logSelection(r.log, "context router: reviewer standing context routed", selection)
 	return baseline.WithRouting(ctx, selection.BaselineRouting()), req
 }

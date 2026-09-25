@@ -52,6 +52,8 @@ import (
 	baseline "github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // evidencePathPrefix labels the synthetic documents the router contributes, so
@@ -250,7 +252,9 @@ func (s *spawner) route(ctx stdctx.Context, cfg ports.SpawnConfig) (stdctx.Conte
 		b.WriteString("\n")
 		b.WriteString(section.Content)
 	}
-	cfg.IssueContext = b.String()
+	// Frente 3 / 3B: routed sections are repository-derived (documents, diff,
+	// graph, memory), so they are framed as untrusted data and redacted.
+	cfg.IssueContext = repoaccess.FrameUntrusted("AO routed project context", b.String())
 	logSelection(s.log, "context router: worker issue context routed", selection)
 	return baseline.WithRouting(ctx, selection.BaselineRouting()), cfg
 }

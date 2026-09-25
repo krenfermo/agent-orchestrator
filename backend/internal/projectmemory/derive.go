@@ -331,7 +331,9 @@ func instructionItem(b itemBase, rel string, content []byte) domain.ProjectMemor
 	body := string(content)
 	return b.item(
 		domain.MemoryTypeInstruction, domain.MemoryScopeFile, rel,
-		fmt.Sprintf("%s — standing instructions agents in this repository must follow", rel),
+		// Frente 3 / 3B: AO describes the file; it does not endorse its
+		// content. The text itself is repository data (see pack.Render).
+		fmt.Sprintf("%s — agent-guidance file declared by the repository", rel),
 		excerpt(body, domain.MaxProjectMemoryContent),
 		[]string{rel}, sourceDigest(rel, content), confidenceVerbatim,
 		map[string]string{"role": string(roleInstruction)},

@@ -284,7 +284,7 @@ func (n *NativeIndexer) syncFile(graph *Graph, root, rel string, result *IndexRe
 		return nil
 	}
 
-	extraction, err := extractor.Extract(rel, data)
+	extraction, err := extractRedacted(extractor, rel, data)
 	if err != nil {
 		return fmt.Errorf("codegraph: extract %s: %w", rel, err)
 	}

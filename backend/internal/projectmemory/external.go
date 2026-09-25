@@ -29,6 +29,8 @@ import (
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // MaxExternalContextBytes is the hard ceiling on external evidence in one
@@ -97,12 +99,12 @@ func (e ExternalEvidence) Render() string {
 	if e.Empty() {
 		return ""
 	}
+	// Frente 3 / 3B: external content (issue bodies, comments, PR titles) is
+	// third-party text, so it is framed as untrusted data and redacted. AO's
+	// own notes about it stay outside the block.
 	var b strings.Builder
-	b.WriteString("EXTERNAL CONTEXT (")
-	b.WriteString(e.Source)
-	b.WriteString(") — live state read at dispatch time, not durable project knowledge.\n")
-	b.WriteString(strings.TrimRight(e.Rendered, "\n"))
-	b.WriteString("\n")
+	b.WriteString(repoaccess.FrameUntrusted("EXTERNAL CONTEXT ("+e.Source+")", e.Rendered))
+	b.WriteString("This is live state read at dispatch time, not durable project knowledge.\n")
 	if e.Truncated {
 		b.WriteString("(truncated to AO's external-context budget)\n")
 	}

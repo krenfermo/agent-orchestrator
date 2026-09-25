@@ -296,6 +296,7 @@ func WithIndexCodeGraph(g CodeGraph) IndexerOption {
 // A nil graph falls back to the local one, because edges are canonical state
 // and must always have somewhere to go.
 func NewIndexer(repo Repository, graph MemoryGraph, opts ...IndexerOption) *Indexer {
+	repo = withRedaction(repo)
 	if graph == nil {
 		graph = NewLocalGraph(repo)
 	}
@@ -552,7 +553,6 @@ func (p *indexPass) truncateWalk(reason string) {
 		p.out.TruncatedReason = reason
 	}
 }
-
 
 // admit records one file: its ledger entry, its module membership, its
 // imports, and — unless the resume cursor says a previous pass already did —
