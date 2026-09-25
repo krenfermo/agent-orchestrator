@@ -55,9 +55,9 @@ func IsExcludedDir(name string) bool { return excludedDirSet[name] }
 type ListingMode string
 
 const (
-	// ModeGitTracked: the files `git ls-files` reports for the root.
+	// ModeGitTracked means the listing is the files `git ls-files` reports for the root.
 	ModeGitTracked ListingMode = "git-tracked"
-	// ModeFilesystem: a filesystem walk, used only when the root is not inside
+	// ModeFilesystem means the listing came from a filesystem walk, used only when the root is not inside
 	// a git work tree.
 	ModeFilesystem ListingMode = "filesystem"
 )

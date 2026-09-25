@@ -30,7 +30,7 @@ import (
 // UntrustedLabel is the fixed marker every framed block carries.
 const UntrustedLabel = "UNTRUSTED REPOSITORY CONTEXT"
 
-const delimiterToken = "AO-UNTRUSTED-REPOSITORY-CONTEXT"
+const delimiterToken = "AO-UNTRUSTED-REPOSITORY-CONTEXT" //nolint:gosec // G101 false positive: a delimiter marker, not a credential
 
 // delimiterLike matches the token in any case/spacing an attacker might try.
 var delimiterLike = regexp.MustCompile(`(?i)ao[\s_-]*untrusted[\s_-]*repository[\s_-]*context`)

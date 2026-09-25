@@ -582,16 +582,16 @@ func (p *Provisioner) outOfScope(ctx context.Context, req ProvisionRequest) stri
 type FreshnessVerdict string
 
 const (
-	// FreshnessCurrent: memory is provably at the checkout's commit and
+	// FreshnessCurrent means memory is provably at the checkout's commit and
 	// complete.
 	FreshnessCurrent FreshnessVerdict = "current"
-	// FreshnessStale: memory was derived at a commit other than the one the
+	// FreshnessStale means memory was derived at a commit other than the one the
 	// checkout is at (the sync to bring it forward did not complete).
 	FreshnessStale FreshnessVerdict = "stale"
-	// FreshnessUnverified: AO could not read the checkout's commit, or ran no
+	// FreshnessUnverified means AO could not read the checkout's commit, or ran no
 	// check, so it cannot prove currency either way.
 	FreshnessUnverified FreshnessVerdict = "unverified"
-	// FreshnessPartial: memory is at the right commit but covers only part
+	// FreshnessPartial means memory is at the right commit but covers only part
 	// of the repository.
 	FreshnessPartial FreshnessVerdict = "partial"
 )

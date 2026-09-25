@@ -165,8 +165,11 @@ func TestSecretCanariesNeverLeaveTheBoundary(t *testing.T) {
 		assertNoCanaryIn(t, "item "+string(it.Key.Type)+":"+it.Key.Key, []byte(it.Summary+"\n"+it.Content))
 	}
 	scanned := 0
-	_ = filepath.WalkDir(dataDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	walkErr := filepath.WalkDir(dataDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
 		raw, err := os.ReadFile(p)
@@ -178,6 +181,9 @@ func TestSecretCanariesNeverLeaveTheBoundary(t *testing.T) {
 		assertNoCanaryIn(t, "data dir file "+filepath.Base(p), raw)
 		return nil
 	})
+	if walkErr != nil {
+		t.Fatalf("walk scratch data dir: %v", walkErr)
+	}
 	if scanned == 0 {
 		t.Fatal("scanned no files under the scratch data dir")
 	}
