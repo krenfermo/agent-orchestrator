@@ -585,7 +585,10 @@ Además, 3 P2: cronología por reloj, vocabulario sin cerrar en el dominio y `ca
 - Se invoca al entrar en `daemon.RunWithConfig`, antes de tocar el disco, y en `holdDataDirOffline`.
 - `Config.DataDirExplicit` registra si la elección fue explícita.
 
-**Fuera del alcance.** `restore` y `recover` no migran; ya exigen confirmación explícita nombrando el data dir, y comprueban la compatibilidad del esquema.
+**Fuera del alcance.** `restore` y `recover` no migran.
+
+- `restore` exige confirmación (interactiva o `--yes`) nombrando el data dir y comprueba la compatibilidad del esquema.
+- `recover` solo actúa sobre un journal de restore interrumpido, tras comprobar el daemon y el lock.
 
 **Tests:**
 
@@ -601,3 +604,19 @@ Además, 3 P2: cronología por reloj, vocabulario sin cerrar en el dominio y `ca
    - `AO_APP_RUN_ID` siempre viaja en el mismo `ownerTag`;
    - el daemon se lanza con `daemonEnv(keep)` y, en modo empaquetado, como `ao daemon`;
    - el modo dev fija `AO_DATA_DIR`.
+
+**Revisión final de Codex: GO.** P0 = 0 y P1 = 0 (`reviews/3c/review-final.md`). Gates en `59fc36b3b`:
+
+- build, vet, lint delta 0 y race ligero;
+- short suite completa;
+- race pesado en `8339a4e2d`: solo cambió un test desde entonces.
+
+Brechas no bloqueantes señaladas:
+
+- no hay test de proceso real para `ao server --data-dir=<ruta por defecto>`;
+- el test de contrato de Electron no detectaría un segundo sitio de spawn futuro;
+- ejemplo de `headless.md`: corregido.
+
+## Estado: 3C CLOSED
+
+Mergeado en ECC con `--no-ff`. La migración 0175 **no** se aplica a producción, que sigue en goose 174. Los P2 residuales están documentados en §11-§14.
