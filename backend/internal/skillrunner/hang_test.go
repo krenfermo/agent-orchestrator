@@ -77,6 +77,52 @@ ps)
       awk -F'|' -v r="$r" '$3==r {print $1}' "$S/containers";;
   esac
   exit 0;;
+network)
+  [ -f "$S/down" ] && hang
+  touch "$S/networks"
+  sub="$1"; shift
+  case "$sub" in
+  create)
+    name=""; owner=""; rid=""; internal="false"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --label) case "$2" in
+            ao.skillrun.owner=*) owner="${2#ao.skillrun.owner=}";;
+            ao.skillrun.id=*) rid="${2#ao.skillrun.id=}";;
+          esac; shift;;
+        --internal) internal="true";;
+        *) name="$1";;
+      esac
+      shift
+    done
+    echo "$name|$owner|$rid|$internal" >> "$S/networks"
+    exit 0;;
+  rm)
+    grep -v "^$1|" "$S/networks" > "$S/n.tmp" 2>/dev/null; mv "$S/n.tmp" "$S/networks"
+    exit 0;;
+  ls)
+    q=""; filter=""
+    while [ $# -gt 0 ]; do case "$1" in -q) q=1;; --filter) filter="$2"; shift;; esac; shift; done
+    case "$filter" in
+      label=ao.skillrun.owner=*) o="${filter#label=ao.skillrun.owner=}"
+        if [ -n "$q" ]; then awk -F'|' -v o="$o" '$2==o {print $1}' "$S/networks"
+        else awk -F'|' -v o="$o" '$2==o {print $1 "\t" $3}' "$S/networks"; fi;;
+      label=ao.skillrun.id=*) r="${filter#label=ao.skillrun.id=}"
+        awk -F'|' -v r="$r" '$3==r {print $1}' "$S/networks";;
+    esac
+    exit 0;;
+  inspect)
+    n="$1"; fmt=""
+    while [ $# -gt 0 ]; do case "$1" in --format) fmt="$2"; shift;; esac; shift; done
+    if grep -q "^$n|" "$S/networks"; then
+      case "$fmt" in *Containers*) : ;; *) echo "$n";; esac
+      exit 0
+    fi
+    exit 1;;
+  connect|disconnect)
+    exit 0;;
+  esac
+  exit 0;;
 esac
 exit 0
 `
@@ -117,6 +163,30 @@ func (f *fakeDocker) seed(t *testing.T, name, owner, runID string) {
 func (f *fakeDocker) containers(t *testing.T) []string {
 	t.Helper()
 	b, _ := os.ReadFile(filepath.Join(f.dir, "containers"))
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if name, _, _ := strings.Cut(line, "|"); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// seedNetwork puts a network in the table that AO did not create in this test,
+// as a crashed pentest run would leave one behind.
+func (f *fakeDocker) seedNetwork(t *testing.T, name, owner, runID string) {
+	t.Helper()
+	fh, err := os.OpenFile(filepath.Join(f.dir, "networks"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+	fmt.Fprintf(fh, "%s|%s|%s|true\n", name, owner, runID)
+}
+
+func (f *fakeDocker) networks(t *testing.T) []string {
+	t.Helper()
+	b, _ := os.ReadFile(filepath.Join(f.dir, "networks"))
 	var out []string
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		if name, _, _ := strings.Cut(line, "|"); name != "" {
@@ -468,6 +538,64 @@ func TestReapRun_ReportsPendingRatherThanRemovedWhenTheRuntimeIsWedged(t *testin
 	}
 	if !strings.Contains(strings.Join(fd.containers(t), ","), "ao-skillrun-neighbour") {
 		t.Fatal("another run's container was removed")
+	}
+}
+
+// A pentest run that crashes mid-flight leaves not only its containers but the
+// two networks it created (internal + egress), both labelled with its run id.
+// Reaping the run by that id must reclaim the networks too, confirmed gone, and
+// must not touch a neighbouring run's network.
+func TestReapRun_ReclaimsTheRunsNetworksAndSparesOthers(t *testing.T) {
+	shortLimits(t)
+	fd := newFakeDocker(t)
+	fd.seed(t, "ao-pentest-checker-skr-pen1", "aoi-mine", "skr-pen1")
+	fd.seedNetwork(t, "ao-pentest-int-skr-pen1", "aoi-mine", "skr-pen1")
+	fd.seedNetwork(t, "ao-pentest-egr-skr-pen1", "aoi-mine", "skr-pen1")
+	fd.seedNetwork(t, "ao-pentest-int-skr-other", "aoi-mine", "skr-other")
+	r := fd.runner("aoi-mine")
+
+	rep, err := r.ReapRun(context.Background(), "skr-pen1", "", "")
+	if err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if len(rep.NetworksRemoved) != 2 || len(rep.NetworksPending) != 0 {
+		t.Fatalf("want both of the run's networks reclaimed, got removed=%v pending=%v",
+			rep.NetworksRemoved, rep.NetworksPending)
+	}
+	if len(rep.ContainersRemoved) != 1 {
+		t.Fatalf("the run's container was not reclaimed: %+v", rep)
+	}
+	left := strings.Join(fd.networks(t), ",")
+	if left != "ao-pentest-int-skr-other" {
+		t.Fatalf("reap touched the wrong networks; left=%q want only the neighbour's", left)
+	}
+}
+
+// The periodic sweep reclaims this installation's leftover pentest networks by
+// its owner label, but must leave a live run's network — whose containers are
+// still attached and doing their job — alone, and never touch another
+// installation's network.
+func TestSweepOwned_ReclaimsIdleOwnedNetworksAndSparesLiveOnes(t *testing.T) {
+	shortLimits(t)
+	fd := newFakeDocker(t)
+	fd.seedNetwork(t, "ao-pentest-int-skr-live", "aoi-mine", "skr-live") // executing here
+	fd.seedNetwork(t, "ao-pentest-egr-skr-live", "aoi-mine", "skr-live")
+	fd.seedNetwork(t, "ao-pentest-int-skr-dead", "aoi-mine", "skr-dead") // a crashed run's leftover
+	fd.seedNetwork(t, "ao-pentest-int-skr-other", "aoi-other", "skr-x")  // another installation
+	r := fd.runner("aoi-mine")
+
+	rep, err := r.SweepOwned(context.Background(), func(id string) bool { return id == "skr-live" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(rep.NetworksRemoved, ","); got != "ao-pentest-int-skr-dead" {
+		t.Fatalf("swept %q; want exactly the crashed run's idle network", got)
+	}
+	left := strings.Join(fd.networks(t), ",")
+	for _, keep := range []string{"ao-pentest-int-skr-live", "ao-pentest-egr-skr-live", "ao-pentest-int-skr-other"} {
+		if !strings.Contains(left, keep) {
+			t.Fatalf("the sweep removed %s, which was not its to remove (left: %s)", keep, left)
+		}
 	}
 }
 

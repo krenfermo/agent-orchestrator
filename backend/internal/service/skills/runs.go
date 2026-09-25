@@ -19,6 +19,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillagent"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillimage"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillreport"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
@@ -411,6 +412,17 @@ func (s *Service) execute(ctx context.Context, runID string, prep preparedRun) {
 func (s *Service) finishUnsuccessful(ctx context.Context, runID string, state store.SkillRunState,
 	code, message string, image store.SkillRunImage,
 ) {
+	// The stored error message is the last sink before a run's diagnostics
+	// become durable. Most callers pass an AO-authored constant, but a few
+	// (the non-agent tool paths -- static scan, active pentest) pass an
+	// executor error that has quoted the tool's own stderr, and a checker's
+	// stderr could, in principle, echo a credential from a target response.
+	// The agent path already redacts its error with the harvested-literal net;
+	// here we run the shape net over every failure message as a storage-layer
+	// backstop. It is idempotent over already-redacted text and never rewrites
+	// AO's diagnostic prose, whose shapes match nothing.
+	message, _ = skillreport.NewRedactor(nil).String(message)
+	message = truncate(message, 2000)
 	if _, err := s.runs.store.FinishSkillRunUnsuccessful(ctx, runID, store.SkillRunFailure{
 		State: state, Image: image, ErrorCode: code, ErrorMessage: message, FinishedAt: s.now(),
 	}); err != nil {
@@ -639,10 +651,12 @@ func (s *Service) ReconcileRuns(ctx context.Context) (int, error) {
 				// A pending container stays recorded (and labelled with this
 				// run's id), and the sweeper retries it; the run still ends.
 				e.log.Warn("skills: could not reap an interrupted run's leftovers", "run", rec.ID,
-					"removed", len(rep.ContainersRemoved), "pending", rep.ContainersPending, "err", rerr)
-			} else if len(rep.ContainersRemoved) > 0 || rep.StagingRemoved != "" {
+					"removed", len(rep.ContainersRemoved), "pending", rep.ContainersPending,
+					"networksRemoved", len(rep.NetworksRemoved), "networksPending", rep.NetworksPending, "err", rerr)
+			} else if len(rep.ContainersRemoved) > 0 || len(rep.NetworksRemoved) > 0 || rep.StagingRemoved != "" {
 				e.log.Info("skills: removed an interrupted run's leftovers", "run", rec.ID,
-					"containers", len(rep.ContainersRemoved), "staging", rep.StagingRemoved != "")
+					"containers", len(rep.ContainersRemoved), "networks", len(rep.NetworksRemoved),
+					"staging", rep.StagingRemoved != "")
 			}
 		}
 		msg := fmt.Sprintf("the daemon that owned this run (%s) stopped while it was %s; "+
@@ -677,12 +691,12 @@ func (s *Service) SweepContainers(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, sweepTimeout)
 	defer cancel()
 	rep, err := sw.SweepOwned(ctx, e.isLive)
-	if len(rep.Removed) > 0 {
-		e.log.Info("skills: removed leftover skill containers", "containers", rep.Removed)
+	if len(rep.Removed) > 0 || len(rep.NetworksRemoved) > 0 {
+		e.log.Info("skills: removed leftover skill containers", "containers", rep.Removed, "networks", rep.NetworksRemoved)
 	}
 	if err != nil {
-		e.log.Warn("skills: some skill containers are not confirmed removed; they stay recorded and are retried",
-			"pending", rep.Pending, "err", err)
+		e.log.Warn("skills: some skill leftovers are not confirmed removed; they stay recorded and are retried",
+			"pending", rep.Pending, "networksPending", rep.NetworksPending, "err", err)
 	}
 }
 

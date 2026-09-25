@@ -26,7 +26,14 @@ type ReapReport struct {
 	// ContainersPending are containers of the run whose removal the runtime
 	// did not confirm. They stay recorded, and SweepOwned retries them.
 	ContainersPending []string
-	StagingRemoved    string
+	// NetworksRemoved are networks the runtime CONFIRMED gone. A pentest run
+	// creates an internal and an egress network labelled with its run id;
+	// removing its containers does not remove them.
+	NetworksRemoved []string
+	// NetworksPending are networks of the run whose removal the runtime did
+	// not confirm. SweepOwned retries them by this installation's owner label.
+	NetworksPending []string
+	StagingRemoved  string
 }
 
 // ReapRun removes the container(s) labelled with runID and the run's staging
@@ -55,9 +62,31 @@ func (r *Runner) ReapRun(ctx context.Context, runID, projectPath, stagingOverrid
 				rep.ContainersPending = append(rep.ContainersPending, id)
 			}
 		}
-		if len(rep.ContainersPending) > 0 {
+
+		// Networks come after containers: a pentest run's internal/egress
+		// networks are labelled with the same run id but are not removed by
+		// removing its containers, so a killed daemon leaks them. Reclaim them
+		// by that run id, force-detaching any endpoint left over, confirmed
+		// gone rather than assumed. Removing the containers first means the
+		// networks are normally empty by the time we get here.
+		netListCtx, netCancel := context.WithTimeout(ctx, probeTimeout)
+		netOut, netErr := r.runner.Output(netListCtx, r.runtime.Binary, "network", "ls", "-q", "--no-trunc",
+			"--filter", "label="+RunIDLabel+"="+runID)
+		netCancel()
+		if netErr != nil {
+			return rep, fmt.Errorf("skillrunner: list networks of run %s: %w", runID, netErr)
+		}
+		for _, id := range strings.Fields(string(netOut)) {
+			if r.removeNetworkConfirmed(ctx, id) == CleanupConfirmed {
+				rep.NetworksRemoved = append(rep.NetworksRemoved, id)
+			} else {
+				rep.NetworksPending = append(rep.NetworksPending, id)
+			}
+		}
+
+		if leftover := append(append([]string{}, rep.ContainersPending...), rep.NetworksPending...); len(leftover) > 0 {
 			pendingErr = fmt.Errorf("%w: run %s: %s", ErrCleanupPending, runID,
-				strings.Join(rep.ContainersPending, ", "))
+				strings.Join(leftover, ", "))
 		}
 	}
 	if strings.TrimSpace(projectPath) == "" && strings.TrimSpace(stagingOverride) == "" {

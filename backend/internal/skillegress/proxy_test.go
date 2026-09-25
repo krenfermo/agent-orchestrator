@@ -453,3 +453,41 @@ func TestProxy_DefaultsBlockLoopbackAndMetadata(t *testing.T) {
 		t.Fatal("BlockedAddress accepts a nil address")
 	}
 }
+
+// The production active-pentest path builds its egress policy with
+// PolicyFor(lease) and nothing else: RunActivePentestScan derives a Lease from
+// the persisted authorization, and Lease carries no private-range field. So a
+// production policy is always fail-closed on private networks -- the fixture
+// exception (a post-PolicyFor mutation used only by the live E2E) can never
+// reach it. This locks that: the policy a lease produces permits no private
+// range, and a proxy built from it blocks RFC1918 and the metadata address,
+// even across an Encode/Decode round-trip. (ETAPA 4.)
+func TestPolicyFor_ProductionPentestPolicyIsFailClosedOnPrivateRanges(t *testing.T) {
+	policy := policyWith(t, time.Hour, "https://app.example.test:443")
+	if len(policy.PermittedPrivateCIDRs) != 0 {
+		t.Fatalf("PolicyFor opened private ranges: %v", policy.PermittedPrivateCIDRs)
+	}
+
+	// The bytes the proxy would actually enforce, round-tripped as in production.
+	raw, err := policy.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := DecodePolicy(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(decoded.PermittedPrivateCIDRs) != 0 {
+		t.Fatalf("the encoded production policy carried a private-range exception: %v", decoded.PermittedPrivateCIDRs)
+	}
+
+	p := NewProxy(decoded, nil)
+	if len(p.permitted) != 0 {
+		t.Fatalf("a production policy built a proxy with private-range exceptions: %v", p.permitted)
+	}
+	for _, ip := range []string{"10.1.2.3", "172.16.5.6", "192.168.9.9", "169.254.169.254", "127.0.0.1"} {
+		if p.permits(net.ParseIP(ip)) {
+			t.Fatalf("the production pentest proxy permitted the private/metadata address %s", ip)
+		}
+	}
+}

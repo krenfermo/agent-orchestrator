@@ -9,14 +9,14 @@
       "goos": "linux",
       "goarch": "amd64",
       "file": "ao-web-dast-linux-amd64",
-      "sha256": "fe6254dfa57b3849fc0b3df2144fbde27cac1915a384ea5b991e19e8a6f2da3a",
+      "sha256": "d4b7009a9a074470b64e5c5a5de67964b6cbbcc315d6e08f4c331d30db62b65e",
       "bytes": 6246526
     },
     {
       "goos": "linux",
       "goarch": "arm64",
       "file": "ao-web-dast-linux-arm64",
-      "sha256": "16f6be7ab1f26a1f04545bf0110707e9939b914f22a20f3b24843de10c0d361f",
+      "sha256": "d60353a3afa329b5fd68d9141759d8060655ec83505148ac06afbec068b2d419",
       "bytes": 5767294
     }
   ]

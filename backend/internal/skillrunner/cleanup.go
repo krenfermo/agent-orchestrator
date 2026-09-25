@@ -224,6 +224,10 @@ type SweepReport struct {
 	Removed []string
 	// Pending are containers still not confirmed gone.
 	Pending []string
+	// NetworksRemoved are networks whose removal the runtime confirmed.
+	NetworksRemoved []string
+	// NetworksPending are networks still not confirmed gone.
+	NetworksPending []string
 }
 
 // SweepOwned retries every pending removal and removes this installation's
@@ -286,11 +290,58 @@ func (r *Runner) SweepOwned(ctx context.Context, live func(runID string) bool) (
 			rep.Pending = append(rep.Pending, c.ref)
 		}
 	}
+
+	// Networks: a pentest run leaves an internal and an egress network behind
+	// on a crash. They carry this installation's owner label precisely so a
+	// sweep can find them; reclaim any whose run is not still live here,
+	// confirmed gone. The containers were swept just above, so a reclaimable
+	// network is normally already empty; removeNetworkConfirmed force-detaches
+	// anything still on it. A network is never swept on the owner label alone
+	// while its run is live, and never at all when this runner has no owner id.
+	if r.owner != "" && ctx.Err() == nil {
+		nlCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		nout, nerr := r.runner.Output(nlCtx, r.runtime.Binary, "network", "ls",
+			"--filter", "label="+OwnerLabel+"="+r.owner,
+			"--format", "{{.Name}}\t{{.Label \""+RunIDLabel+"\"}}")
+		cancel()
+		if nerr != nil {
+			if listErr == nil {
+				listErr = fmt.Errorf("skillrunner: list this installation's networks: %w", nerr)
+			}
+		} else {
+			type netcand struct{ name, runID string }
+			nets := make([]netcand, 0)
+			for _, line := range strings.Split(strings.TrimSpace(string(nout)), "\n") {
+				name, runID, _ := strings.Cut(strings.TrimSpace(line), "\t")
+				name = strings.TrimSpace(name)
+				if name == "" {
+					continue
+				}
+				nets = append(nets, netcand{name: name, runID: strings.TrimSpace(runID)})
+			}
+			sort.Slice(nets, func(i, j int) bool { return nets[i].name < nets[j].name })
+			for _, n := range nets {
+				if n.runID != "" && live != nil && live(n.runID) {
+					continue
+				}
+				if ctx.Err() != nil {
+					rep.NetworksPending = append(rep.NetworksPending, n.name)
+					continue
+				}
+				if r.removeNetworkConfirmed(ctx, n.name) == CleanupConfirmed {
+					rep.NetworksRemoved = append(rep.NetworksRemoved, n.name)
+				} else {
+					rep.NetworksPending = append(rep.NetworksPending, n.name)
+				}
+			}
+		}
+	}
+
 	if listErr != nil {
 		return rep, listErr
 	}
-	if len(rep.Pending) > 0 {
-		return rep, fmt.Errorf("%w: %s", ErrCleanupPending, strings.Join(rep.Pending, ", "))
+	if leftover := append(append([]string{}, rep.Pending...), rep.NetworksPending...); len(leftover) > 0 {
+		return rep, fmt.Errorf("%w: %s", ErrCleanupPending, strings.Join(leftover, ", "))
 	}
 	return rep, nil
 }

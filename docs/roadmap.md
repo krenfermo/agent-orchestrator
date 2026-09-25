@@ -123,12 +123,12 @@ gastar el turno. Coste bajo, evita exactamente el bloqueo observado.
 | Catálogo, manifiesto `ao.skill/v1`, activación por proyecto, capabilities | **Integrado** (fases 1-13, migraciones 0161-0167) | ADR 0003-0009, `docs/skills/` |
 | Runner aislado en contenedor, modo `static-code` | **Integrado** | ADR 0004; único modo ejecutable, escáner determinista (no agente) |
 | **2A — auditoría** | **Cerrada** | decisiones D1-D5 abajo |
-| **2B — runs durables, historial, reconcile** | **Implementado en `feat/skills-2b-run-persistence`, pendiente de merge** | [`skills/skill-runs.md`](skills/skill-runs.md), migración 0172, E2E real con Docker |
-| 2C — modos con agente | **Pendiente** | D1 |
-| 2D — scanners deterministas (secret-scan, dependencies) | **Pendiente** | necesita egress empaquetado (D4) para dependencies |
-| 2E — Security Audit SAST completo | **Pendiente** | — |
-| 2F — DAST / pentest activo con autorización explícita | **Pendiente** | `net.active_scan` + control propio |
-| 2G — E2E, hardening y cierre | **Pendiente** | — |
+| **2B — runs durables, historial, reconcile** | **Integrado en ECC** | [`skills/skill-runs.md`](skills/skill-runs.md), migración 0172-0173, E2E real con Docker |
+| 2C — modos con agente | **Integrado en ECC** | reviewer interactivo dentro del runner; `authz-review`/`api-infra-review` |
+| 2D — scanners deterministas (secret-scan, dependencies) | **Integrado en ECC** | egress empaquetado (D4) para `dependencies`; `secret-scan` estructural |
+| 2E — Security Audit SAST completo | **Integrado en ECC** | `static-code` + `full-audit` compuesto, reportes verificados por SHA |
+| 2F — DAST / pentest activo con autorización explícita | **Integrado en ECC** (`c4cf7ba2`, migración productiva 173→174) | `net.active_scan` + checker propio `ao-web-dast` aislado tras proxy de egreso; autorización persistida de dos pasos (0174); [`skills/security-audit-and-active-pentest.md`](skills/security-audit-and-active-pentest.md), [`active-pentest-design.md`](active-pentest-design.md) |
+| 2G — hardening y cierre | **En curso** en `feat/2g-skills-hardening` (sin merge) | builder canónico/provenance re-registrada, E2E release-like con embeds reales, fail-closed de redes privadas, reclamación de redes huérfanas por propiedad, redacción de errores; auditoría de cierre sin P0/P1 |
 
 **Decisiones de 2A (aprobadas):** D1 — arquitectura objetivo: agente dentro del
 runner; paso intermedio en 2C: agente en el host de solo lectura únicamente para
