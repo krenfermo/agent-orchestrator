@@ -183,22 +183,53 @@ var gitArgs = []string{
 	"-c", "core.quotepath=false",
 }
 
+// GitCommand builds a hardened, shell-free git invocation in root: no
+// fsmonitor hook, no repository hooks, no optional locks, and an environment
+// that cannot redirect git to another repository or configuration. Every git
+// command AO's indexers run against a project checkout goes through it.
+func GitCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
+	argv := append(append(append([]string{}, gitArgs...), "-C", root), args...)
+	cmd := exec.CommandContext(ctx, "git", argv...) //nolint:gosec // fixed argv, no shell
+	cmd.Env = gitEnv()
+	return cmd
+}
+
+// DirtyTrackedFiles counts tracked files whose working-tree content differs
+// from HEAD (staged or unstaged). Untracked files are not counted: they are
+// not eligible for indexing at all. ok=false means git could not answer.
+func DirtyTrackedFiles(ctx context.Context, root string) (n int, ok bool) {
+	out, err := GitCommand(ctx, root, "status", "--porcelain", "--untracked-files=no", "-z").Output()
+	if err != nil {
+		return 0, false
+	}
+	entries := bytes.Split(out, []byte{0})
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
+		if len(entry) <= 3 {
+			continue
+		}
+		n++
+		// A rename or copy is "XY new\0old": the next token is the original
+		// path of the same change, not another file.
+		if entry[0] == 'R' || entry[0] == 'C' || entry[1] == 'R' || entry[1] == 'C' {
+			i++
+		}
+	}
+	return n, true
+}
+
 // gitTracked lists tracked files relative to root. isGit=false (with no
 // error) means root is not inside a git work tree and the caller must fall
 // back to the filesystem walk.
 func gitTracked(ctx context.Context, root string) (paths []string, isGit bool, err error) {
-	probe := exec.CommandContext(ctx, "git", append(append([]string{}, gitArgs...), "-C", root, "rev-parse", "--is-inside-work-tree")...) //nolint:gosec // fixed argv, no shell
-	probe.Env = gitEnv()
-	out, err := probe.Output()
+	out, err := GitCommand(ctx, root, "rev-parse", "--is-inside-work-tree").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "true" {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, false, ctxErr
 		}
 		return nil, false, nil
 	}
-	cmd := exec.CommandContext(ctx, "git", append(append([]string{}, gitArgs...), "-C", root, "ls-files", "-z", "--cached")...) //nolint:gosec // fixed argv, no shell
-	cmd.Env = gitEnv()
-	raw, err := cmd.Output()
+	raw, err := GitCommand(ctx, root, "ls-files", "-z", "--cached").Output()
 	if err != nil {
 		return nil, true, fmt.Errorf("repoaccess: git ls-files in %s: %w", root, err)
 	}

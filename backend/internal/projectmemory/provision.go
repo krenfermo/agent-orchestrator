@@ -2,6 +2,7 @@ package projectmemory
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -155,7 +156,7 @@ func (p Provisioned) Attached() bool { return !p.Pack.Empty() || !p.External.Emp
 func (p Provisioned) Render() string {
 	memory := ""
 	if !p.Pack.Empty() {
-		memory = p.Pack.Render()
+		memory = p.FreshnessNotice() + p.Pack.Render()
 	}
 	external := p.External.Render()
 	switch {
@@ -575,4 +576,107 @@ func (p *Provisioner) outOfScope(ctx context.Context, req ProvisionRequest) stri
 		}
 	}
 	return "repository is not one of project " + string(req.ProjectID) + "'s registered repositories: memory withheld"
+}
+
+// FreshnessVerdict classifies what a consumer is being handed.
+type FreshnessVerdict string
+
+const (
+	// FreshnessCurrent: memory is provably at the checkout's commit and
+	// complete.
+	FreshnessCurrent FreshnessVerdict = "current"
+	// FreshnessStale: memory was derived at a commit other than the one the
+	// checkout is at (the sync to bring it forward did not complete).
+	FreshnessStale FreshnessVerdict = "stale"
+	// FreshnessUnverified: AO could not read the checkout's commit, or ran no
+	// check, so it cannot prove currency either way.
+	FreshnessUnverified FreshnessVerdict = "unverified"
+	// FreshnessPartial: memory is at the right commit but covers only part
+	// of the repository.
+	FreshnessPartial FreshnessVerdict = "partial"
+)
+
+// Verdict decides the freshness contract for this dispatch. Frente 3 / 3B:
+//
+//   - use       -> current: served as-is;
+//   - degrade   -> stale / unverified / partial: served WITH an explicit
+//     notice, because the working tree is always the authority and a
+//     summary of an earlier commit still orients an agent -- but it is
+//     never presented as current;
+//   - rebuild   -> automatic: every dispatch whose memory is not current
+//     runs a sync first (EnsureFresh), so a stale verdict means that sync
+//     did not complete, and the next dispatch tries again;
+//   - reject    -> withheld, never served: no completed pass, a failed pass,
+//     a repository-identity drift, a linked worktree, a request outside
+//     the project's scope, an archived project.
+func (p Provisioned) Verdict() FreshnessVerdict {
+	f := p.Freshness
+	packCommit := p.Pack.Stats.IndexedCommit
+	switch {
+	case f.HeadCommit == "" || packCommit == "":
+		return FreshnessUnverified
+	case packCommit != f.HeadCommit:
+		return FreshnessStale
+	case f.Partial || (f.Graph.Attempted && f.Graph.Partial):
+		return FreshnessPartial
+	case f.Graph.Attempted && f.Graph.Usable && f.Graph.IndexedCommit != "" && f.Graph.IndexedCommit != f.HeadCommit:
+		return FreshnessStale
+	}
+	return FreshnessCurrent
+}
+
+// FreshnessNotice is AO's statement, outside the untrusted data block, of how
+// current the attached memory is. It is never empty when memory is attached:
+// "current" is said as plainly as "stale".
+func (p Provisioned) FreshnessNotice() string {
+	f := p.Freshness
+	packCommit := p.Pack.Stats.IndexedCommit
+	var b strings.Builder
+	switch p.Verdict() {
+	case FreshnessCurrent:
+		fmt.Fprintf(&b, "MEMORY FRESHNESS: CURRENT -- derived at the checkout's own commit %s.\n", noticeSHA(packCommit))
+	case FreshnessStale:
+		fmt.Fprintf(&b, "MEMORY FRESHNESS: STALE -- memory was derived at commit %s but the checkout is at %s", noticeSHA(packCommit), noticeSHA(f.HeadCommit))
+		if f.Graph.Attempted && f.Graph.IndexedCommit != "" && f.Graph.IndexedCommit != f.HeadCommit {
+			fmt.Fprintf(&b, " (code graph at %s)", noticeSHA(f.Graph.IndexedCommit))
+		}
+		b.WriteString(". Facts may describe code that has since changed; verify against the working tree before relying on them.")
+		if f.Reason != "" {
+			b.WriteString(" Sync: " + f.Reason + ".")
+		}
+		b.WriteString("\n")
+	case FreshnessUnverified:
+		b.WriteString("MEMORY FRESHNESS: UNVERIFIED -- AO could not prove this memory matches the checkout")
+		if packCommit != "" {
+			fmt.Fprintf(&b, " (derived at commit %s)", noticeSHA(packCommit))
+		}
+		b.WriteString("; verify against the working tree before relying on it.\n")
+	case FreshnessPartial:
+		fmt.Fprintf(&b, "MEMORY FRESHNESS: PARTIAL -- derived at the checkout's commit %s but covering only part of the repository", noticeSHA(packCommit))
+		if f.PartialReason != "" {
+			b.WriteString(" (" + f.PartialReason + ")")
+		} else if f.Graph.Partial {
+			b.WriteString(" (the code graph stopped at its file bound)")
+		}
+		b.WriteString("; absence of a fact here is not evidence of absence in the repository.\n")
+	}
+	if f.DirtyTracked > 0 {
+		fmt.Fprintf(&b, "The checkout has uncommitted changes to %d tracked file(s); facts about those files may reflect uncommitted content.\n", f.DirtyTracked)
+	}
+	if f.Graph.Attempted && !f.Graph.Usable {
+		reason := f.Graph.Reason
+		if reason == "" {
+			reason = "no complete graph is available"
+		}
+		b.WriteString("CODE GRAPH: UNAVAILABLE -- " + reason + "; structural evidence is omitted.\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func noticeSHA(sha string) string {
+	if sha == "" {
+		return "(none)"
+	}
+	return shortSHA(sha)
 }

@@ -868,7 +868,10 @@ func RunWithConfig(cfg config.Config) error {
 	codeGraph := codegraph.NewIndex(store, codegraph.WithIndexLogger(log))
 	projectMemory := projectmemory.NewService(store,
 		projectmemory.WithCodeGraph(codeGraph),
-		projectmemory.WithServiceLogger(log))
+		projectmemory.WithServiceLogger(log),
+		// Frente 3 / 3B: AO_MEMORY_MAX_FILES / AO_MEMORY_MAX_FILE_BYTES were
+		// parsed and never applied; the operator's bounds now reach every pass.
+		projectmemory.WithIndexerLimits(memoryConfig(log).IndexLimits))
 	// ONE provisioner for the whole daemon. It owns the sync single-flight and
 	// the pack cache, so constructing a second one for the API surface would
 	// give `ao memory report` its own syncer -- and a report could then trigger

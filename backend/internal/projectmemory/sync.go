@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/codegraph"
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // sync.go — P2-B's lifecycle trigger and its single-flight (§2, §3).
@@ -94,6 +97,20 @@ type Freshness struct {
 	// with Attempted false means no structural graph is configured, which is
 	// the pre-phase behaviour and not a degradation.
 	Graph GraphFreshness
+	// HeadCommit is the commit the checkout was at when the check ran, or ""
+	// when AO could not read one. Frente 3 / 3B: it is what lets a consumer be
+	// TOLD that memory derived at IndexedCommit is not the checkout's state,
+	// instead of inferring currency from "derived at commit X".
+	HeadCommit string
+	// Partial reports that the served memory covers only part of the
+	// repository: the last pass stopped at its file bound.
+	Partial       bool
+	PartialReason string
+	// DirtyTracked counts tracked files the checkout has changed without
+	// committing. The indexer reads files from disk, so facts about those
+	// files may reflect uncommitted content even though the memory is
+	// labelled with HeadCommit; the consumer is told so. -1 means unknown.
+	DirtyTracked int
 }
 
 // Healthy reports whether memory may be served for this dispatch.
@@ -134,12 +151,18 @@ type Syncer struct {
 	cfg  Config
 	now  func() time.Time
 	head func(ctx context.Context, repoPath string) (commit, branch string)
+	// dirty counts tracked files with uncommitted changes (Frente 3 / 3B).
+	dirty func(ctx context.Context, repoPath string) (int, bool)
 	// linkedWorktree is the P2-E guard, injectable so a test can exercise the
 	// refusal without building a real linked worktree.
 	linkedWorktree func(ctx context.Context, path string) (string, bool)
 	log            *slog.Logger
 	mu             sync.Mutex
 	flight         map[syncKey]*syncFlight
+	// partial caches, per (repository, generation, commit), whether the
+	// served memory is truncated. It is derived from the durable file ledger
+	// once per state and never stored, so no schema change was needed.
+	partial map[string]bool
 	// stats are process-lifetime counters an operator surface can read to see
 	// whether coalescing is doing anything.
 	stats SyncStats
@@ -168,6 +191,7 @@ func NewSyncer(svc *Service, cfg Config) *Syncer {
 		cfg:            cfg,
 		now:            func() time.Time { return time.Now().UTC() },
 		head:           HeadOf,
+		dirty:          repoaccess.DirtyTrackedFiles,
 		linkedWorktree: LinkedWorktreeOf,
 		log:            svc.log,
 		flight:         map[syncKey]*syncFlight{},
@@ -193,11 +217,56 @@ func (s *Syncer) Stats() SyncStats {
 // Current=false, because there is no failure of memory that should stop a
 // dispatch.
 func (s *Syncer) EnsureFresh(ctx context.Context, projectID domain.ProjectID, repoPath string) Freshness {
+	fresh, head := s.ensureFresh(ctx, projectID, repoPath)
+	fresh.HeadCommit = head
+	fresh.DirtyTracked = -1
+	if head != "" && fresh.Usable {
+		if n, ok := s.dirty(ctx, repoPath); ok {
+			fresh.DirtyTracked = n
+		}
+	}
+	if fresh.Usable && fresh.RepoID != "" {
+		fresh.Partial, fresh.PartialReason = s.memoryPartial(ctx, projectID, fresh.RepoID, fresh.Generation, fresh.IndexedCommit)
+	}
+	if fresh.Graph.Attempted && fresh.Graph.Files >= codegraph.DefaultScanLimits().MaxFiles {
+		fresh.Graph.Partial = true
+	}
+	return fresh
+}
+
+// memoryPartial reports whether the memory at (repo, generation, commit) was
+// cut short by the pass's file bound. The file ledger holds one row per
+// admitted file, so a ledger at the bound is a truncated pass by construction.
+func (s *Syncer) memoryPartial(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, commit string) (bool, string) {
+	key := fmt.Sprintf("%s|%s|%d|%s", projectID, repoID, generation, commit)
+	s.mu.Lock()
+	cached, ok := s.partial[key]
+	s.mu.Unlock()
+	if !ok {
+		files, err := s.svc.repo.ListProjectMemoryFiles(ctx, projectID, repoID)
+		if err != nil {
+			return false, ""
+		}
+		cached = len(files) >= s.svc.limits.MaxFiles
+		s.mu.Lock()
+		if s.partial == nil {
+			s.partial = map[string]bool{}
+		}
+		s.partial[key] = cached
+		s.mu.Unlock()
+	}
+	if cached {
+		return true, fmt.Sprintf("the last pass stopped at its %d-file bound, so memory covers part of the repository", s.svc.limits.MaxFiles)
+	}
+	return false, ""
+}
+
+func (s *Syncer) ensureFresh(ctx context.Context, projectID domain.ProjectID, repoPath string) (Freshness, string) {
 	started := s.now()
 	s.bump(func(st *SyncStats) { st.Checks++ })
 
 	if !s.cfg.Mode.Enabled() {
-		return Freshness{Kind: SyncSkipped, Reason: "project memory is switched off", Duration: s.now().Sub(started)}
+		return Freshness{Kind: SyncSkipped, Reason: "project memory is switched off", Duration: s.now().Sub(started)}, ""
 	}
 	canonical, err := canonicalRepoPath(repoPath)
 	if err != nil {
@@ -205,7 +274,7 @@ func (s *Syncer) EnsureFresh(ctx context.Context, projectID domain.ProjectID, re
 		return Freshness{
 			Kind: SyncSkipped, Duration: s.now().Sub(started),
 			Reason: "the repository path could not be resolved: " + err.Error(),
-		}
+		}, ""
 	}
 
 	// P2-E: a linked worktree is not a repository, and canonical memory is
@@ -234,7 +303,7 @@ func (s *Syncer) EnsureFresh(ctx context.Context, projectID domain.ProjectID, re
 			Reason: fmt.Sprintf(
 				"%s is a linked worktree of %s, not a repository; canonical memory is only ever derived from the repository root",
 				canonical, orNone(parent)),
-		}
+		}, ""
 	}
 
 	repoID := domain.ProjectMemoryRepoID(canonical)
@@ -252,13 +321,13 @@ func (s *Syncer) EnsureFresh(ctx context.Context, projectID domain.ProjectID, re
 		// would leave a project permanently unindexed after memory warmed.
 		fresh.Graph = s.syncGraph(ctx, projectID, canonical, repoID, commit, branch)
 		fresh.Duration = s.now().Sub(started)
-		return fresh
+		return fresh, commit
 	}
 
 	flight, leader := s.join(key)
 	if !leader {
 		s.bump(func(st *SyncStats) { st.Coalesced++ })
-		return s.wait(ctx, flight, key, started)
+		return s.wait(ctx, flight, key, started), commit
 	}
 	defer s.leave(key, flight)
 
@@ -266,7 +335,7 @@ func (s *Syncer) EnsureFresh(ctx context.Context, projectID domain.ProjectID, re
 	result.Duration = s.now().Sub(started)
 	flight.result = result
 	close(flight.done)
-	return result
+	return result, commit
 }
 
 // alreadyCurrent answers the warm case from durable state alone.
