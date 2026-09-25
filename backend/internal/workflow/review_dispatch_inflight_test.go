@@ -249,4 +249,3 @@ func TestReviewDispatchReservationDoesNotCoverAReclaimedGeneration(t *testing.T)
 		t.Fatalf("launches=%d: a reclaimed generation produced two reviewers", launcher.launchCalls)
 	}
 }
-
