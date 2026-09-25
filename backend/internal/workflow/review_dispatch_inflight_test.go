@@ -124,3 +124,129 @@ func TestReviewDispatchRecoveryAfterRestartIsUnchanged(t *testing.T) {
 		t.Fatalf("a coordinator that does not own the dispatch must still recover it: first review run status=%q, want failed", got)
 	}
 }
+
+// The interval Codex found (3D preflight review): the claim is DURABLE -- the
+// outbox row reads `dispatched` with this dispatch's generation -- but the
+// dispatcher has not yet returned from the claim call. A concurrent pass in
+// that interval must treat the dispatch as live: it may not declare the
+// reviewer absent, mark the review ambiguous, release the claim or launch a
+// second reviewer.
+func TestReviewDispatchDurableClaimBeforeLocalRegistrationIsLive(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	c, store, clk := newCoordinatorWithReview(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher)
+	ctx := context.Background()
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStep(t, c, store, clk, sessionFacts, workspaceFacts, created.Run.ID)
+
+	reached := false
+	var claimedGeneration string
+	store.afterOutboxClaim = func() {
+		reached = true
+		for _, e := range store.outbox {
+			if e.CommandType == domain.WorkflowOutboxTriggerReview {
+				claimedGeneration = e.DispatchGeneration
+			}
+		}
+		concurrent, err := c.ContinueRun(ctx, created.Run.ID)
+		if err != nil {
+			t.Errorf("concurrent pass: %v", err)
+			return
+		}
+		if concurrent.Run.State == domain.WorkflowRunNeedsAttention {
+			t.Errorf("the concurrent pass declared the live dispatch ambiguous/absent (run needs_attention)")
+		}
+		for _, e := range store.outbox {
+			if e.CommandType == domain.WorkflowOutboxTriggerReview &&
+				(e.Status != domain.WorkflowOutboxDispatched || e.DispatchGeneration != claimedGeneration) {
+				t.Errorf("the concurrent pass released or re-claimed the live claim: status=%q generation=%q", e.Status, e.DispatchGeneration)
+			}
+		}
+		for id, rr := range reviewRuns.runs {
+			if rr.Status == domain.ReviewRunFailed {
+				t.Errorf("the concurrent pass failed review run %s", id)
+			}
+		}
+		if launcher.launchCalls != 0 {
+			t.Errorf("the concurrent pass launched a reviewer (%d) while the owner had not yet", launcher.launchCalls)
+		}
+	}
+	got, err := c.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	if !reached {
+		t.Fatal("the durable-claim interval was never reached")
+	}
+	if got.Run.State == domain.WorkflowRunNeedsAttention {
+		t.Fatal("run ended needs_attention")
+	}
+	review := reviewStepFrom(got)
+	if review.Step.State != domain.WorkflowStepRunning || review.Step.ReviewRunID == nil {
+		t.Fatalf("review step = %q, want running with its review run", review.Step.State)
+	}
+	if launcher.launchCalls != 1 || reviewRuns.insertCalls != 1 {
+		t.Fatalf("launches=%d inserts=%d, want exactly one reviewer", launcher.launchCalls, reviewRuns.insertCalls)
+	}
+}
+
+// Generation/reclaim integration: while THIS process's dispatch N is between
+// its durable claim and its launch, the row is reclaimed by generation N+1
+// (another owner). N's local reservation must not protect N+1 -- a concurrent
+// pass must treat N+1's claim by its own facts -- and the outcome must never be
+// two reviewers.
+func TestReviewDispatchReservationDoesNotCoverAReclaimedGeneration(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	c, store, clk := newCoordinatorWithReview(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher)
+	ctx := context.Background()
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStep(t, c, store, clk, sessionFacts, workspaceFacts, created.Run.ID)
+
+	store.afterOutboxClaim = func() {
+		// Model a valid reclaim: the row now belongs to generation N+1, which
+		// this process never reserved.
+		for key, e := range store.outbox {
+			if e.CommandType == domain.WorkflowOutboxTriggerReview {
+				e.DispatchGeneration = "gen-N+1-foreign"
+				store.outbox[key] = e
+			}
+		}
+		got, err := c.ContinueRun(ctx, created.Run.ID)
+		if err != nil {
+			t.Errorf("concurrent pass: %v", err)
+		}
+		// N's reservation must not have short-circuited the pass: it must
+		// have evaluated N+1's claim on its own facts, which here (a claim
+		// with no review run) is the durable recovery -- the row no longer
+		// reads (dispatched, N+1) or the run was stopped for a person.
+		for _, e := range store.outbox {
+			if e.CommandType == domain.WorkflowOutboxTriggerReview {
+				t.Logf("after the concurrent pass: status=%q generation=%q run=%q", e.Status, e.DispatchGeneration, got.Run.State)
+				if e.Status == domain.WorkflowOutboxDispatched && e.DispatchGeneration == "gen-N+1-foreign" &&
+					got.Run.State != domain.WorkflowRunNeedsAttention {
+					t.Errorf("the pass treated N+1 as covered by N's reservation (nothing evaluated)")
+				}
+			}
+		}
+	}
+	if _, err := c.ContinueRun(ctx, created.Run.ID); err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	if launcher.launchCalls > 1 {
+		t.Fatalf("launches=%d: a reclaimed generation produced two reviewers", launcher.launchCalls)
+	}
+}
+

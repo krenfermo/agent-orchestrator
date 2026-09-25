@@ -1452,14 +1452,15 @@ func (c *Coordinator) dispatchReviewFromPending(
 	// one statement, so a dispatched row can never be owned by nobody — and a
 	// dispatch that is later released and reclaimed is a genuinely different
 	// generation, which the stale holder can no longer act on.
+	//
+	// The claim is reserved as live in this process BEFORE the CAS, under its
+	// own generation (see review_dispatch_inflight.go): the row must never read
+	// `dispatched` for this generation while a concurrent pass could take the
+	// dispatch for an abandoned one. Losing the CAS just drops the reservation.
+	defer c.reviewInFlight.reserve(entry.ID, dispatchGeneration)()
 	claimed, err := c.store.ClaimWorkflowOutboxDispatch(ctx, entry.ID, now, dispatchGeneration)
 	if err != nil {
 		return reviewStep, err
-	}
-	if claimed {
-		// This process now executes the dispatch that owns this claim
-		// generation; recovery must not treat it as abandoned while it runs.
-		defer c.reviewInFlight.begin(entry.ID, dispatchGeneration)()
 	}
 	if !claimed {
 		if c.log != nil {

@@ -9,50 +9,66 @@ import "sync"
 // a `dispatched` review step (adoptReviewOrMarkAmbiguous) exists for one
 // situation: the dispatch that claimed it is gone -- the daemon crashed or
 // restarted between the claim and the launch record. It used to be reached
-// ALSO while the claiming dispatch was alive and still launching (provisioning
-// the reviewer's context, starting its session): a wake re-entered the step,
+// ALSO while the claiming dispatch was alive: a wake re-entered the step,
 // probed a reviewer that did not exist yet, declared "no reviewer launch was
-// ever recorded", failed the review run and released the claim -- and the
-// live dispatch then launched a reviewer for a review AO had already failed.
+// ever recorded", failed the review run and released the claim -- and the live
+// dispatch then launched a reviewer for a review AO had already failed.
 //
-// The distinction the recovery path needs is exact, not a time window: is the
-// dispatch that owns this claim generation running in this process? This set
-// answers it. It is in memory on purpose: after a restart it is empty, which is
-// precisely the case recovery exists for, so the durable recovery behaves
-// exactly as before.
+// THE KEY IS THE CLAIM, NOT THE ENTRY. A claim is (outbox entry, dispatch
+// generation), and the generation is minted by the dispatch's own durable
+// AUTHORIZED record BEFORE it contends for the row, so every contender holds a
+// distinct key. That is what makes it safe to RESERVE the key before the CAS:
+//
+//   - The winner's key is present from before the row can read `dispatched`,
+//     so no pass can observe the durable claim without also seeing it live.
+//     (Registering after the CAS left exactly that interval open.)
+//   - A loser's key names a generation the row never holds, so it protects
+//     nothing and is dropped when the loser returns.
+//   - Generations never share a key: a reclaim by N+1 is protected only by
+//     N+1's own reservation, and N ending can neither remove nor stand in for
+//     it.
+//
+// It is in memory on purpose: after a restart it is empty, which is precisely
+// the case recovery exists for, so durable recovery behaves exactly as before.
 type reviewDispatchInFlight struct {
-	mu sync.Mutex
-	// generations maps an outbox entry id to the claim generation a live
-	// dispatch in this process holds.
-	generations map[string]string
+	mu     sync.Mutex
+	claims map[reviewClaimKey]int
 }
 
-// begin records that this process is executing the dispatch holding
-// (entryID, generation) and returns the function that ends it.
-func (r *reviewDispatchInFlight) begin(entryID, generation string) func() {
+type reviewClaimKey struct {
+	entryID    string
+	generation string
+}
+
+// reserve marks the claim (entryID, generation) as executed by this process
+// and returns the function that ends it. It is called BEFORE the claim CAS.
+func (r *reviewDispatchInFlight) reserve(entryID, generation string) func() {
+	key := reviewClaimKey{entryID: entryID, generation: generation}
 	r.mu.Lock()
-	if r.generations == nil {
-		r.generations = map[string]string{}
+	if r.claims == nil {
+		r.claims = map[reviewClaimKey]int{}
 	}
-	r.generations[entryID] = generation
+	r.claims[key]++
 	r.mu.Unlock()
 	return func() {
 		r.mu.Lock()
-		if r.generations[entryID] == generation {
-			delete(r.generations, entryID)
+		if r.claims[key] <= 1 {
+			delete(r.claims, key)
+		} else {
+			r.claims[key]--
 		}
 		r.mu.Unlock()
 	}
 }
 
 // running reports whether a live dispatch in this process holds exactly this
-// claim generation. A released and re-claimed entry is a different generation
-// and is not covered by an older dispatch.
+// claim. The caller passes the generation the durable row names as its owner;
+// any other generation's reservation is irrelevant to it.
 func (r *reviewDispatchInFlight) running(entryID, generation string) bool {
-	if generation == "" {
+	if entryID == "" || generation == "" {
 		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.generations[entryID] == generation
+	return r.claims[reviewClaimKey{entryID: entryID, generation: generation}] > 0
 }

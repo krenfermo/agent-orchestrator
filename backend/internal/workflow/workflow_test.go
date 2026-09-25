@@ -100,6 +100,11 @@ type fakeStore struct {
 	// before it takes effect — the interleaving point at which a second
 	// dispatcher can claim the pending dispatch out from under this one.
 	beforeOutboxCAS func(id string, expected, next domain.WorkflowOutboxStatus)
+	// afterOutboxClaim fires once a dispatch claim is DURABLE (the row is
+	// already `dispatched` with its generation) but before the claim call
+	// returns to the dispatcher -- the interval in which the dispatcher has
+	// not yet done anything with the claim it now owns.
+	afterOutboxClaim func()
 	// checkpointListErr makes the durable ledger unreadable. Every decision that
 	// depends on evidence must fail CLOSED when it is set: an unreadable ledger
 	// is the absence of proof, never a substitute for it.
@@ -825,6 +830,10 @@ func (f *fakeStore) ClaimWorkflowOutboxDispatch(_ context.Context, id string, no
 		entry.FailureGeneration = ""
 		entry.DispatchGeneration = dispatchGeneration
 		f.outbox[key] = entry
+		if hook := f.afterOutboxClaim; hook != nil {
+			f.afterOutboxClaim = nil
+			hook()
+		}
 		return true, nil
 	}
 	return false, nil
