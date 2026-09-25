@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"path"
 	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // classify.go — what a file IS, and whether AO is allowed to read it at all.
@@ -129,58 +131,13 @@ func hasGeneratedMarker(src []byte) bool {
 		bytes.Contains(lowered, []byte("do not edit"))
 }
 
-// deniedBaseNames are files whose CONTENT is a secret by convention. They are
-// refused before a read, not filtered after one: the point of the rule is that
-// the bytes never enter the process, so a later bug cannot leak what was never
-// loaded.
-//
-// This is belt-and-braces with the extractor set (which claims only source
-// extensions), and it is the braces on purpose: a repository with a
-// `secrets.py`, an `env.ts` config module, or a `credentials.go` would
-// otherwise be admitted by extension alone.
-var deniedBaseNames = map[string]bool{
-	".env": true, ".envrc": true, ".netrc": true, ".npmrc": true, ".pypirc": true,
-	"credentials": true, "credentials.json": true, "id_rsa": true, "id_dsa": true,
-	"id_ecdsa": true, "id_ed25519": true, "secrets.json": true, "secrets.yaml": true,
-	"secrets.yml": true, ".htpasswd": true, "kubeconfig": true,
-}
-
-// deniedExtensions are file extensions that only ever hold key material.
-var deniedExtensions = map[string]bool{
-	".pem": true, ".key": true, ".p12": true, ".pfx": true, ".jks": true,
-	".keystore": true, ".crt": true, ".cer": true, ".der": true, ".asc": true,
-	".gpg": true, ".kdbx": true,
-}
-
-// deniedNamePrefixes catch the dotted variants of the env file: ".env.local",
-// ".env.production", ".env.staging".
-//
-// It deliberately does NOT include a "secret"/"credentials" prefix. A
-// `secrets.go` or a `credentials.ts` is source code that HANDLES secrets, not
-// a file that contains one, and refusing to index it would blind the graph to
-// exactly the code a reviewer most wants to find. The data files that do hold
-// values are named explicitly in deniedBaseNames.
-var deniedNamePrefixes = []string{".env."}
-
 // DeniedPath reports whether a project-relative path must never be read. It is
 // the security exclusion of section 28 of the brief: a graph fact may record
-// that a configuration KEY exists (see extract_config.go); nothing here ever
-// opens the file that holds its value.
+// that a configuration KEY exists (from the code that reads it); nothing here
+// ever opens the file that holds its value.
+//
+// Frente 3 / 3B: the list itself now lives in repoaccess, shared with project
+// memory, so the two indexers can no longer disagree about what a secret is.
 func DeniedPath(rel string) bool {
-	base := strings.ToLower(path.Base(strings.ReplaceAll(rel, "\\", "/")))
-	if base == "" {
-		return false
-	}
-	if deniedBaseNames[base] {
-		return true
-	}
-	if deniedExtensions[strings.ToLower(path.Ext(base))] {
-		return true
-	}
-	for _, prefix := range deniedNamePrefixes {
-		if strings.HasPrefix(base, prefix) {
-			return true
-		}
-	}
-	return false
+	return repoaccess.IsSecretPath(rel)
 }

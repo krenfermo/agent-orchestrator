@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // drift.go — proving, or failing to prove, that a stored fact still holds.
@@ -108,7 +108,7 @@ type Detector struct {
 	// hash lets a test substitute the file hasher. Production always uses the
 	// same content hash the indexer writes, which is the point: two different
 	// hashes would make every fact look drifted.
-	hash func(path string) (string, error)
+	hash func(root, rel string) (string, error)
 }
 
 // NewDetector builds a drift detector over a durable repository.
@@ -225,17 +225,14 @@ func (d *Detector) evaluate(
 		}
 		digest, cached := digests[rel]
 		if !cached {
-			abs, ok := confinedPath(repoPath, rel)
-			if !ok {
-				// A stored source path that escapes the repository root is not
-				// evidence of anything. Treating it as missing fails closed.
-				missing[rel] = true
-				gone = append(gone, rel)
-				continue
-			}
-			h, err := d.hash(abs)
+			// Frente 3 / 3B: the read goes through the shared confined-read
+			// contract. A stored source path that escapes the root, traverses
+			// a symlink, names a secret, or is gone is not evidence of
+			// anything any more -- every such refusal fails closed as
+			// "no longer present".
+			h, err := d.hash(repoPath, rel)
 			switch {
-			case errors.Is(err, os.ErrNotExist):
+			case repoaccess.IsRefusal(err):
 				missing[rel] = true
 				gone = append(gone, rel)
 				continue
@@ -310,28 +307,18 @@ func (d *Detector) InvalidatePaths(
 	return total, nil
 }
 
-// hashFileContent computes the same digest the indexer writes. It exists as a
-// named function rather than an inline read so there is exactly one definition
-// of "this file's content hash" in the package.
-func hashFileContent(abs string) (string, error) {
-	content, err := os.ReadFile(abs) //nolint:gosec // abs is confined to the repository root by confinedPath
+// driftHashLimit bounds a drift re-hash. The indexer never derives a fact
+// from a file above its own per-file cap, so anything much larger than that is
+// not a source a live item can name.
+const driftHashLimit = 64 << 20
+
+// hashFileContent computes the same digest the indexer writes, reading through
+// the shared confined-read contract (no symlink at any component, no escape,
+// no secret path).
+func hashFileContent(root, rel string) (string, error) {
+	content, err := repoaccess.ReadConfined(root, rel, driftHashLimit)
 	if err != nil {
 		return "", err
 	}
 	return hashBytes(content), nil
-}
-
-// confinedPath resolves a repo-relative path against the repository root and
-// refuses anything that escapes it. Stored provenance is data, and data that
-// says "../../etc/passwd" must not become a read.
-func confinedPath(root, rel string) (string, bool) {
-	clean := filepath.Clean(filepath.FromSlash(rel))
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
-		return "", false
-	}
-	abs := filepath.Join(root, clean)
-	if abs != root && !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
-		return "", false
-	}
-	return abs, true
 }

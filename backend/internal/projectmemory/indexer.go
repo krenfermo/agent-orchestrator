@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,6 +16,8 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // indexer.go — the bounded, restart-safe indexing pass.
@@ -156,6 +157,18 @@ func (l IndexLimits) isZero() bool {
 func (l IndexLimits) ignoresDir(name string) bool {
 	for _, d := range l.IgnoredDirs {
 		if d == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ignoresPath reports whether any directory on rel's path is one this
+// indexer skips for relevance (on top of repoaccess's shared exclusions).
+func (l IndexLimits) ignoresPath(rel string) bool {
+	segs := strings.Split(rel, "/")
+	for _, seg := range segs[:len(segs)-1] {
+		if l.ignoresDir(seg) {
 			return true
 		}
 	}
@@ -459,65 +472,57 @@ func (p *indexPass) walk(ctx context.Context) error {
 	p.state.Phase = domain.IndexPhaseScanning
 	sinceCheckpoint := 0
 
-	err := filepath.WalkDir(p.repoPath, func(abs string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// A path that vanished mid-walk is not a failure: a repository is
-			// allowed to change while AO reads it, and the digest ledger will
-			// report the path as gone at the end of the pass.
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
+	// Frente 3 / 3B: the candidate set is repoaccess.ListEligible -- the
+	// TRACKED files of a git repository (a filesystem walk refusing nested
+	// checkouts otherwise) -- and every read goes through the confined-read
+	// contract. Before this, a raw filesystem walk read `.env` and key files
+	// to hash them into the ledger, and anything else the directory held.
+	listing, err := repoaccess.ListEligible(ctx, p.repoPath)
+	if err != nil {
+		return err
+	}
+	// Env templates are never opened, but that one EXISTS is a useful
+	// pointer for a newcomer ("configuration template exists"), so the path
+	// alone reaches the naming signals.
+	for _, rel := range listing.SecretTemplates {
+		p.signals.observe(rel)
+	}
+	for _, rel := range listing.Paths {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		rel, relErr := repoRelative(p.repoPath, abs)
-		if relErr != nil {
-			return relErr
-		}
-		if d.IsDir() {
-			if rel != "." && p.limits.ignoresDir(d.Name()) {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
+		if p.limits.ignoresPath(rel) {
+			continue
 		}
 		p.out.FilesSeen++
-
 		if p.limits.ignoresExt(path.Ext(rel)) {
-			return nil
+			continue
 		}
-		info, statErr := d.Info()
-		if statErr != nil {
-			if errors.Is(statErr, fs.ErrNotExist) {
-				return nil
-			}
+		size, statErr := repoaccess.StatConfined(p.repoPath, rel, p.limits.MaxFileBytes)
+		switch {
+		case repoaccess.IsRefusal(statErr):
+			continue
+		case statErr != nil:
 			return statErr
-		}
-		if info.Size() > p.limits.MaxFileBytes {
-			return nil
 		}
 		if p.out.FilesAdmitted >= p.limits.MaxFiles {
 			p.truncateWalk(fmt.Sprintf("stopped at the %d-file bound", p.limits.MaxFiles))
-			return errWalkBudgetReached
+			break
 		}
-		if p.out.BytesRead+info.Size() > p.limits.MaxTotalBytes {
+		if p.out.BytesRead+size > p.limits.MaxTotalBytes {
 			p.truncateWalk(fmt.Sprintf("stopped at the %s total-read bound", humanBytes(p.limits.MaxTotalBytes)))
-			return errWalkBudgetReached
+			break
 		}
 
-		content, readErr := os.ReadFile(abs) //nolint:gosec // abs comes from WalkDir under the repository root
-		if readErr != nil {
-			if errors.Is(readErr, fs.ErrNotExist) {
-				return nil
-			}
+		content, readErr := repoaccess.ReadConfined(p.repoPath, rel, p.limits.MaxFileBytes)
+		switch {
+		case repoaccess.IsRefusal(readErr):
+			continue
+		case readErr != nil:
 			return readErr
 		}
 		if isBinary(content) {
-			return nil
+			continue
 		}
 		p.out.FilesAdmitted++
 		p.out.BytesRead += int64(len(content))
@@ -533,10 +538,6 @@ func (p *indexPass) walk(ctx context.Context) error {
 				return err
 			}
 		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, errWalkBudgetReached) {
-		return err
 	}
 	return nil
 }
@@ -552,10 +553,6 @@ func (p *indexPass) truncateWalk(reason string) {
 	}
 }
 
-// errWalkBudgetReached stops the walk at a bound without turning the bound
-// into a failure. A truncated pass is a successful pass that says it was
-// truncated.
-var errWalkBudgetReached = errors.New("projectmemory: index bound reached")
 
 // admit records one file: its ledger entry, its module membership, its
 // imports, and — unless the resume cursor says a previous pass already did —

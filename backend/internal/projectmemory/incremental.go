@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // incremental.go — updating memory from a change set rather than a walk.
@@ -478,28 +479,18 @@ func (p *updatePass) readAdmitted(rel string) ([]byte, bool, error) {
 			return nil, false, nil
 		}
 	}
-	abs := filepath.Join(p.repoPath, filepath.FromSlash(rel))
-	// Refuse a path that escapes the repository root. A diff is data, and a
-	// crafted rename target must not turn into a read outside the checkout.
-	if !strings.HasPrefix(abs, p.repoPath+string(os.PathSeparator)) {
-		return nil, false, nil
-	}
-	info, err := os.Stat(abs)
+	// Frente 3 / 3B: the shared confined-read contract replaces a lexical
+	// prefix check followed by os.Stat + os.ReadFile, which FOLLOWED
+	// symlinks: a committed `CLAUDE.md -> ~/.aws/credentials` named in a
+	// diff would have been read and stored as an instruction item. Every
+	// refusal (escape, symlink at any component, secret path, excluded
+	// directory, not a regular file, over the cap, gone) reports the path as
+	// absent, so its prior facts are retired exactly as for a deletion.
+	content, err := repoaccess.ReadConfined(p.repoPath, rel, p.limits.MaxFileBytes)
 	switch {
-	case errors.Is(err, os.ErrNotExist):
+	case repoaccess.IsRefusal(err):
 		return nil, false, nil
 	case err != nil:
-		return nil, false, fmt.Errorf("stat %s: %w", rel, err)
-	case info.IsDir(), !info.Mode().IsRegular():
-		return nil, false, nil
-	case info.Size() > p.limits.MaxFileBytes:
-		return nil, false, nil
-	}
-	content, err := os.ReadFile(abs) //nolint:gosec // abs is confined to the repository root above
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
-		}
 		return nil, false, fmt.Errorf("read %s: %w", rel, err)
 	}
 	if isBinary(content) {
