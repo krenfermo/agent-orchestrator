@@ -143,6 +143,13 @@ func schemaName(_ reflect.Type, defaultName string) string {
 // by projectOperations(). Add an entry when a new contract type is introduced;
 // the drift test fails until the spec is regenerated, which flags the gap.
 var schemaNames = map[string]string{
+	"ControllersWorkflowExplorationResponse":          "WorkflowExplorationResponse",
+	"ControllersAgentExplorationResponse":             "AgentExplorationResponse",
+	"ControllersRunQualitySignalsResponse":            "RunQualitySignalsResponse",
+	"ControllersExplorationMetricResponse":            "ExplorationMetricResponse",
+	"ControllersExplorationRatioResponse":             "ExplorationRatioResponse",
+	"ControllersExplorationFileCountResponse":         "ExplorationFileCountResponse",
+	"ControllersExplorationPathScopeCountResponse":    "ExplorationPathScopeCountResponse",
 	"ControllersAdminUserView":                        "AdminUserView",
 	"ControllersListUsersResponse":                    "ListUsersResponse",
 	"ControllersUserResponse":                         "UserResponse",
@@ -1796,6 +1803,16 @@ func workflowOperations() []operation {
 			pathParams: []any{controllers.WorkflowIDParam{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.WorkflowUsageLedgerResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/exploration", id: "getWorkflowExploration", tag: "workflows",
+			summary:    "Frente 3 / 3C: what each agent of a run LOOKED AT beside what it spent -- file reads, distinct files, repeated reads, searches, listings, commands, edits, exploration before the first edit, bytes returned to the model by origin (agent exploration, AO prompt, harness injection), model calls and tokens -- plus the run's quality signals (final state, verify, review verdict, fix cycles, retries, failovers). Every figure carries `basis`: observed (reported by the provider transcript or counted exactly from it), derived (an inference `method` names), or unavailable (the harness does not expose it; `value` is null, never 0). Paths are project-relative and only for files inside the project that pass the repository boundary; no content, command, pattern or prompt is ever stored. A strict read: it never advances the run. `recorded: false` means nothing was recorded, not zero exploration.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowExplorationResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},

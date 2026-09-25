@@ -23,7 +23,10 @@ type jsonlRecord struct {
 }
 
 type parseResult struct {
-	Events                 []domain.ModelUsageEvent
+	Events []domain.ModelUsageEvent
+	// Tools is the chunk's agent tool observations (3C), written in the same
+	// transaction as Events.
+	Tools                  domain.AgentToolFacts
 	Cursor                 domain.SourceCursorState
 	newCodexChild          bool
 	pendingCodexSpawnCalls int
@@ -38,11 +41,12 @@ func parseRecordsWithState(
 	state *parserStateEnvelope,
 ) parseResult {
 	result := parseResult{Cursor: cursorFromSource(source.Source, nextOffset, now)}
+	scope := newExplorationScope(source.WorkspaceRoot, source.Source.ArtifactPath, source.Source.Kind)
 	switch source.Source.Kind {
 	case domain.UsageSourceClaudeMain, domain.UsageSourceClaudeSubagent:
-		parseClaude(source, records, state.Claude, &result)
+		parseClaude(source, scope, records, state.Claude, &result)
 	case domain.UsageSourceCodexRollout:
-		parseCodex(source, records, state.Codex, &result)
+		parseCodex(source, scope, records, state.Codex, &result)
 		result.pendingCodexSpawnCalls = len(state.Codex.PendingSpawnCallIDs)
 	default:
 		result.Cursor.AnomalyCount++
@@ -426,8 +430,14 @@ type claudeContentBlock struct {
 	Name string `json:"name"`
 }
 
-func parseClaude(source domain.UsageSourceContext, records []jsonlRecord, state *claudeParserStateV1, result *parseResult) {
+func parseClaude(source domain.UsageSourceContext, scope explorationScope, records []jsonlRecord, state *claudeParserStateV1, result *parseResult) {
 	for _, record := range records {
+		// 3C: the tool half of the record, decoded on its own. It runs first
+		// because it does not depend on the record billing a call -- a result,
+		// a prompt or an injection never does -- nor on the usage decode
+		// below accepting the record (a typed prompt's string content is not
+		// a block list, which that decode rejects).
+		observeClaudeRecord(source, scope, record, &result.Tools)
 		var native claudeTranscriptRecord
 		if err := json.Unmarshal(record.Data, &native); err != nil {
 			recordMalformed(result)
@@ -521,21 +531,28 @@ func parseClaude(source domain.UsageSourceContext, records []jsonlRecord, state 
 		}
 		state.OpenTurnClasses = accumulateTurnClasses(state.OpenTurnClasses, native.Message.Content)
 		event := domain.ModelUsageEvent{
-			ModelID:   model,
-			Tokens:    tokens,
-			TurnClass: classFromTurnClasses(state.OpenTurnClasses),
-			SourceEventKey: stableSourceEventKey(
-				"claude",
-				source.NativeRootID,
-				string(source.Source.Kind),
-				source.Source.SubagentID,
-				source.Source.NativeSessionID,
-				keyID,
-			),
-			ObservedAt: parseObservedAt(native.Timestamp),
+			ModelID:        model,
+			Tokens:         tokens,
+			TurnClass:      classFromTurnClasses(state.OpenTurnClasses),
+			SourceEventKey: claudeSourceEventKey(source, keyID),
+			ObservedAt:     parseObservedAt(native.Timestamp),
 		}
 		result.Events = append(result.Events, event)
 	}
+}
+
+// claudeSourceEventKey is the exactly-once identity of one billed Claude
+// message. Tool observations carry it too, which is what links a tool call to
+// the provider call that issued it.
+func claudeSourceEventKey(source domain.UsageSourceContext, keyID string) string {
+	return stableSourceEventKey(
+		"claude",
+		source.NativeRootID,
+		string(source.Source.Kind),
+		source.Source.SubagentID,
+		source.Source.NativeSessionID,
+		keyID,
+	)
 }
 
 // recordCompactionBoundary folds one compact_boundary record into parser state.
@@ -638,7 +655,7 @@ type codexEnvelope struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 
-func parseCodex(source domain.UsageSourceContext, records []jsonlRecord, state *codexParserStateV1, result *parseResult) {
+func parseCodex(source domain.UsageSourceContext, scope explorationScope, records []jsonlRecord, state *codexParserStateV1, result *parseResult) {
 	for _, record := range records {
 		var envelope codexEnvelope
 		if err := json.Unmarshal(record.Data, &envelope); err != nil {
@@ -646,6 +663,8 @@ func parseCodex(source domain.UsageSourceContext, records []jsonlRecord, state *
 			continue
 		}
 		switch envelope.Type {
+		case "session_meta":
+			observeCodexSessionMeta(source, envelope, record.Offset, &result.Tools)
 		case "turn_context":
 			var payload struct {
 				Model string `json:"model"`
@@ -654,8 +673,12 @@ func parseCodex(source domain.UsageSourceContext, records []jsonlRecord, state *
 				state.ModelID = firstNonEmpty(payload.Model, state.ModelID)
 			}
 		case "event_msg":
+			observeCodexUserMessage(source, envelope, record.Offset, &result.Tools)
+			observeCodexPatchApply(source, scope, envelope, record.Offset, &result.Tools)
+			observeCodexItemCompleted(source, scope, envelope, record.Offset, &result.Tools)
 			parseCodexEvent(source, envelope, state, result)
 		case "response_item":
+			observeCodexResponseItem(source, envelope, record.Offset, &result.Tools)
 			parseCodexResponseItem(envelope.Payload, state, result)
 		}
 	}

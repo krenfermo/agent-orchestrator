@@ -1074,8 +1074,9 @@ func RunWithConfig(cfg config.Config) error {
 		// "193 calls against a context that grew from 54k to 324k" is the
 		// explanation a total cannot carry. It shares the ledger's pricing so
 		// a per-step cost and the run total can never name different rates.
-		UsageDynamics: usagesvc.NewDynamicsReader(store, usagePricing(cfg.DataDir, log)),
-		Capacity:      capacitysvc.NewReader(store),
+		UsageDynamics:    usagesvc.NewDynamicsReader(store, usagePricing(cfg.DataDir, log)),
+		UsageExploration: usagesvc.NewExplorationReader(store),
+		Capacity:         capacitysvc.NewReader(store),
 		// ONE service instance backs both surfaces: the memory routes and the
 		// code-graph routes are two views of the same subsystem, and giving
 		// them separate resolvers would give them separate opinions about

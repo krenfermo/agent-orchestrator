@@ -92,6 +92,47 @@ type AgentSwitch struct {
 	FinalHandoffHash        string
 }
 
+type AgentToolObservation struct {
+	ID             int64
+	BindingID      int64
+	UsageSourceID  sql.NullInt64
+	ObservationKey string
+	EventKey       string
+	Ordinal        int64
+	ObservedAt     sql.NullTime
+	Origin         string
+	Op             string
+	ToolName       string
+	PathScope      string
+	Path           sql.NullString
+	ResultBytes    sql.NullInt64
+	ResultItems    sql.NullInt64
+	ResultError    sql.NullInt64
+	RecordedAt     time.Time
+}
+
+type AgentToolObservationAttribution struct {
+	ObservationID    int64
+	BindingID        int64
+	SubjectKind      string
+	SubjectID        string
+	Harness          string
+	ObservationKey   string
+	EventKey         string
+	Ordinal          int64
+	ObservedAt       sql.NullTime
+	Origin           string
+	Op               string
+	ToolName         string
+	PathScope        string
+	Path             sql.NullString
+	ResultBytes      sql.NullInt64
+	ResultItems      sql.NullInt64
+	ResultError      sql.NullInt64
+	WindowID         interface{}
+	AttributionBasis string
+}
+
 type AppSetting struct {
 	ID                        int64
 	DefaultSessionMode        domain.SessionMode

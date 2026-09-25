@@ -363,7 +363,16 @@ func (s *Store) GetUsageSourceForIngestion(ctx context.Context, id int64) (domai
 	if err != nil {
 		return domain.UsageSourceContext{}, false, fmt.Errorf("get usage source %d: %w", id, err)
 	}
-	return usageSourceContextFromGen(row), true, nil
+	out := usageSourceContextFromGen(row)
+	root, err := s.qr.GetUsageSubjectWorkspaceRoot(ctx, gen.GetUsageSubjectWorkspaceRootParams{
+		SubjectKind: row.SubjectKind,
+		SubjectID:   row.SubjectID,
+	})
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.UsageSourceContext{}, false, fmt.Errorf("get usage source %d workspace root: %w", id, err)
+	}
+	out.WorkspaceRoot = root
+	return out, true, nil
 }
 
 // MarkUsageSourceState updates only the source lifecycle/error state.
@@ -424,16 +433,29 @@ func (s *Store) MarkUsageSourceFailure(ctx context.Context, id, failureCount int
 
 // ApplyUsageChunk atomically writes parsed usage events and advances the source
 // cursor/baselines. The cursor never moves unless all event writes commit.
+//
+// tools carries the chunk's agent tool observations (3C). They commit in the
+// same transaction as the events and the cursor, so a crash can never leave a
+// cursor past observations that were not written, and a re-read after a reset
+// re-derives the same keys and inserts nothing twice.
 func (s *Store) ApplyUsageChunk(
 	ctx context.Context,
 	sourceID, expectedOffset int64,
 	expectedRevision time.Time,
 	nextState domain.SourceCursorState,
 	events []domain.ModelUsageEvent,
+	tools ...domain.AgentToolFacts,
 ) error {
 	if nextState.ParserStateJSON != "" {
 		if err := validateParserStateObject(nextState.ParserStateJSON); err != nil {
 			return err
+		}
+	}
+	for _, facts := range tools {
+		for _, obs := range facts.Observations {
+			if !obs.Valid() {
+				return fmt.Errorf("usage source %d: invalid tool observation %q", sourceID, obs.Key)
+			}
 		}
 	}
 	s.writeMu.Lock()
@@ -490,6 +512,12 @@ func (s *Store) ApplyUsageChunk(
 				return err
 			}
 			insertedEvent = true
+		}
+		recordedAt := timeOrNow(nextState.UpdatedAt)
+		for _, facts := range tools {
+			if err := applyAgentToolFacts(ctx, q, source.BindingID, source.SourceID, facts, recordedAt); err != nil {
+				return err
+			}
 		}
 		if err := q.UpdateUsageSourceCursor(ctx, gen.UpdateUsageSourceCursorParams{
 			ID:              sourceID,

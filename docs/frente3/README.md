@@ -34,6 +34,17 @@ corrección incremental. Memoria y router siguen **off** por defecto.
 | [3b-implementation.md](3b-implementation.md) | Qué se implementó, con evidencia antes/después, contrato de freshness, punto de extensión Java y residuales |
 | [3b-regression-evidence.md](3b-regression-evidence.md) | Tests de regresión permanentes: fallan en el baseline, pasan en 3B |
 
-**Siguiente: 3C**, la instrumentación de la exploración real del agente (no
-iniciada). Project Memory sigue **desactivada** por defecto. No se ha
+## 3C — Observabilidad de la exploración de agentes (2026-09-24)
+
+**Implementado en `feat/frente3-3c-exploration-observability`, sin merge.** Añade
+la migración aditiva 0175 (no aplicada en producción). Mide qué leen, buscan y
+editan Claude y Codex, junto con tokens y señales de calidad; cada cifra es
+observed, derived o unavailable. Validado con runs reales sobre un fixture, con
+memoria y router OFF.
+
+| Documento | Contenido |
+|---|---|
+| [3c-exploration-observability.md](3c-exploration-observability.md) | Arquitectura, capability matrix Claude/Codex, persistencia, seguridad, evidencia real y diseño de 3D |
+
+**Siguiente: 3D** (piloto A/B), tras autorización. Project Memory sigue **desactivada** por defecto. No se ha
 demostrado ningún ahorro de tokens; eso le corresponde al piloto.

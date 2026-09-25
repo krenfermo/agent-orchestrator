@@ -11643,6 +11643,50 @@ paths:
         path the repair owns.'
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/exploration:
+    get:
+      operationId: getWorkflowExploration
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowExplorationResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Frente 3 / 3C: what each agent of a run LOOKED AT beside what it spent
+        -- file reads, distinct files, repeated reads, searches, listings, commands,
+        edits, exploration before the first edit, bytes returned to the model by origin
+        (agent exploration, AO prompt, harness injection), model calls and tokens
+        -- plus the run''s quality signals (final state, verify, review verdict, fix
+        cycles, retries, failovers). Every figure carries `basis`: observed (reported
+        by the provider transcript or counted exactly from it), derived (an inference
+        `method` names), or unavailable (the harness does not expose it; `value` is
+        null, never 0). Paths are project-relative and only for files inside the project
+        that pass the repository boundary; no content, command, pattern or prompt
+        is ever stored. A strict read: it never advances the run. `recorded: false`
+        means nothing was recorded, not zero exploration.'
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/incident:
     get:
       operationId: getWorkflowIncident
@@ -13096,6 +13140,138 @@ components:
           type: string
         permissions:
           type: string
+      type: object
+    AgentExplorationResponse:
+      properties:
+        activeSpanMs:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        aoContextBytes:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        aoContextRatio:
+          $ref: '#/components/schemas/ExplorationRatioResponse'
+        approximateAttribution:
+          format: int64
+          type: integer
+        cacheWriteTokens:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        cachedInputTokens:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        callsBeforeFirstEdit:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        commands:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        cycle:
+          format: int64
+          type: integer
+        edits:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        explorationOps:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        explorationRatio:
+          $ref: '#/components/schemas/ExplorationRatioResponse'
+        explorationResultBytes:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        exploreCommands:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        fileReads:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        firstCallInputTokens:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        harness:
+          type: string
+        harnessContextBytes:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        harnessContextRatio:
+          $ref: '#/components/schemas/ExplorationRatioResponse'
+        harnessTokensFirstCall:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        inputTokens:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        listings:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        modelCalls:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        models:
+          items:
+            type: string
+          type: array
+        opsBeforeFirstEdit:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        outputTokens:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        pathScopes:
+          items:
+            $ref: '#/components/schemas/ExplorationPathScopeCountResponse'
+          type: array
+        repeatedReads:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        repoBytesObserved:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        role:
+          type: string
+        searches:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        shellEdits:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        subjectId:
+          type: string
+        subjectKind:
+          type: string
+        toolCalls:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        topFiles:
+          items:
+            $ref: '#/components/schemas/ExplorationFileCountResponse'
+          type: array
+        unattributedCommands:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        uniqueFilesEdited:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        uniqueFilesRead:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        unobservedResults:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+      required:
+      - role
+      - cycle
+      - subjectKind
+      - subjectId
+      - harness
+      - models
+      - modelCalls
+      - inputTokens
+      - outputTokens
+      - cachedInputTokens
+      - cacheWriteTokens
+      - firstCallInputTokens
+      - harnessTokensFirstCall
+      - toolCalls
+      - fileReads
+      - uniqueFilesRead
+      - repeatedReads
+      - searches
+      - listings
+      - commands
+      - exploreCommands
+      - explorationOps
+      - unattributedCommands
+      - edits
+      - shellEdits
+      - uniqueFilesEdited
+      - opsBeforeFirstEdit
+      - callsBeforeFirstEdit
+      - repoBytesObserved
+      - explorationResultBytes
+      - aoContextBytes
+      - harnessContextBytes
+      - unobservedResults
+      - explorationRatio
+      - aoContextRatio
+      - harnessContextRatio
+      - activeSpanMs
+      - pathScopes
+      - topFiles
+      - approximateAttribution
       type: object
     AgentInfo:
       properties:
@@ -18926,6 +19102,66 @@ components:
       - projects
       - readiness
       type: object
+    ExplorationFileCountResponse:
+      properties:
+        path:
+          type: string
+        reads:
+          format: int64
+          type: integer
+      required:
+      - path
+      - reads
+      type: object
+    ExplorationMetricResponse:
+      properties:
+        basis:
+          enum:
+          - observed
+          - derived
+          - unavailable
+          type: string
+        method:
+          type: string
+        value:
+          type:
+          - "null"
+          - integer
+      required:
+      - value
+      - basis
+      - method
+      type: object
+    ExplorationPathScopeCountResponse:
+      properties:
+        count:
+          format: int64
+          type: integer
+        scope:
+          type: string
+      required:
+      - scope
+      - count
+      type: object
+    ExplorationRatioResponse:
+      properties:
+        basis:
+          enum:
+          - observed
+          - derived
+          - unavailable
+          type: string
+        method:
+          type: string
+        value:
+          type:
+          - "null"
+          - number
+      required:
+      - value
+      - basis
+      - method
+      type: object
     GitPolicy:
       properties:
         localCommit:
@@ -21309,6 +21545,54 @@ components:
       required:
       - ok
       - sessionId
+      type: object
+    RunQualitySignalsResponse:
+      properties:
+        attempts:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        checksFailed:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        checksPassed:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        completed:
+          type: boolean
+        durationMs:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        failedAttempts:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        finalReviewVerdict:
+          type: string
+        finalState:
+          type: string
+        fixCycles:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        providerFailovers:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        retries:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        reviewRuns:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+        verifyPassed:
+          type:
+          - "null"
+          - boolean
+        verifyRuns:
+          $ref: '#/components/schemas/ExplorationMetricResponse'
+      required:
+      - finalState
+      - completed
+      - durationMs
+      - attempts
+      - failedAttempts
+      - retries
+      - providerFailovers
+      - verifyRuns
+      - verifyPassed
+      - checksPassed
+      - checksFailed
+      - reviewRuns
+      - finalReviewVerdict
+      - fixCycles
       type: object
     RuntimeGCFindingView:
       properties:
@@ -25259,6 +25543,30 @@ components:
       required:
       - effectiveStrategy
       - selectionSource
+      type: object
+    WorkflowExplorationResponse:
+      properties:
+        agents:
+          items:
+            $ref: '#/components/schemas/AgentExplorationResponse'
+          type: array
+        projectId:
+          type: string
+        quality:
+          $ref: '#/components/schemas/RunQualitySignalsResponse'
+        recorded:
+          type: boolean
+        runId:
+          type: string
+        totals:
+          $ref: '#/components/schemas/AgentExplorationResponse'
+      required:
+      - runId
+      - projectId
+      - recorded
+      - agents
+      - totals
+      - quality
       type: object
     WorkflowIntegrationFreshReviewException:
       properties:

@@ -3649,6 +3649,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/exploration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Frente 3 / 3C: what each agent of a run LOOKED AT beside what it spent -- file reads, distinct files, repeated reads, searches, listings, commands, edits, exploration before the first edit, bytes returned to the model by origin (agent exploration, AO prompt, harness injection), model calls and tokens -- plus the run's quality signals (final state, verify, review verdict, fix cycles, retries, failovers). Every figure carries `basis`: observed (reported by the provider transcript or counted exactly from it), derived (an inference `method` names), or unavailable (the harness does not expose it; `value` is null, never 0). Paths are project-relative and only for files inside the project that pass the repository boundary; no content, command, pattern or prompt is ever stored. A strict read: it never advances the run. `recorded: false` means nothing was recorded, not zero exploration. */
+        get: operations["getWorkflowExploration"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/incident": {
         parameters: {
             query?: never;
@@ -4206,6 +4223,50 @@ export interface components {
             mode?: string;
             model?: string;
             permissions?: string;
+        };
+        AgentExplorationResponse: {
+            activeSpanMs: components["schemas"]["ExplorationMetricResponse"];
+            aoContextBytes: components["schemas"]["ExplorationMetricResponse"];
+            aoContextRatio: components["schemas"]["ExplorationRatioResponse"];
+            /** Format: int64 */
+            approximateAttribution: number;
+            cacheWriteTokens: components["schemas"]["ExplorationMetricResponse"];
+            cachedInputTokens: components["schemas"]["ExplorationMetricResponse"];
+            callsBeforeFirstEdit: components["schemas"]["ExplorationMetricResponse"];
+            commands: components["schemas"]["ExplorationMetricResponse"];
+            /** Format: int64 */
+            cycle: number;
+            edits: components["schemas"]["ExplorationMetricResponse"];
+            explorationOps: components["schemas"]["ExplorationMetricResponse"];
+            explorationRatio: components["schemas"]["ExplorationRatioResponse"];
+            explorationResultBytes: components["schemas"]["ExplorationMetricResponse"];
+            exploreCommands: components["schemas"]["ExplorationMetricResponse"];
+            fileReads: components["schemas"]["ExplorationMetricResponse"];
+            firstCallInputTokens: components["schemas"]["ExplorationMetricResponse"];
+            harness: string;
+            harnessContextBytes: components["schemas"]["ExplorationMetricResponse"];
+            harnessContextRatio: components["schemas"]["ExplorationRatioResponse"];
+            harnessTokensFirstCall: components["schemas"]["ExplorationMetricResponse"];
+            inputTokens: components["schemas"]["ExplorationMetricResponse"];
+            listings: components["schemas"]["ExplorationMetricResponse"];
+            modelCalls: components["schemas"]["ExplorationMetricResponse"];
+            models: string[];
+            opsBeforeFirstEdit: components["schemas"]["ExplorationMetricResponse"];
+            outputTokens: components["schemas"]["ExplorationMetricResponse"];
+            pathScopes: components["schemas"]["ExplorationPathScopeCountResponse"][];
+            repeatedReads: components["schemas"]["ExplorationMetricResponse"];
+            repoBytesObserved: components["schemas"]["ExplorationMetricResponse"];
+            role: string;
+            searches: components["schemas"]["ExplorationMetricResponse"];
+            shellEdits: components["schemas"]["ExplorationMetricResponse"];
+            subjectId: string;
+            subjectKind: string;
+            toolCalls: components["schemas"]["ExplorationMetricResponse"];
+            topFiles: components["schemas"]["ExplorationFileCountResponse"][];
+            unattributedCommands: components["schemas"]["ExplorationMetricResponse"];
+            uniqueFilesEdited: components["schemas"]["ExplorationMetricResponse"];
+            uniqueFilesRead: components["schemas"]["ExplorationMetricResponse"];
+            unobservedResults: components["schemas"]["ExplorationMetricResponse"];
         };
         AgentInfo: {
             /**
@@ -6427,6 +6488,28 @@ export interface components {
             projects: components["schemas"]["EnvironmentProjectsSummary"];
             readiness: components["schemas"]["EnvironmentReadiness"];
         };
+        ExplorationFileCountResponse: {
+            path: string;
+            /** Format: int64 */
+            reads: number;
+        };
+        ExplorationMetricResponse: {
+            /** @enum {string} */
+            basis: "observed" | "derived" | "unavailable";
+            method: string;
+            value: null | number;
+        };
+        ExplorationPathScopeCountResponse: {
+            /** Format: int64 */
+            count: number;
+            scope: string;
+        };
+        ExplorationRatioResponse: {
+            /** @enum {string} */
+            basis: "observed" | "derived" | "unavailable";
+            method: string;
+            value: null | number;
+        };
         GitPolicy: {
             /** @enum {string} */
             localCommit?: "automatic" | "require_approval" | "never";
@@ -7351,6 +7434,22 @@ export interface components {
             killed?: boolean;
             ok: boolean;
             sessionId: string;
+        };
+        RunQualitySignalsResponse: {
+            attempts: components["schemas"]["ExplorationMetricResponse"];
+            checksFailed: components["schemas"]["ExplorationMetricResponse"];
+            checksPassed: components["schemas"]["ExplorationMetricResponse"];
+            completed: boolean;
+            durationMs: components["schemas"]["ExplorationMetricResponse"];
+            failedAttempts: components["schemas"]["ExplorationMetricResponse"];
+            finalReviewVerdict: string;
+            finalState: string;
+            fixCycles: components["schemas"]["ExplorationMetricResponse"];
+            providerFailovers: components["schemas"]["ExplorationMetricResponse"];
+            retries: components["schemas"]["ExplorationMetricResponse"];
+            reviewRuns: components["schemas"]["ExplorationMetricResponse"];
+            verifyPassed: null | boolean;
+            verifyRuns: components["schemas"]["ExplorationMetricResponse"];
         };
         RuntimeGCFindingView: {
             class?: string;
@@ -8793,6 +8892,14 @@ export interface components {
             requestedStrategy?: "task" | "autonomous" | "master" | "auto";
             /** @enum {string} */
             selectionSource: "explicit" | "policy" | "inherited" | "recovered";
+        };
+        WorkflowExplorationResponse: {
+            agents: components["schemas"]["AgentExplorationResponse"][];
+            projectId: string;
+            quality: components["schemas"]["RunQualitySignalsResponse"];
+            recorded: boolean;
+            runId: string;
+            totals: components["schemas"]["AgentExplorationResponse"];
         };
         WorkflowIntegrationFreshReviewException: {
             approvedBy: string;
@@ -23366,6 +23473,47 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowExploration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowExplorationResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
