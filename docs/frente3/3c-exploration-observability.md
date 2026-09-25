@@ -144,13 +144,13 @@ Una fila por observación:
 
 - el rango de bytes que ha parseado el extractor 3C;
 - las versiones del extractor (`ExplorationExtractorVersion`);
-- cuándo cubrió por primera vez (`first_covered_at`).
+- cuántos eventos de la fuente existían ya cuando la cubrió por primera vez (`pre_coverage_events`), y cuándo (`first_covered_at`, informativo).
 
 Se escribe en la misma transacción que las observaciones.
 
 El read model reporta cifras de herramientas de un agente solo si cumple las tres condiciones:
 
-1. **ningún** evento de uso de sus fuentes se ingirió sin el extractor (`recorded_at < first_covered_at`, o fuente sin cobertura);
+1. **ningún** evento de uso de sus fuentes se ingirió sin el extractor: `pre_coverage_events` = 0, contado en la transacción del primer chunk cubierto, sin reloj. Una fuente sin fila de cobertura nunca pasó por el extractor y cuenta como incompleta;
 2. el extractor alcanzó el cursor;
 3. una sola versión del extractor clasificó todo.
 
@@ -556,3 +556,18 @@ Además, 3 P2: cronología por reloj, vocabulario sin cerrar en el dominio y `ca
 - `ValidToolName` exige el vocabulario canónico del dominio. Un test de paridad lo alinea con el parser.
 - `callsBeforeFirstEdit` es `unavailable` con más de una fuente.
 - El P1 (3) queda abierto como decisión humana.
+
+**Ciclo 3 de Codex (el último permitido): NO-GO por un único P1, clasificado como decisión humana.**
+
+- Confirmados como corregidos: fuentes sin cobertura, sujetos sin agente, cronología sin reloj y vocabulario cerrado en el dominio.
+- Codex confirma la objeción del autor. Ninguna build sella `cli.Version`, y el daemon empaquetado arranca con `["daemon"]` y el data dir por defecto. Por eso "si `Version == dev`, exigir ubicaciones explícitas" **pararía el app real**.
+- El P1 del camino explícito `ao daemon`/`ao server` de builds dev queda abierto **pendiente de decisión** sobre el contrato de arranque.
+
+**P2 residuales, aceptables para merge si se resuelve el P1:**
+
+- `callsBeforeFirstEdit` puede cruzar fuentes cuando la segunda solo tiene llamadas sin observaciones.
+- Un symlink colgante o borrado se clasifica con la respuesta léxica.
+- Una fuente vacía que ya estaba `complete` antes de 0175 nunca recibe fila de cobertura, porque el ingestor retorna antes.
+- El uso del planner, sin transcript, reporta ceros de herramientas como observados (en rigor es `--tools ""`).
+
+**P3:** corregido este texto.
