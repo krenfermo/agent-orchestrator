@@ -36,8 +36,10 @@ corrección incremental. Memoria y router siguen **off** por defecto.
 
 ## 3C — Observabilidad de la exploración de agentes (2026-09-24)
 
-**Implementado en `feat/frente3-3c-exploration-observability`, sin merge.** Añade
-la migración aditiva 0175 (no aplicada en producción). Mide qué leen, buscan y
+**CLOSED (2026-09-25): mergeado en ECC** tras 3 ciclos de revisión de Codex y una revisión final (GO).
+
+- Añade la migración aditiva 0175, que **no** está aplicada en producción: sigue en goose 174. Durante 3C la DB de producción se migró por accidente y se revirtió con autorización.
+- Incluye el guardrail de producción: el data dir por defecto solo se abre con el contrato de Electron o con una elección explícita. Mide qué leen, buscan y
 editan Claude y Codex, junto con tokens y señales de calidad; cada cifra es
 observed, derived o unavailable. Validado con runs reales sobre un fixture, con
 memoria y router OFF.
@@ -46,5 +48,5 @@ memoria y router OFF.
 |---|---|
 | [3c-exploration-observability.md](3c-exploration-observability.md) | Arquitectura, capability matrix Claude/Codex, persistencia, seguridad, evidencia real y diseño de 3D |
 
-**Siguiente: 3D** (piloto A/B), tras autorización. Project Memory sigue **desactivada** por defecto. No se ha
+**Siguiente: prerequisitos de 3D** (carrera de review, ruta de review, aislamiento de sesiones, contexto externo). Después, el piloto A/B. Project Memory sigue **desactivada** por defecto. No se ha
 demostrado ningún ahorro de tokens; eso le corresponde al piloto.
