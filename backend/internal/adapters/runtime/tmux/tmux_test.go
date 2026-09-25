@@ -1726,3 +1726,29 @@ func exitCodeErr(t *testing.T, code int) error {
 	}
 	return err
 }
+
+// Frente 3 / 3D: the daemon's context switches never reach an agent pane --
+// their values would tell the agent which arm of a memory A/B it is in.
+func TestSanitizeInheritedEnv_WithholdsDaemonContextSwitches(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/x",
+		"AO_MEMORY_MODE=assisted",
+		"AO_MEMORY_EXTERNAL=off",
+		"AO_CONTEXT_ROUTER=on",
+		"AO_DATA_DIR=/scratch/data",
+		"AO_MEMORY_CACHE=on",
+	}
+	got := sanitizeInheritedEnv(in)
+	joined := strings.Join(got, "\n")
+	for _, withheld := range []string{"AO_MEMORY_MODE", "AO_MEMORY_EXTERNAL", "AO_CONTEXT_ROUTER"} {
+		if strings.Contains(joined, withheld+"=") {
+			t.Fatalf("%s reached the pane environment: %v", withheld, got)
+		}
+	}
+	for _, kept := range []string{"PATH=/usr/bin", "HOME=/home/x", "AO_DATA_DIR=/scratch/data", "AO_MEMORY_CACHE=on"} {
+		if !strings.Contains(joined, kept) {
+			t.Fatalf("%s must be preserved: %v", kept, got)
+		}
+	}
+}

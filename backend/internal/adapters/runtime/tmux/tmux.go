@@ -271,14 +271,30 @@ var nestedAgentEnvVars = []string{
 	"CLAUDE_EFFORT",
 }
 
-// sanitizeInheritedEnv drops nestedAgentEnvVars from a copy of environ,
-// leaving every other variable untouched. Applied to every tmux CLI
+// daemonContextSwitchEnvVars are the daemon's own dispatch-context switches.
+// Only the daemon reads them, once, at composition; they mean nothing to an
+// agent. They are kept out of agent panes for a stronger reason than hygiene
+// (Frente 3 / 3D): their VALUES name the arm of a memory A/B
+// (AO_MEMORY_MODE=assisted), and an agent that can read which arm it is in is
+// not a blind subject. What a dispatch actually received is recorded in the
+// run's policy_snapshot, so nothing is lost by withholding them here.
+var daemonContextSwitchEnvVars = []string{
+	"AO_MEMORY_MODE",
+	"AO_MEMORY_EXTERNAL",
+	"AO_CONTEXT_ROUTER",
+}
+
+// sanitizeInheritedEnv drops nestedAgentEnvVars and daemonContextSwitchEnvVars
+// from a copy of environ, leaving every other variable untouched. Applied to every tmux CLI
 // invocation (see execRunner.Run) since the very first one may be the call
 // that auto-starts AO's tmux server, and that call's environment becomes the
 // server's permanent ambient environment.
 func sanitizeInheritedEnv(environ []string) []string {
-	deny := make(map[string]struct{}, len(nestedAgentEnvVars))
+	deny := make(map[string]struct{}, len(nestedAgentEnvVars)+len(daemonContextSwitchEnvVars))
 	for _, name := range nestedAgentEnvVars {
+		deny[name] = struct{}{}
+	}
+	for _, name := range daemonContextSwitchEnvVars {
 		deny[name] = struct{}{}
 	}
 	out := make([]string, 0, len(environ))
