@@ -93,14 +93,15 @@ type AgentSwitch struct {
 }
 
 type AgentToolCoverage struct {
-	UsageSourceID  int64
-	BindingID      int64
-	CoveredFrom    int64
-	CoveredTo      int64
-	MinExtractor   int64
-	MaxExtractor   int64
-	FirstCoveredAt time.Time
-	UpdatedAt      time.Time
+	UsageSourceID     int64
+	BindingID         int64
+	CoveredFrom       int64
+	CoveredTo         int64
+	MinExtractor      int64
+	MaxExtractor      int64
+	PreCoverageEvents int64
+	FirstCoveredAt    time.Time
+	UpdatedAt         time.Time
 }
 
 type AgentToolObservation struct {

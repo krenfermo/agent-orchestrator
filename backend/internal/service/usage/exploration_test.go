@@ -357,7 +357,9 @@ func TestExplorationFullCoverageKeepsObservedZero(t *testing.T) {
 		calls: []store.RunExplorationCall{callAt(0, 1000, 0, 10)},
 		coverage: []store.RunToolCoverage{
 			{Subject: domain.SessionSubject("s1"), SourceID: 7, ByteOffset: 5000, CoveredFrom: 0, CoveredTo: 5000, MinExtractor: 1, MaxExtractor: 1},
-			{Subject: domain.SessionSubject("s1"), SourceID: 8, ByteOffset: 0, CoveredFrom: -1, CoveredTo: -1}, // not read by anybody yet
+			// An empty transcript the extractor has read: the ingestor writes a
+			// coverage row even for an empty read.
+			{Subject: domain.SessionSubject("s1"), SourceID: 8, ByteOffset: 0, CoveredFrom: 0, CoveredTo: 0, MinExtractor: 1, MaxExtractor: 1},
 			// A resumed transcript: the collector started this row mid-file,
 			// and every one of its events went through the extractor.
 			{Subject: domain.SessionSubject("s1"), SourceID: 9, ByteOffset: 9000, CoveredFrom: 4000, CoveredTo: 9000, MinExtractor: 1, MaxExtractor: 1},
@@ -415,7 +417,48 @@ func TestExplorationMultipleTranscriptsMakeSequencesUnavailable(t *testing.T) {
 	// Time orders across transcripts: the first prompt is the one at t=0,
 	// although its byte ordinal is the larger.
 	val(t, "harnessTokensFirstCall", a.HarnessTokensFirstCall, 900, domain.ExplorationDerived)
-	val(t, "callsBeforeFirstEdit", a.CallsBeforeFirstEdit, 2, domain.ExplorationDerived)
+	// Codex 3C review cycle 2 (P2): calls and edits of different transcripts
+	// are not one sequence either.
+	unavail(t, "callsBeforeFirstEdit", a.CallsBeforeFirstEdit)
+}
+
+// Codex 3C review cycle 2 (P1): a source the extractor never ingested is
+// unknown even at cursor 0, and a subject with such a source but no attributed
+// call or observation still makes the run's totals incomplete.
+func TestExplorationUningestedSourcesAndSilentSubjectsAreNotComplete(t *testing.T) {
+	f := &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf"},
+		calls: []store.RunExplorationCall{callAt(0, 1000, 0, 10)},
+		coverage: []store.RunToolCoverage{
+			{Subject: domain.SessionSubject("s1"), SourceID: 7, ByteOffset: 900, CoveredFrom: 0, CoveredTo: 900, MinExtractor: 1, MaxExtractor: 1},
+			{Subject: domain.SessionSubject("s1"), SourceID: 8, ByteOffset: 0, CoveredFrom: -1, CoveredTo: -1}, // registered, never ingested
+		}}
+	got, err := NewExplorationReader(f).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Agents[0].ToolCoverage.Complete {
+		t.Fatal("a never-ingested source at cursor 0 must make the agent incomplete")
+	}
+	unavail(t, "toolCalls", got.Agents[0].ToolCalls)
+
+	silent := &fakeExplorationStore{found: true, run: domain.WorkflowRun{ID: "wf"},
+		calls: []store.RunExplorationCall{callAt(0, 1000, 0, 10)},
+		coverage: []store.RunToolCoverage{
+			{Subject: domain.SessionSubject("s1"), SourceID: 7, ByteOffset: 900, CoveredFrom: 0, CoveredTo: 900, MinExtractor: 1, MaxExtractor: 1},
+			// A reviewer pane with an unparsed transcript and nothing attributed yet.
+			{Subject: domain.RuntimePaneSubject("rr-1"), SourceID: 9, ByteOffset: 500, CoveredFrom: -1, CoveredTo: -1},
+		}}
+	got, err = NewExplorationReader(silent).WorkflowRun(context.Background(), "wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Agents) != 1 || !got.Agents[0].ToolCoverage.Complete {
+		t.Fatalf("the worker itself is covered: %+v", got.Agents)
+	}
+	if got.Totals.ToolCoverage.Complete || !strings.Contains(got.Totals.ToolCoverage.Reason, "source 9") {
+		t.Fatalf("totals coverage = %+v, want incomplete because of the silent subject's source 9", got.Totals.ToolCoverage)
+	}
+	unavail(t, "totals.toolCalls", got.Totals.ToolCalls)
 }
 
 // I2: Claude's turn mix is the recorded turn_class; Codex's is derived by

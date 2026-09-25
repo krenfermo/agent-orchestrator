@@ -245,8 +245,10 @@ func TestToolObservations_CoverageWidensAndRecordsVersions(t *testing.T) {
 	if r.EventsBeforeCoverage != 1 {
 		t.Fatalf("events before coverage = %d, want the one pre-extractor event", r.EventsBeforeCoverage)
 	}
-	// Events of covered chunks are never counted, including the first one.
-	mustNoError(t, applyTools(t, s, source, base.Add(time.Minute), []domain.ModelUsageEvent{attrEvent("post", 100, 1, base.Add(time.Minute))}, domain.AgentToolFacts{ExtractorVersion: 2}))
+	// Events of covered chunks are never counted, including the first one --
+	// and no clock is involved: a later chunk stamped EARLIER (a clock that
+	// moved backwards) does not change the count.
+	mustNoError(t, applyTools(t, s, source, base.Add(-time.Hour), []domain.ModelUsageEvent{attrEvent("post", 100, 1, base.Add(time.Minute))}, domain.AgentToolFacts{ExtractorVersion: 2}))
 	rows, err = s.ListRunToolCoverage(ctx, attrRunID)
 	mustNoError(t, err)
 	if rows[0].EventsBeforeCoverage != 1 {

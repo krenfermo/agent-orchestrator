@@ -74,7 +74,7 @@ func applyAgentToolFacts(
 func recordAgentToolCoverage(
 	ctx context.Context,
 	q *gen.Queries,
-	bindingID, sourceID, from, to, extractor int64,
+	bindingID, sourceID, from, to, extractor, preCoverageEvents int64,
 	at time.Time,
 ) error {
 	if extractor <= 0 || sourceID <= 0 {
@@ -84,12 +84,13 @@ func recordAgentToolCoverage(
 		to = from
 	}
 	if err := q.UpsertAgentToolCoverage(ctx, gen.UpsertAgentToolCoverageParams{
-		UsageSourceID: sourceID,
-		BindingID:     bindingID,
-		CoveredFrom:   from,
-		CoveredTo:     to,
-		Extractor:     extractor,
-		UpdatedAt:     at,
+		UsageSourceID:     sourceID,
+		BindingID:         bindingID,
+		CoveredFrom:       from,
+		CoveredTo:         to,
+		Extractor:         extractor,
+		PreCoverageEvents: preCoverageEvents,
+		UpdatedAt:         at,
 	}); err != nil {
 		return fmt.Errorf("record tool coverage: %w", err)
 	}

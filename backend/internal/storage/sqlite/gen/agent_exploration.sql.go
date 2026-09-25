@@ -44,6 +44,17 @@ func (q *Queries) CompleteAgentToolObservation(ctx context.Context, arg Complete
 	return result.RowsAffected()
 }
 
+const countUsageEventsForSource = `-- name: CountUsageEventsForSource :one
+SELECT COUNT(*) FROM model_usage_events WHERE usage_source_id = ?1
+`
+
+func (q *Queries) CountUsageEventsForSource(ctx context.Context, usageSourceID sql.NullInt64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countUsageEventsForSource, usageSourceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getUsageSubjectWorkspaceRoot = `-- name: GetUsageSubjectWorkspaceRoot :one
 WITH subject AS (
     SELECT CAST(?1 AS TEXT) AS kind,
@@ -246,9 +257,8 @@ SELECT
     CAST(COALESCE(c.covered_to, -1) AS INTEGER)     AS covered_to,
     CAST(COALESCE(c.min_extractor, 0) AS INTEGER)   AS min_extractor,
     CAST(COALESCE(c.max_extractor, 0) AS INTEGER)   AS max_extractor,
-    CAST((SELECT COUNT(*) FROM model_usage_events e
-           WHERE e.usage_source_id = s.id
-             AND (c.usage_source_id IS NULL OR e.recorded_at < c.first_covered_at)) AS INTEGER) AS events_before_coverage
+    CAST(COALESCE(c.pre_coverage_events,
+        (SELECT COUNT(*) FROM model_usage_events e WHERE e.usage_source_id = s.id)) AS INTEGER) AS events_before_coverage
 FROM usage_bindings b
 JOIN usage_sources s ON s.binding_id = b.id
 LEFT JOIN agent_tool_coverage c ON c.usage_source_id = s.id
@@ -274,9 +284,8 @@ type ListRunToolCoverageRow struct {
 // Every transcript source of one run's subjects with what the extractor has
 // parsed of it. covered_from is -1 for a source the extractor never saw.
 // events_before_coverage counts the source's usage events ingested WITHOUT the
-// extractor: recorded before its first covered chunk, or with no coverage at
-// all. Events of the first covered chunk carry the same recorded_at as
-// first_covered_at, so they are not counted.
+// extractor: those that existed when it first covered the source, or all of
+// them when it never did.
 func (q *Queries) ListRunToolCoverage(ctx context.Context, workflowRunID string) ([]ListRunToolCoverageRow, error) {
 	rows, err := q.db.QueryContext(ctx, listRunToolCoverage, workflowRunID)
 	if err != nil {
@@ -438,10 +447,11 @@ func (q *Queries) ListRunToolObservations(ctx context.Context, workflowRunID str
 
 const upsertAgentToolCoverage = `-- name: UpsertAgentToolCoverage :exec
 INSERT INTO agent_tool_coverage (
-    usage_source_id, binding_id, covered_from, covered_to, min_extractor, max_extractor, first_covered_at, updated_at
+    usage_source_id, binding_id, covered_from, covered_to, min_extractor, max_extractor,
+    pre_coverage_events, first_covered_at, updated_at
 ) VALUES (
     ?1, ?2, ?3, ?4,
-    ?5, ?5, ?6, ?6
+    ?5, ?5, ?6, ?7, ?7
 )
 ON CONFLICT (usage_source_id) DO UPDATE SET
     covered_from  = MIN(agent_tool_coverage.covered_from, excluded.covered_from),
@@ -452,12 +462,13 @@ ON CONFLICT (usage_source_id) DO UPDATE SET
 `
 
 type UpsertAgentToolCoverageParams struct {
-	UsageSourceID int64
-	BindingID     int64
-	CoveredFrom   int64
-	CoveredTo     int64
-	Extractor     int64
-	UpdatedAt     time.Time
+	UsageSourceID     int64
+	BindingID         int64
+	CoveredFrom       int64
+	CoveredTo         int64
+	Extractor         int64
+	PreCoverageEvents int64
+	UpdatedAt         time.Time
 }
 
 // Widens a source's parsed range and extractor-version span. Runs in the
@@ -470,6 +481,7 @@ func (q *Queries) UpsertAgentToolCoverage(ctx context.Context, arg UpsertAgentTo
 		arg.CoveredFrom,
 		arg.CoveredTo,
 		arg.Extractor,
+		arg.PreCoverageEvents,
 		arg.UpdatedAt,
 	)
 	return err

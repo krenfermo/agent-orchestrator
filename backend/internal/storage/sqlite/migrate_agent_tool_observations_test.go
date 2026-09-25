@@ -49,8 +49,8 @@ func TestMigration0175IsAdditiveAndReversible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("source id: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO agent_tool_coverage (usage_source_id, binding_id, covered_from, covered_to, min_extractor, max_extractor, first_covered_at, updated_at)
-		VALUES (?, 1, 0, 10, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, sourceID); err != nil {
+	if _, err := db.Exec(`INSERT INTO agent_tool_coverage (usage_source_id, binding_id, covered_from, covered_to, min_extractor, max_extractor, pre_coverage_events, first_covered_at, updated_at)
+		VALUES (?, 1, 0, 10, 1, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, sourceID); err != nil {
 		t.Fatalf("insert coverage: %v", err)
 	}
 	// Deleting the binding cascades, so neither new table holds an orphan.

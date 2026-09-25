@@ -221,18 +221,94 @@ type AgentToolFacts struct {
 // Empty reports whether there is nothing to write.
 func (f AgentToolFacts) Empty() bool { return len(f.Observations) == 0 && len(f.Results) == 0 }
 
-// ValidToolName reports whether name may be stored.
+// canonicalToolNames is the CLOSED vocabulary of agent_tool_observations.
+// tool_name: the harness tools AO classifies, the Claude Code attachment types
+// it recognises, the generic "mcp" and "attachment", and the names of AO's own
+// synthetic observations. The transcript parser maps every other name to ""
+// before it gets here; the store refusing anything else is what makes the
+// column closed at the persistence boundary too, not only in today's parser.
+var canonicalToolNames = map[string]bool{
+	"Agent":                       true,
+	"Bash":                        true,
+	"BashOutput":                  true,
+	"Edit":                        true,
+	"EnterPlanMode":               true,
+	"ExitPlanMode":                true,
+	"Glob":                        true,
+	"Grep":                        true,
+	"KillBash":                    true,
+	"KillShell":                   true,
+	"LS":                          true,
+	"MultiEdit":                   true,
+	"NotebookEdit":                true,
+	"NotebookRead":                true,
+	"Read":                        true,
+	"Task":                        true,
+	"TodoWrite":                   true,
+	"WebFetch":                    true,
+	"WebSearch":                   true,
+	"Write":                       true,
+	"agent_listing_delta":         true,
+	"apply_patch":                 true,
+	"attachment":                  true,
+	"auto_mode":                   true,
+	"base_instructions":           true,
+	"codex_file_change":           true,
+	"codex_parsed_cmd":            true,
+	"compact_file_reference":      true,
+	"compact_summary":             true,
+	"container.exec":              true,
+	"credential_org":              true,
+	"date":                        true,
+	"deferred_tools_delta":        true,
+	"deferred_tools_record":       true,
+	"developer_message":           true,
+	"edited_text_file":            true,
+	"environment":                 true,
+	"exec":                        true,
+	"exec_command":                true,
+	"file":                        true,
+	"hook_additional_context":     true,
+	"hook_success":                true,
+	"image_generation":            true,
+	"instructions":                true,
+	"js":                          true,
+	"local_shell":                 true,
+	"local_shell_call":            true,
+	"mcp":                         true,
+	"mcp_instructions_delta":      true,
+	"mcp_tool_call_end":           true,
+	"meta_message":                true,
+	"model":                       true,
+	"nested_memory":               true,
+	"patch_apply_end":             true,
+	"prompt_snapshot":             true,
+	"queued_command":              true,
+	"remote_session_change":       true,
+	"session_context":             true,
+	"shell":                       true,
+	"silent_turn_reminder":        true,
+	"skill_listing":               true,
+	"spawn_agent":                 true,
+	"str_replace_based_edit_tool": true,
+	"str_replace_editor":          true,
+	"task_status":                 true,
+	"thinking_drop":               true,
+	"todo_reminder":               true,
+	"total_tokens_reminder":       true,
+	"update_plan":                 true,
+	"user_message":                true,
+	"view_image":                  true,
+	"wait":                        true,
+	"web_search":                  true,
+	"web_search_call":             true,
+	"write_stdin":                 true,
+}
+
+// ValidToolName reports whether name may be stored: it must belong to the
+// closed vocabulary (the empty name, meaning "other", is stored as "").
 func ValidToolName(name string) bool {
-	if name == "" || len(name) > MaxToolNameBytes {
-		return false
-	}
-	for _, r := range name {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') &&
-			r != '_' && r != '-' && r != '.' {
-			return false
-		}
-	}
-	return true
+	return len(name) <= MaxToolNameBytes && canonicalToolNames[name]
 }
 
 // Valid reports whether an observation may be persisted as is. The write path

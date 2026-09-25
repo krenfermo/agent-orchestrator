@@ -476,6 +476,17 @@ func (s *Store) ApplyUsageChunk(
 			(source.SourceState == domain.UsageSourceComplete && source.SourceLastErrorCode == domain.UsageErrorArtifactReplaced) {
 			return fmt.Errorf("%w: source %d changed while its chunk was being read", domain.ErrUsageSourceRevisionConflict, sourceID)
 		}
+		// 3C coverage: how many of this source's events already exist before
+		// this chunk writes any. Recorded only when the extractor covers the
+		// source for the first time, it is the count of events a binary
+		// without the extractor ingested -- counted here, in the same
+		// transaction, so no clock ordering is involved.
+		var preCoverageEvents int64
+		if len(tools) > 0 {
+			if preCoverageEvents, err = q.CountUsageEventsForSource(ctx, sql.NullInt64{Int64: source.SourceID, Valid: source.SourceID > 0}); err != nil {
+				return err
+			}
+		}
 		insertedEvent := false
 		for _, ev := range events {
 			existing, err := q.GetModelUsageEventByKey(ctx, gen.GetModelUsageEventByKeyParams{
@@ -518,7 +529,7 @@ func (s *Store) ApplyUsageChunk(
 			if err := applyAgentToolFacts(ctx, q, source.BindingID, source.SourceID, facts, recordedAt); err != nil {
 				return err
 			}
-			if err := recordAgentToolCoverage(ctx, q, source.BindingID, source.SourceID, expectedOffset, nextState.ByteOffset, facts.ExtractorVersion, recordedAt); err != nil {
+			if err := recordAgentToolCoverage(ctx, q, source.BindingID, source.SourceID, expectedOffset, nextState.ByteOffset, facts.ExtractorVersion, preCoverageEvents, recordedAt); err != nil {
 				return err
 			}
 		}

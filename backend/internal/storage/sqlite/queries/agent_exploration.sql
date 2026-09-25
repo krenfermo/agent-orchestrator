@@ -25,10 +25,11 @@ WHERE binding_id = ? AND observation_key = ? AND result_bytes IS NULL;
 -- chunk's transaction, so coverage never claims a range whose observations
 -- did not commit.
 INSERT INTO agent_tool_coverage (
-    usage_source_id, binding_id, covered_from, covered_to, min_extractor, max_extractor, first_covered_at, updated_at
+    usage_source_id, binding_id, covered_from, covered_to, min_extractor, max_extractor,
+    pre_coverage_events, first_covered_at, updated_at
 ) VALUES (
     sqlc.arg(usage_source_id), sqlc.arg(binding_id), sqlc.arg(covered_from), sqlc.arg(covered_to),
-    sqlc.arg(extractor), sqlc.arg(extractor), sqlc.arg(updated_at), sqlc.arg(updated_at)
+    sqlc.arg(extractor), sqlc.arg(extractor), sqlc.arg(pre_coverage_events), sqlc.arg(updated_at), sqlc.arg(updated_at)
 )
 ON CONFLICT (usage_source_id) DO UPDATE SET
     covered_from  = MIN(agent_tool_coverage.covered_from, excluded.covered_from),
@@ -37,13 +38,15 @@ ON CONFLICT (usage_source_id) DO UPDATE SET
     max_extractor = MAX(agent_tool_coverage.max_extractor, excluded.max_extractor),
     updated_at    = excluded.updated_at;
 
+-- name: CountUsageEventsForSource :one
+SELECT COUNT(*) FROM model_usage_events WHERE usage_source_id = sqlc.arg(usage_source_id);
+
 -- name: ListRunToolCoverage :many
 -- Every transcript source of one run's subjects with what the extractor has
 -- parsed of it. covered_from is -1 for a source the extractor never saw.
 -- events_before_coverage counts the source's usage events ingested WITHOUT the
--- extractor: recorded before its first covered chunk, or with no coverage at
--- all. Events of the first covered chunk carry the same recorded_at as
--- first_covered_at, so they are not counted.
+-- extractor: those that existed when it first covered the source, or all of
+-- them when it never did.
 SELECT
     b.subject_kind                                  AS subject_kind,
     b.subject_id                                    AS subject_id,
@@ -53,9 +56,8 @@ SELECT
     CAST(COALESCE(c.covered_to, -1) AS INTEGER)     AS covered_to,
     CAST(COALESCE(c.min_extractor, 0) AS INTEGER)   AS min_extractor,
     CAST(COALESCE(c.max_extractor, 0) AS INTEGER)   AS max_extractor,
-    CAST((SELECT COUNT(*) FROM model_usage_events e
-           WHERE e.usage_source_id = s.id
-             AND (c.usage_source_id IS NULL OR e.recorded_at < c.first_covered_at)) AS INTEGER) AS events_before_coverage
+    CAST(COALESCE(c.pre_coverage_events,
+        (SELECT COUNT(*) FROM model_usage_events e WHERE e.usage_source_id = s.id)) AS INTEGER) AS events_before_coverage
 FROM usage_bindings b
 JOIN usage_sources s ON s.binding_id = b.id
 LEFT JOIN agent_tool_coverage c ON c.usage_source_id = s.id

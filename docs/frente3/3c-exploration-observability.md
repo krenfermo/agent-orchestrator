@@ -494,12 +494,20 @@ Codex marcó como **UNVERIFIED** build, vet, lint, short suite y el flake de tmu
 - `TestWrapperProcessNeverTouchesDefaultDataDir`: ejecuta el `main()` real en un proceso hijo con un `HOME` temporal y comprueba exit 2 y que no se crea `~/.ao`. Con una mutación que desactiva el guard, el test falla: el daemon arranca confinado al `HOME` temporal.
 - `TestProbesAndMisuseNeverStartADaemon` (CLI `cmd/ao`): `--version`, `version`, `--help`, la invocación sin argumentos, un flag desconocido y un comando desconocido no arrancan daemon ni crean estado.
 
-**Riesgo residual, declarado.** Un binario experimental de `cmd/ao` ejecutado con un subcomando **explícito** de daemon (`ao daemon`, `ao server`, `ao start`) y sin `AO_DATA_DIR` sigue usando `~/.ao/data`. No es una invocación inválida: es la ruta legítima del app empaquetado, que también se compila con un `go build ./cmd/ao` sin sello de release. Hoy no hay forma de distinguir un binario "experimental" de uno "de release". Cerrarlo exige decidir una de dos cosas:
+**Riesgo residual: P1 según Codex (ciclo 2), pendiente de decisión humana.** Un binario experimental de `cmd/ao` ejecutado con un subcomando **explícito** de daemon (`ao daemon` o `ao server`; `ao start` no, porque lanza el app de escritorio) y sin `AO_DATA_DIR` sigue usando `~/.ao/data` y puede migrarla.
 
-- sellar las builds de release;
-- o exigir autorización explícita para migrar el data dir por defecto.
+Codex propuso: "si `Version == "dev"`, exigir ubicaciones explícitas". **Eso rompería el app de escritorio real**:
 
-Las dos son decisiones de arquitectura y release, y quedan para Joaquín. Mitigación operativa en las herramientas de experimentos de Frente 3:
+- ninguna herramienta de release sella `cli.Version`;
+- `frontend/scripts/build-daemon.mjs` y `scripts/daemon-build.sh` hacen `go build ./cmd/ao` sin `-ldflags`;
+- en modo empaquetado, Electron no pasa `AO_DATA_DIR`.
+
+Así que el daemon de producción también reporta `dev`. Hay dos cierres posibles, y los dos cambian la ruta de arranque de producción:
+
+- **(a)** Sellar la versión en las dos builds de distribución y exigir ubicaciones explícitas a toda build sin sello.
+- **(b)** Exigir `AO_OWNER` (que Electron inyecta siempre) **o** un data dir explícito para abrir el data dir por defecto con `ao daemon`/`ao server`. Esto obliga a los usos headless o dev que hoy dependen del default a declarar la ruta.
+
+Queda para Joaquín: es arquitectura y release, y equivocarse deja sin daemon el app real. Mitigación operativa en las herramientas de experimentos de Frente 3:
 
 - `aoexp.py` compila siempre `./cmd/ao`;
 - rechaza rutas fuera de `~/.ao/scratch`;
@@ -531,3 +539,20 @@ Producción no se tocó: el mtime de `ao.db` no cambió y sigue en goose 174. La
    Ha pasado en 2 de 4 runs E2E, una vez en cada brazo. Mientras no se corrija, **dominaría la calidad (Q2) de 3D con ruido de infraestructura**. Corregirlo es trabajo de workflow, ajeno a 3C y a los prerequisitos mínimos de 3D.
 2. **Ruta de review asimétrica.** En un run el brazo off no lanzó review. Hay que registrar la ruta de review por run y comparar Q2 solo entre runs con la misma ruta.
 3. **ID de sesión de Claude determinista.** AO deriva el ID de sesión de Claude a partir del proyecto y la sesión (p. ej. `fx-1`). Relanzar un run en la **misma ruta** que otro anterior hace que Claude se niegue a arrancar ("Session ID … is already in use"), y el run falla sin transcript. En 3D, cada run necesita rutas propias (data dir, repo y worktree únicos).
+
+**Ciclo 2 de Codex: NO-GO.** Sin P0 y con 3 P1:
+
+1. una fuente sin fila de cobertura con cursor 0 contaba como cubierta;
+2. los sujetos que solo tenían fuente, sin eventos ni observaciones, no entraban en los totales;
+3. el camino `ao daemon`/`ao server` de builds dev descrito arriba.
+
+Además, 3 P2: cronología por reloj, vocabulario sin cerrar en el dominio y `callsBeforeFirstEdit` sobre varias fuentes.
+
+**Ciclo 3 (correcciones):**
+
+- (1) Una fuente sin fila de cobertura es siempre incompleta. El ingestor aplica un chunk incluso para una lectura vacía, así que "sin fila" significa "nunca ingerida".
+- (2) La cobertura de los totales se calcula sobre todos los sujetos con fuente en el run.
+- El reloj sale de la ecuación: `pre_coverage_events` se cuenta dentro de la transacción del primer chunk cubierto.
+- `ValidToolName` exige el vocabulario canónico del dominio. Un test de paridad lo alinea con el parser.
+- `callsBeforeFirstEdit` es `unavailable` con más de una fuente.
+- El P1 (3) queda abierto como decisión humana.

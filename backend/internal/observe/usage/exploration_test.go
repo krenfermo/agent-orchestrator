@@ -591,3 +591,29 @@ func codexSource(root string) domain.UsageSourceContext {
 		NativeRootID: "codex-root", WorkspaceRoot: root,
 	}
 }
+
+// Every name the parser can emit must be accepted by the store's closed
+// vocabulary, or a legitimate chunk would be refused.
+func TestParserToolNamesAreInTheStoreVocabulary(t *testing.T) {
+	for name := range toolOpOf {
+		if !domain.ValidToolName(name) {
+			t.Fatalf("tool %q is not in the domain vocabulary", name)
+		}
+	}
+	for name := range knownAttachmentType {
+		if !domain.ValidToolName(name) {
+			t.Fatalf("attachment type %q is not in the domain vocabulary", name)
+		}
+	}
+	for _, name := range []string{mcpToolName, "attachment", "user_message", "compact_summary", "meta_message",
+		"developer_message", "base_instructions", CodexParsedCommandTool, CodexFileChangeTool, CodexPatchApplyTool} {
+		if !domain.ValidToolName(name) {
+			t.Fatalf("synthetic name %q is not in the domain vocabulary", name)
+		}
+	}
+	for _, name := range []string{"FreeText", "AKIAIOSFODNN7EXAMPLE", "mcp__acme__search"} {
+		if domain.ValidToolName(name) {
+			t.Fatalf("free text %q accepted by the store vocabulary", name)
+		}
+	}
+}

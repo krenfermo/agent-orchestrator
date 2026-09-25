@@ -32,11 +32,13 @@
 --
 -- COVERAGE. A missing row is not a zero either. agent_tool_coverage records,
 -- per usage source, which byte range of the transcript the 3C extractor has
--- parsed, with which extractor version, and WHEN it first did. A usage event of
--- the source recorded before first_covered_at was ingested by a binary without
--- the extractor, so the tool activity around it is unknown: a read model then
--- reports that subject's tool figures as unavailable instead of an observed
--- zero. (A source can legitimately start mid-file -- the collector resumes a
+-- parsed, with which extractor version, and how many of the source's usage
+-- events already existed when the extractor first covered it
+-- (pre_coverage_events, counted inside that chunk's transaction, so no clock is
+-- involved). Those events were ingested by a binary without the extractor, so
+-- the tool activity around them is unknown: a read model then reports that
+-- subject's tool figures as unavailable instead of an observed zero. A source
+-- with no row at all was never ingested by the extractor and is unknown too. (A source can legitimately start mid-file -- the collector resumes a
 -- known transcript at its previous offset under a new row -- so "parsed from
 -- byte zero" would wrongly condemn it; "no event escaped the extractor" does
 -- not.)
@@ -94,6 +96,7 @@ CREATE TABLE agent_tool_coverage (
     -- when a classifier change landed mid-transcript.
     min_extractor       INTEGER NOT NULL,
     max_extractor       INTEGER NOT NULL,
+    pre_coverage_events INTEGER NOT NULL,
     first_covered_at    DATETIME NOT NULL,
     updated_at          DATETIME NOT NULL
 );

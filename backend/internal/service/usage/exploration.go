@@ -122,7 +122,7 @@ func (r *ExplorationReader) WorkflowRun(ctx context.Context, runID string) (doma
 		}
 		return order[i].less(order[j])
 	})
-	totals.coverage = coverage.all(order)
+	totals.coverage = coverage.run(order)
 	for _, k := range order {
 		out.Agents = append(out.Agents, groups[k].result())
 	}
@@ -168,6 +168,12 @@ func coverageBySubject(rows []store.RunToolCoverage) subjectCoverage {
 			versions[r.Subject] = map[int64]bool{}
 		}
 		switch {
+		case r.CoveredFrom < 0:
+			// The ingestor writes coverage for every chunk it applies, an
+			// empty read included, so no row means the extractor never read
+			// this source -- whatever its cursor says.
+			c.Complete = false
+			c.Reason = fmt.Sprintf("transcript source %d has not been ingested by the 3C extractor: its tool activity is unknown, not zero", r.SourceID)
 		case r.EventsBeforeCoverage > 0:
 			c.Complete = false
 			c.Reason = fmt.Sprintf("%d provider call(s) of transcript source %d were ingested without the 3C extractor (before migration 0175 or by an older binary): the tool activity around them is unknown, not zero", r.EventsBeforeCoverage, r.SourceID)
@@ -205,12 +211,36 @@ func (c subjectCoverage) of(subject domain.UsageSubject) domain.ExplorationCover
 	return domain.ExplorationCoverage{Complete: true}
 }
 
-// all is the coverage of a set of agents: complete only when each is.
-func (c subjectCoverage) all(keys []agentKey) domain.ExplorationCoverage {
+// run is the coverage of the whole run: every subject that has a transcript
+// source in the run -- including one no call or observation was attributed to
+// yet, which would otherwise vanish from the totals -- and every agent.
+// Complete only when each is.
+func (c subjectCoverage) run(keys []agentKey) domain.ExplorationCoverage {
 	out := domain.ExplorationCoverage{Complete: true}
 	seen := map[int64]bool{}
+	subjects := make([]domain.UsageSubject, 0, len(c)+len(keys))
+	listed := map[domain.UsageSubject]bool{}
 	for _, k := range keys {
-		v := c.of(k.subject)
+		if !listed[k.subject] {
+			listed[k.subject] = true
+			subjects = append(subjects, k.subject)
+		}
+	}
+	extra := make([]domain.UsageSubject, 0, len(c))
+	for subject := range c {
+		if !listed[subject] {
+			extra = append(extra, subject)
+		}
+	}
+	sort.Slice(extra, func(i, j int) bool {
+		if extra[i].Kind != extra[j].Kind {
+			return extra[i].Kind < extra[j].Kind
+		}
+		return extra[i].ID < extra[j].ID
+	})
+	subjects = append(subjects, extra...)
+	for _, subject := range subjects {
+		v := c.of(subject)
 		if !v.Complete && out.Complete {
 			out.Complete, out.Reason = false, v.Reason
 		}
@@ -886,6 +916,9 @@ func withoutToolTelemetry(a *domain.AgentExploration, reason string) {
 func (f *agentFold) callsBeforeFirstEdit() domain.ExplorationMetric {
 	if !f.sawEdit {
 		return unavailable("no edit observed: the sequence is censored, and calls before an edit that never happened is not a measurement")
+	}
+	if len(f.sources) > 1 {
+		return unavailable(multiSource(len(f.sources)))
 	}
 	if f.firstEditAt == nil || f.untimedEdit || f.untimedCalls > 0 {
 		return unavailable("the first edit or some calls carry no timestamp")
