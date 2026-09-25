@@ -2,6 +2,7 @@ package projectmemory
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -175,6 +176,9 @@ type Provisioner struct {
 	cfg      Config
 	external ExternalContextProvider
 	now      func() time.Time
+	// scope, when set, proves every request's repository belongs to the
+	// project it names before anything is synced or served (Frente 3 / 3B).
+	scope ProjectRepos
 }
 
 // WithExternal installs P4-F's external context provider. Nil leaves the
@@ -225,6 +229,15 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 
 	if !p.cfg.Mode.Enabled() {
 		out.Metrics.FallbackReason = "project memory is switched off"
+		out.Metrics.FallbackBytes = out.Metrics.LegacyBytes
+		return out
+	}
+	// 0. Scope. Memory is keyed by (project, repository), and a request that
+	//    pairs a project with a checkout that is not one of its repositories
+	//    would index one codebase's facts under another's id and serve them.
+	//    Fail closed: nothing is synced and nothing is attached.
+	if reason := p.outOfScope(ctx, req); reason != "" {
+		out.Metrics.FallbackReason = reason
 		out.Metrics.FallbackBytes = out.Metrics.LegacyBytes
 		return out
 	}
@@ -510,4 +523,56 @@ func EstimateTokens(bytes int) int {
 		return 0
 	}
 	return (bytes + packBytesPerToken - 1) / packBytesPerToken
+}
+
+// ProjectRepos is the project registry as the provisioner needs it: which
+// project an id names, and which repositories it owns.
+type ProjectRepos interface {
+	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
+	ListWorkspaceRepos(ctx context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error)
+}
+
+// WithProjectScope makes every Provision prove that the requested repository
+// is the named project's root or one of its registered workspace repositories,
+// and that the project is registered and not archived, before any sync or
+// read. The daemon always installs it; without it (tests, offline harnesses)
+// the caller is trusted to pair the two correctly.
+func (p *Provisioner) WithProjectScope(projects ProjectRepos) *Provisioner {
+	p.scope = projects
+	return p
+}
+
+// outOfScope returns the fail-closed reason for a request whose project and
+// repository do not belong together, or "" when they do (or no scope is set).
+func (p *Provisioner) outOfScope(ctx context.Context, req ProvisionRequest) string {
+	if strings.TrimSpace(string(req.ProjectID)) == "" {
+		return "no project named: memory is scoped by project and is not served to an unnamed one"
+	}
+	if p.scope == nil {
+		return ""
+	}
+	project, found, err := p.scope.GetProject(ctx, string(req.ProjectID))
+	switch {
+	case err != nil:
+		return "project registry unavailable: memory withheld rather than served unscoped"
+	case !found:
+		return "project " + string(req.ProjectID) + " is not registered: memory withheld"
+	case !project.ArchivedAt.IsZero():
+		return "project " + string(req.ProjectID) + " is archived: memory withheld"
+	}
+	if strings.TrimSpace(req.RepoPath) == "" {
+		return ""
+	}
+	allowed := []string{project.Path}
+	if repos, err := p.scope.ListWorkspaceRepos(ctx, string(req.ProjectID)); err == nil {
+		for _, r := range repos {
+			allowed = append(allowed, filepath.Join(project.Path, r.RelativePath))
+		}
+	}
+	for _, candidate := range allowed {
+		if SameRepoPath(candidate, req.RepoPath) {
+			return ""
+		}
+	}
+	return "repository is not one of project " + string(req.ProjectID) + "'s registered repositories: memory withheld"
 }

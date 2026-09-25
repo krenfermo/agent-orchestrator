@@ -566,7 +566,12 @@ func memoryProvisionerFor(prov *durablememory.Provisioner) wfmemory.Provisioner 
 // the sync single-flight and the pack cache, and a second instance would hold
 // its own copies of both -- so two callers on one repository would no longer
 // coalesce, which is the whole point of §3.
-func memoryProvisioner(memory *durablememory.Service, log *slog.Logger) *durablememory.Provisioner {
+//
+// Frente 3 / 3B: the provisioner is always scoped to the project registry, so
+// a request that pairs a project with a repository that is not one of its own
+// (or names an unregistered or archived project) fails closed instead of
+// indexing one codebase under another's id.
+func memoryProvisioner(memory *durablememory.Service, projects durablememory.ProjectRepos, log *slog.Logger) *durablememory.Provisioner {
 	if memory == nil {
 		return nil
 	}
@@ -583,7 +588,11 @@ func memoryProvisioner(memory *durablememory.Service, log *slog.Logger) *durable
 	if log != nil {
 		log.Info("project memory: participating in agent dispatch", "policy", cfg.Describe())
 	}
-	return durablememory.NewProvisioner(memory, cfg)
+	prov := durablememory.NewProvisioner(memory, cfg)
+	if projects != nil {
+		prov = prov.WithProjectScope(projects)
+	}
+	return prov
 }
 
 // projectMemoryBaselineEnv is the opt-in switch for baseline evidence

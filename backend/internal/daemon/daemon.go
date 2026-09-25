@@ -874,7 +874,7 @@ func RunWithConfig(cfg config.Config) error {
 	// give `ao memory report` its own syncer -- and a report could then trigger
 	// a sync concurrent with the one a dispatch is already running, which is
 	// precisely what the single-flight exists to prevent.
-	memoryProvisioning := memoryProvisioner(projectMemory, log)
+	memoryProvisioning := memoryProvisioner(projectMemory, store, log)
 
 	// P4-F: GitHub as EXTERNAL context, built on the same SCM providers the
 	// observer runs on and shared between the HTTP surface and agent dispatch.
