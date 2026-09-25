@@ -63,6 +63,7 @@ func serverConfig(opts serverOptions) (config.Config, error) {
 			return config.Config{}, fmt.Errorf("resolve --data-dir: %w", err)
 		}
 		cfg.RunFilePath = filepath.Join(cfg.DataDir, "running.json")
+		cfg.DataDirExplicit = true
 	}
 	cfg.WebRoot, err = resolveWebRoot(opts.webRoot)
 	if err != nil {

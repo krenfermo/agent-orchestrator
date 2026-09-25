@@ -214,6 +214,11 @@ func assertNoLiveRunFiles(cfg config.Config) error {
 // held until release -- so no daemon can start underneath the write either.
 // Nothing is signalled; a held lock refuses.
 func holdDataDirOffline(cfg config.Config, doing string) (release func(), err error) {
+	// Offline writers open the store with sqlite.Open, which migrates it: the
+	// same production guardrail as the daemon applies (Frente 3 incident).
+	if err := config.AuthorizeDefaultDataDir(cfg, os.LookupEnv); err != nil {
+		return nil, usageError{err}
+	}
 	if err := assertNoLiveRunFiles(cfg); err != nil {
 		return nil, err
 	}

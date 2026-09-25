@@ -571,3 +571,33 @@ Además, 3 P2: cronología por reloj, vocabulario sin cerrar en el dominio y `ca
 - El uso del planner, sin transcript, reporta ceros de herramientas como observados (en rigor es `--tools ""`).
 
 **P3:** corregido este texto.
+
+## 14. Cierre del P1 del guardrail (decisión humana: opción 1)
+
+**Contrato.** `ao daemon`/`ao server`, y los escritores offline que migran vía `sqlite.Open` (`ao import`, `ao usage backfill-cache-ttl`), solo pueden usar el data dir por defecto si se cumple una de estas dos condiciones:
+
+- **A:** el contrato de lanzamiento de Electron: `AO_OWNER` es exactamente `app` o `persistent` **y** `AO_APP_RUN_ID` no está vacío. Un `AO_OWNER` cualquiera no basta.
+- **B:** el data dir es explícito, con `AO_DATA_DIR` o `--data-dir`.
+
+**Implementación.**
+
+- La política vive en `config.AuthorizeDefaultDataDir`.
+- Se invoca al entrar en `daemon.RunWithConfig`, antes de tocar el disco, y en `holdDataDirOffline`.
+- `Config.DataDirExplicit` registra si la elección fue explícita.
+
+**Fuera del alcance.** `restore` y `recover` no migran; ya exigen confirmación explícita nombrando el data dir, y comprueban la compatibilidad del esquema.
+
+**Tests:**
+
+1. `config/production_guard_test.go`: cubre (1) el fallo cerrado, (2) la ruta explícita, (3) `app`/`persistent` con run id y los valores inválidos (sin run id, `headless`, `APP`, ` app`, run id solo).
+2. `cmd/ao/main_test.go`, con el `main()` real en un proceso hijo, un `HOME` temporal y un entorno construido desde cero:
+   - `daemon`/`server` sin contrato → rechazo sin crear `~/.ao/data`;
+   - flags y argumentos inválidos → nunca arranca un daemon;
+   - AO_DATA_DIR explícito o el contrato `app`/`persistent` → el daemon arranca y responde en `/healthz`;
+   - los escritores offline → rechazo.
+3. **Mutación:** desactivar la guarda hace fallar el test de rechazo, porque el daemon arranca. Evidencia en `reviews/3c/guardrail-option1/mutation.log`.
+4. **Contrato Electron:** `TestElectronLaunchContractSatisfiesTheGuard` lee `frontend/src/main.ts` y `daemon-launch.ts` y comprueba cuatro cosas:
+   - los valores de `AO_OWNER` que Electron puede emitir coinciden exactamente con los que acepta la guarda;
+   - `AO_APP_RUN_ID` siempre viaja en el mismo `ownerTag`;
+   - el daemon se lanza con `daemonEnv(keep)` y, en modo empaquetado, como `ao daemon`;
+   - el modo dev fija `AO_DATA_DIR`.

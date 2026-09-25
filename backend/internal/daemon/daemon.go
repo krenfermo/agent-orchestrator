@@ -107,6 +107,13 @@ func Run() error {
 // already-resolved configuration. It exists for the foreground `ao server`
 // command; Electron continues to use Run and environment-based discovery.
 func RunWithConfig(cfg config.Config) error {
+	// Production guardrail (Frente 3 incident): refuse the default data dir
+	// unless the desktop app launched us or someone chose it explicitly. It
+	// runs first -- before the working directory, the lock or the database
+	// are touched -- so a refused start leaves no trace.
+	if err := config.AuthorizeDefaultDataDir(cfg, os.LookupEnv); err != nil {
+		return err
+	}
 	var err error
 	if cwd, err := os.Getwd(); err == nil {
 		cfg.StartupWorkingDirectory = cwd

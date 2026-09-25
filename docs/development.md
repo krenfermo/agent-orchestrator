@@ -114,6 +114,18 @@ AO_DATA_DIR=$HOME/.ao/dev/data AO_RUN_FILE=$HOME/.ao/dev/running.json go run .
 The CLI is built with Cobra. From `backend/`, run `go run ./cmd/ao --help` for
 available commands.
 
+**Default data dir guard.** `ao daemon` and `ao server`, and the offline
+writers `ao import` and `ao usage backfill-cache-ttl`, open the default data
+dir (`~/.ao/data`, the real state) only in two cases:
+
+- when the desktop app launched them, which is the Electron launch contract
+  `AO_OWNER=app|persistent` plus `AO_APP_RUN_ID`;
+- when the data dir is named explicitly, with `AO_DATA_DIR` or
+  `ao server --data-dir`.
+
+Otherwise they refuse before touching anything. Electron's dev mode and
+`scripts/ao-local.sh` already set `AO_DATA_DIR`.
+
 ### Run tests
 
 ```bash
