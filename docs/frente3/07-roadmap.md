@@ -25,7 +25,7 @@ flowchart LR
 
 ---
 
-## 3B — Corrección y seguridad de lo existente
+## 3B — Corrección y seguridad de lo existente — **IMPLEMENTADO (ver [3b-implementation.md](3b-implementation.md))**
 
 **Objetivo:** que lo que ya existe sea correcto y seguro de encender. No se
 añaden funcionalidades.

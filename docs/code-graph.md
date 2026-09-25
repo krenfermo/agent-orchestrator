@@ -343,6 +343,15 @@ status` compares what the graph claims against what the checkout says **now**:
 
 ## Security
 
+> **Frente 3 / 3B (2026-09-24).** The candidate set is now the project's
+> tracked files (`git ls-files`, via `internal/repoaccess`), not a filesystem
+> walk: before 3B `.claude/` was not skipped, and MEDUSA served 24.7% of its
+> symbols from an agent's linked worktree. Reads refuse a symlink at any
+> component (`os.Root` + per-component Lstat), the secret policy is shared
+> with project memory, and every extraction's docs, signatures and summaries
+> are redacted (`extractRedacted` is the only Extract call). See
+> [frente3/3b-implementation.md](frente3/3b-implementation.md).
+
 Files whose content is a secret by convention are refused **before** they are
 read, not filtered after — and refused in both the walk and the per-file sync
 path, because an incremental update names its own paths and would otherwise

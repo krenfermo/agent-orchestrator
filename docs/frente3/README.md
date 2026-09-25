@@ -20,3 +20,15 @@ dependencias.
 **Conclusión de 3A: GO para diseño/implementación de 3B**, con 3B
 redefinida como *corrección y seguridad de lo existente*, sin encender la
 memoria. El encendido depende del piloto 3D.
+
+## 3B — Project Memory hardening (2026-09-24)
+
+Rama `feat/frente3-3b-memory-hardening` (sin merge ni push). Corrige y
+endurece lo existente: el wiring del Worker, la elegibilidad basada en git,
+los symlinks fail-closed, la frontera de secretos, la redacción, el
+repositorio como DATO, el aislamiento entre proyectos, freshness y la
+corrección incremental. Memoria y router siguen **off** por defecto.
+
+| Documento | Contenido |
+|---|---|
+| [3b-implementation.md](3b-implementation.md) | Qué se implementó, con evidencia antes/después, contrato de freshness, punto de extensión Java y residuales |

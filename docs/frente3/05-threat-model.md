@@ -71,3 +71,22 @@ usuario (RBAC).
    recibe hechos de paths fuera de su scope o dentro de su deny.
 8. Un pack nunca se entrega sin commit y estado; un grafo `stale`/`partial`
    se declara como tal.
+
+---
+
+## 3B — estado de cada amenaza (2026-09-24)
+
+| # | Estado tras 3B | Dónde |
+|---|---|---|
+| T1 secretos por ruta | **Cerrado**: política única antes de abrir, en ambos indexadores | `repoaccess/secret.go` |
+| T2 secretos inline | **Mitigado**: redacción en la escritura y en la salida; límite: solo formas conocidas (R1) | `repoaccess/redact.go` |
+| T3 prompt injection | **Cerrado** para el framing: bloque delimitado y con nonce, sin "must follow", filas legacy re-etiquetadas | `repoaccess/frame.go` |
+| T4/T5 symlinks y traversal | **Cerrado**: Lstat de cada componente + `os.Root` + fstat | `repoaccess/read.go` |
+| T6 tamaño y límites | **Cerrado**: `AO_MEMORY_MAX_*` aplicados; `PARTIAL` visible (tope de ficheros) | `sync.go`, `provision.go` |
+| T7 contaminación por worktrees | **Cerrado** en código, con elegibilidad `git ls-files`; MEDUSA pendiente de una limpieza autorizada (R7) | `repoaccess/eligible.go` |
+| T8 grafo stale | **Cerrado**: aviso CURRENT/STALE/UNVERIFIED/PARTIAL en cada pack | `provision.go` |
+| T9 fuga entre proyectos | **Probado** de extremo a extremo; hueco de par proyecto/ruta cerrado con `WithProjectScope` | `isolation_test.go` |
+| T10 fuga entre worktrees | **Cerrado** por elegibilidad; ningún indexador lee un worktree auxiliar | `contamination_test.go` |
+| T11 envenenamiento por inferencia de agente | Parcial: el texto de agente se redacta y enmarca; no hay clase "redactado por agente" (3A §3, pendiente) | — |
+| T12 bypass de Skills | Sin cambio: Skills no consumen memoria (integración posterior) | — |
+| T15 argumento git | Sin cambio en el router (off); los indexadores usan git endurecido | `repoaccess.GitCommand` |
