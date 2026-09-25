@@ -7,6 +7,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	pm "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // intelligence_context.go -- the Context tab: what AO would actually hand an
@@ -167,7 +168,7 @@ func (s *Service) ContextPreview(ctx context.Context, req ContextPreviewRequest)
 		s := ContextPreviewSection{Title: section.Title, Type: string(section.Type)}
 		for _, sel := range section.Items {
 			item := ContextPreviewItem{
-				Summary: sel.Item.Summary, Type: string(sel.Item.Key.Type),
+				Summary: repoaccess.RedactString(pm.RenderedSummary(sel.Item)), Type: string(sel.Item.Key.Type),
 				State: string(sel.Item.State), SourcePaths: sel.Item.SourcePaths,
 				SourceCommit: sel.Item.SourceCommit, Score: sel.Score,
 				Reason: sel.Reason, BodyIncluded: sel.BodyIncluded,

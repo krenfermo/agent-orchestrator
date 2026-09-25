@@ -8,6 +8,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	pm "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // intelligence_search.go -- the Search and Context tabs.
@@ -124,7 +125,7 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (SearchResult, 
 						continue
 					}
 					out.Hits = append(out.Hits, SearchHit{
-						Kind: "memory", Title: item.Summary, Detail: item.Content,
+						Kind: "memory", Title: repoaccess.RedactString(item.Summary), Detail: repoaccess.RedactString(item.Content),
 						Path:  firstPath(item.SourcePaths),
 						State: string(item.State), MemoryType: string(item.Key.Type),
 						SourceCommit:  item.SourceCommit,
@@ -157,7 +158,7 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (SearchResult, 
 					}
 					seen[sym.SymbolID] = true
 					out.Hits = append(out.Hits, SearchHit{
-						Kind: "symbol", Title: sym.Name, Detail: symbolDetail(sym.Signature, sym.Summary),
+						Kind: "symbol", Title: sym.Name, Detail: repoaccess.RedactString(symbolDetail(sym.Signature, sym.Summary)),
 						Path: sym.Path, Line: sym.Line, SymbolKind: sym.Kind,
 						Score: scoreSymbol(sym.Name, sym.Path, terms),
 					})

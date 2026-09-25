@@ -10,6 +10,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	pm "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
@@ -261,7 +262,7 @@ func (s *Service) GraphQuery(
 func graphSymbol(sym codegraph.Symbol, score float64, reason string) controllers.ProjectMemoryGraphSymbol {
 	return controllers.ProjectMemoryGraphSymbol{
 		ID: sym.ID, Name: sym.Name, Kind: string(sym.Kind), Path: sym.File,
-		Line: sym.Line, Signature: sym.Signature, Summary: sym.Summary,
+		Line: sym.Line, Signature: repoaccess.RedactString(sym.Signature), Summary: repoaccess.RedactString(sym.Summary),
 		Exported: sym.Exported, Score: score, Reason: reason,
 	}
 }

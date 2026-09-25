@@ -11,6 +11,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	pm "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
@@ -585,8 +586,8 @@ func (s *Service) resolveEndpoints(
 func subgraphNode(sym store.CodeGraphSymbolRecord, depth int) SubgraphNode {
 	return SubgraphNode{
 		Key: sym.SymbolID, Name: sym.Name, Kind: sym.Kind, Path: sym.Path,
-		Language: sym.Language, Line: sym.Line, Signature: sym.Signature,
-		Summary: sym.Summary, Exported: sym.Exported, Depth: depth,
+		Language: sym.Language, Line: sym.Line, Signature: repoaccess.RedactString(sym.Signature),
+		Summary: repoaccess.RedactString(sym.Summary), Exported: sym.Exported, Depth: depth,
 	}
 }
 

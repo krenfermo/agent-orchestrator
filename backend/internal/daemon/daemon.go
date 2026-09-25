@@ -868,13 +868,16 @@ func RunWithConfig(cfg config.Config) error {
 	codeGraph := codegraph.NewIndex(store, codegraph.WithIndexLogger(log))
 	projectMemory := projectmemory.NewService(store,
 		projectmemory.WithCodeGraph(codeGraph),
-		projectmemory.WithServiceLogger(log))
+		projectmemory.WithServiceLogger(log),
+		// Frente 3 / 3B: AO_MEMORY_MAX_FILES / AO_MEMORY_MAX_FILE_BYTES were
+		// parsed and never applied; the operator's bounds now reach every pass.
+		projectmemory.WithIndexerLimits(memoryConfig(log).IndexLimits))
 	// ONE provisioner for the whole daemon. It owns the sync single-flight and
 	// the pack cache, so constructing a second one for the API surface would
 	// give `ao memory report` its own syncer -- and a report could then trigger
 	// a sync concurrent with the one a dispatch is already running, which is
 	// precisely what the single-flight exists to prevent.
-	memoryProvisioning := memoryProvisioner(projectMemory, log)
+	memoryProvisioning := memoryProvisioner(projectMemory, store, log)
 
 	// P4-F: GitHub as EXTERNAL context, built on the same SCM providers the
 	// observer runs on and shared between the HTTP surface and agent dispatch.

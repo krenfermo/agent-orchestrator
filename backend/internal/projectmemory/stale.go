@@ -38,8 +38,18 @@ type FileHasher func(path string) (string, error)
 // HashFile is the default FileHasher: the SHA-256 of the file's bytes, hex
 // encoded. It is the same hash recorded in Source.FileHash at ingestion, so
 // the two are directly comparable.
+//
+// Frente 3 / 3B: a symbolic link or a non-regular file is refused rather than
+// followed (legacy JSON store; it only ever hashes, never persists content).
 func HashFile(path string) (string, error) {
-	f, err := os.Open(path) //nolint:gosec // the path is an item's own recorded source file
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("hash %s: not a regular file: %w", path, os.ErrNotExist)
+	}
+	f, err := os.Open(path) //nolint:gosec // the path is an item's own recorded source file, Lstat-checked above
 	if err != nil {
 		return "", err
 	}

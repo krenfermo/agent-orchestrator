@@ -2,6 +2,8 @@ package projectmemory
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -154,7 +156,7 @@ func (p Provisioned) Attached() bool { return !p.Pack.Empty() || !p.External.Emp
 func (p Provisioned) Render() string {
 	memory := ""
 	if !p.Pack.Empty() {
-		memory = p.Pack.Render()
+		memory = p.FreshnessNotice() + p.Pack.Render()
 	}
 	external := p.External.Render()
 	switch {
@@ -175,6 +177,9 @@ type Provisioner struct {
 	cfg      Config
 	external ExternalContextProvider
 	now      func() time.Time
+	// scope, when set, proves every request's repository belongs to the
+	// project it names before anything is synced or served (Frente 3 / 3B).
+	scope ProjectRepos
 }
 
 // WithExternal installs P4-F's external context provider. Nil leaves the
@@ -225,6 +230,15 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 
 	if !p.cfg.Mode.Enabled() {
 		out.Metrics.FallbackReason = "project memory is switched off"
+		out.Metrics.FallbackBytes = out.Metrics.LegacyBytes
+		return out
+	}
+	// 0. Scope. Memory is keyed by (project, repository), and a request that
+	//    pairs a project with a checkout that is not one of its repositories
+	//    would index one codebase's facts under another's id and serve them.
+	//    Fail closed: nothing is synced and nothing is attached.
+	if reason := p.outOfScope(ctx, req); reason != "" {
+		out.Metrics.FallbackReason = reason
 		out.Metrics.FallbackBytes = out.Metrics.LegacyBytes
 		return out
 	}
@@ -510,4 +524,159 @@ func EstimateTokens(bytes int) int {
 		return 0
 	}
 	return (bytes + packBytesPerToken - 1) / packBytesPerToken
+}
+
+// ProjectRepos is the project registry as the provisioner needs it: which
+// project an id names, and which repositories it owns.
+type ProjectRepos interface {
+	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
+	ListWorkspaceRepos(ctx context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error)
+}
+
+// WithProjectScope makes every Provision prove that the requested repository
+// is the named project's root or one of its registered workspace repositories,
+// and that the project is registered and not archived, before any sync or
+// read. The daemon always installs it; without it (tests, offline harnesses)
+// the caller is trusted to pair the two correctly.
+func (p *Provisioner) WithProjectScope(projects ProjectRepos) *Provisioner {
+	p.scope = projects
+	return p
+}
+
+// outOfScope returns the fail-closed reason for a request whose project and
+// repository do not belong together, or "" when they do (or no scope is set).
+func (p *Provisioner) outOfScope(ctx context.Context, req ProvisionRequest) string {
+	if strings.TrimSpace(string(req.ProjectID)) == "" {
+		return "no project named: memory is scoped by project and is not served to an unnamed one"
+	}
+	if p.scope == nil {
+		return ""
+	}
+	project, found, err := p.scope.GetProject(ctx, string(req.ProjectID))
+	switch {
+	case err != nil:
+		return "project registry unavailable: memory withheld rather than served unscoped"
+	case !found:
+		return "project " + string(req.ProjectID) + " is not registered: memory withheld"
+	case !project.ArchivedAt.IsZero():
+		return "project " + string(req.ProjectID) + " is archived: memory withheld"
+	}
+	if strings.TrimSpace(req.RepoPath) == "" {
+		return ""
+	}
+	allowed := []string{project.Path}
+	if repos, err := p.scope.ListWorkspaceRepos(ctx, string(req.ProjectID)); err == nil {
+		for _, r := range repos {
+			allowed = append(allowed, filepath.Join(project.Path, r.RelativePath))
+		}
+	}
+	for _, candidate := range allowed {
+		if SameRepoPath(candidate, req.RepoPath) {
+			return ""
+		}
+	}
+	return "repository is not one of project " + string(req.ProjectID) + "'s registered repositories: memory withheld"
+}
+
+// FreshnessVerdict classifies what a consumer is being handed.
+type FreshnessVerdict string
+
+const (
+	// FreshnessCurrent means memory is provably at the checkout's commit and
+	// complete.
+	FreshnessCurrent FreshnessVerdict = "current"
+	// FreshnessStale means memory was derived at a commit other than the one the
+	// checkout is at (the sync to bring it forward did not complete).
+	FreshnessStale FreshnessVerdict = "stale"
+	// FreshnessUnverified means AO could not read the checkout's commit, or ran no
+	// check, so it cannot prove currency either way.
+	FreshnessUnverified FreshnessVerdict = "unverified"
+	// FreshnessPartial means memory is at the right commit but covers only part
+	// of the repository.
+	FreshnessPartial FreshnessVerdict = "partial"
+)
+
+// Verdict decides the freshness contract for this dispatch. Frente 3 / 3B:
+//
+//   - use       -> current: served as-is;
+//   - degrade   -> stale / unverified / partial: served WITH an explicit
+//     notice, because the working tree is always the authority and a
+//     summary of an earlier commit still orients an agent -- but it is
+//     never presented as current;
+//   - rebuild   -> automatic: every dispatch whose memory is not current
+//     runs a sync first (EnsureFresh), so a stale verdict means that sync
+//     did not complete, and the next dispatch tries again;
+//   - reject    -> withheld, never served: no completed pass, a failed pass,
+//     a repository-identity drift, a linked worktree, a request outside
+//     the project's scope, an archived project.
+func (p Provisioned) Verdict() FreshnessVerdict {
+	f := p.Freshness
+	packCommit := p.Pack.Stats.IndexedCommit
+	switch {
+	case f.HeadCommit == "" || packCommit == "":
+		return FreshnessUnverified
+	case packCommit != f.HeadCommit:
+		return FreshnessStale
+	case f.Partial || (f.Graph.Attempted && f.Graph.Partial):
+		return FreshnessPartial
+	case f.Graph.Attempted && f.Graph.Usable && f.Graph.IndexedCommit != "" && f.Graph.IndexedCommit != f.HeadCommit:
+		return FreshnessStale
+	}
+	return FreshnessCurrent
+}
+
+// FreshnessNotice is AO's statement, outside the untrusted data block, of how
+// current the attached memory is. It is never empty when memory is attached:
+// "current" is said as plainly as "stale".
+func (p Provisioned) FreshnessNotice() string {
+	f := p.Freshness
+	packCommit := p.Pack.Stats.IndexedCommit
+	var b strings.Builder
+	switch p.Verdict() {
+	case FreshnessCurrent:
+		fmt.Fprintf(&b, "MEMORY FRESHNESS: CURRENT -- derived at the checkout's own commit %s.\n", noticeSHA(packCommit))
+	case FreshnessStale:
+		fmt.Fprintf(&b, "MEMORY FRESHNESS: STALE -- memory was derived at commit %s but the checkout is at %s", noticeSHA(packCommit), noticeSHA(f.HeadCommit))
+		if f.Graph.Attempted && f.Graph.IndexedCommit != "" && f.Graph.IndexedCommit != f.HeadCommit {
+			fmt.Fprintf(&b, " (code graph at %s)", noticeSHA(f.Graph.IndexedCommit))
+		}
+		b.WriteString(". Facts may describe code that has since changed; verify against the working tree before relying on them.")
+		if f.Reason != "" {
+			b.WriteString(" Sync: " + f.Reason + ".")
+		}
+		b.WriteString("\n")
+	case FreshnessUnverified:
+		b.WriteString("MEMORY FRESHNESS: UNVERIFIED -- AO could not prove this memory matches the checkout")
+		if packCommit != "" {
+			fmt.Fprintf(&b, " (derived at commit %s)", noticeSHA(packCommit))
+		}
+		b.WriteString("; verify against the working tree before relying on it.\n")
+	case FreshnessPartial:
+		fmt.Fprintf(&b, "MEMORY FRESHNESS: PARTIAL -- derived at the checkout's commit %s but covering only part of the repository", noticeSHA(packCommit))
+		if f.PartialReason != "" {
+			b.WriteString(" (" + f.PartialReason + ")")
+		} else if f.Graph.Partial {
+			b.WriteString(" (the code graph stopped at its file bound)")
+		}
+		b.WriteString("; absence of a fact here is not evidence of absence in the repository.\n")
+	}
+	if f.DirtyTracked > 0 {
+		fmt.Fprintf(&b, "The checkout has uncommitted changes to %d tracked file(s); facts about those files may reflect uncommitted content.\n", f.DirtyTracked)
+	}
+	if f.Graph.Attempted && !f.Graph.Usable {
+		reason := f.Graph.Reason
+		if reason == "" {
+			reason = "no complete graph is available"
+		}
+		b.WriteString("CODE GRAPH: UNAVAILABLE -- " + reason + "; structural evidence is omitted.\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func noticeSHA(sha string) string {
+	if sha == "" {
+		return "(none)"
+	}
+	return shortSHA(sha)
 }

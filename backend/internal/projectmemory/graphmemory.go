@@ -200,6 +200,9 @@ type GraphFreshness struct {
 	Duration     time.Duration
 	// Usable reports that a complete graph is being served.
 	Usable bool
+	// Partial reports that the graph's file count sits at the pass bound, so
+	// it covers part of the repository (Frente 3 / 3B).
+	Partial bool
 	// Reason explains a skip or a degradation.
 	Reason string
 }

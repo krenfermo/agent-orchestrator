@@ -376,6 +376,16 @@ whose build failed, keeps dispatching on exactly the memory it had before.
 
 ## 10. Role integration
 
+> **Frente 3 / 3B (2026-09-24).** Between P5-A 2C (2026-09-08) and 3B the
+> Worker and both Repair Agents did **not** receive the pack: their launcher
+> held the undecorated session manager. 3B composes every dispatch decorator
+> in `daemon/dispatch_instrumentation.go` and re-binds the worker launcher to
+> the decorated Spawner, with a reflection test that classifies every agent
+> dispatch surface. Repository reads now go through `internal/repoaccess`
+> (tracked files only, no symlinks, secret paths never opened); packs are
+> redacted and framed as UNTRUSTED REPOSITORY CONTEXT with a freshness notice.
+> See [frente3/3b-implementation.md](frente3/3b-implementation.md).
+
 Opt-in and fallback-safe, gated by the pre-existing `AO_CONTEXT_ROUTER` flag,
 which is **off by default**. With it unset, `wfrouter.Instrument` hands every
 dependency back untouched and dispatch is byte-for-byte what it was before P2-A.

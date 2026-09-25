@@ -4,6 +4,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // signals.go — the bounded path census the high-level facts are derived from
@@ -212,19 +214,12 @@ func (s *pathSignals) total(kind signalKind) int {
 // and are exactly what a newcomer should be pointed at, so they stay.
 func excludedFromSignals(rel string) bool {
 	lower := strings.ToLower(rel)
-	base := path.Base(lower)
 
-	switch {
-	case base == ".env" || (strings.HasPrefix(base, ".env.") &&
-		!strings.HasSuffix(base, ".example") && !strings.HasSuffix(base, ".sample") &&
-		!strings.HasSuffix(base, ".template")):
-		return true
-	case strings.HasSuffix(base, ".pem"), strings.HasSuffix(base, ".key"),
-		strings.HasSuffix(base, ".p12"), strings.HasSuffix(base, ".pfx"),
-		strings.HasSuffix(base, ".keystore"), strings.HasSuffix(base, ".jks"):
-		return true
-	case strings.HasPrefix(base, "credentials"), strings.HasPrefix(base, "secrets"),
-		base == "id_rsa", base == "id_ed25519", base == ".netrc", base == ".npmrc":
+	// Frente 3 / 3B: the secret half is the shared repoaccess boundary, so
+	// memory and the code graph cannot disagree about what a secret is. An
+	// env TEMPLATE's name stays allowed: it documents keys, and pointing a
+	// newcomer at it is useful (its content is never read).
+	if repoaccess.IsSecretPath(rel) && !repoaccess.IsSecretTemplate(rel) {
 		return true
 	}
 	for _, seg := range strings.Split(lower, "/") {
@@ -242,12 +237,6 @@ func excludedFromSignals(rel string) bool {
 		// points as living under .claude/worktrees/roc-capacity-fe/.
 		case ".claude", ".cursor", ".aider", ".ao", ".idea", ".vscode",
 			".gradle", ".mvn", "nbproject":
-			return true
-		// Credential stores by DIRECTORY as well as by filename. The
-		// basename rules above catch `config/credentials.json`; they do not
-		// catch `secrets/tokens.yaml`, whose name says nothing and whose
-		// directory says everything.
-		case "secrets", ".secrets", "credentials", ".credentials", ".ssh", ".gnupg":
 			return true
 		}
 	}

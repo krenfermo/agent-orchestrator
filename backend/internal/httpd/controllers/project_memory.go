@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 )
 
 // project_memory.go — P2-A's operational read/repair surface.
@@ -969,6 +970,9 @@ func projectMemoryStatusResponse(s domain.ProjectMemoryStatus) ProjectMemoryStat
 }
 
 func projectMemoryItemResponse(item domain.ProjectMemoryItem) ProjectMemoryItemResponse {
+	// Frente 3 / 3B: rows written before write-time redaction existed are
+	// redacted again on the way out.
+	item = redactedMemoryItem(item)
 	out := ProjectMemoryItemResponse{
 		ID: item.ID, RepoID: item.Key.RepoID,
 		Type: string(item.Key.Type), Scope: string(item.Key.Scope), Key: item.Key.Key,
@@ -1154,7 +1158,7 @@ type ProjectMemoryManifestResponse struct {
 }
 
 func projectMemoryKnowledgeResponse(e ProjectMemoryKnowledgeEntry) ProjectMemoryKnowledgeResponse {
-	item := e.Item
+	item := redactedMemoryItem(e.Item)
 	return ProjectMemoryKnowledgeResponse{
 		ID: item.ID, Type: string(item.Key.Type),
 		Scope: string(item.Key.Scope), Key: item.Key.Key,
@@ -1168,4 +1172,20 @@ func projectMemoryKnowledgeResponse(e ProjectMemoryKnowledgeEntry) ProjectMemory
 		SourceCommit: item.SourceCommit, SourcePaths: item.SourcePaths,
 		UpdatedAt: item.UpdatedAt.Format(rfc3339Milli),
 	}
+}
+
+// redactedMemoryItem passes an item's free text through the repository
+// redaction boundary before it leaves AO over HTTP. Items written since 3B are
+// already redacted at write; this covers rows written before it.
+func redactedMemoryItem(item domain.ProjectMemoryItem) domain.ProjectMemoryItem {
+	item.Summary = repoaccess.RedactString(item.Summary)
+	item.Content = repoaccess.RedactString(item.Content)
+	if len(item.Metadata) > 0 {
+		md := make(map[string]string, len(item.Metadata))
+		for k, v := range item.Metadata {
+			md[k] = repoaccess.RedactString(v)
+		}
+		item.Metadata = md
+	}
+	return item
 }

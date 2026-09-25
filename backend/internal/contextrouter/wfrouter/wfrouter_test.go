@@ -15,6 +15,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	memory "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
 
@@ -326,6 +327,11 @@ func TestSpawnIssueContextIsRoutedAndPromptIsNot(t *testing.T) {
 	}
 	if !strings.Contains(got.IssueContext, "Impacted symbols") || !strings.Contains(got.IssueContext, "Select") {
 		t.Fatalf("the routed issue context carries no graph evidence: %q", got.IssueContext)
+	}
+	// Frente 3 / 3B: routed context is repository-derived, so it is framed as
+	// untrusted data rather than handed over as bare headings.
+	if !repoaccess.ContainsFraming(got.IssueContext) {
+		t.Fatalf("the routed issue context is not framed as untrusted repository context: %q", got.IssueContext)
 	}
 	// The evidence above is only reachable because the wrapper resolved the
 	// checkout root and passed it down: both sources refuse an empty one, the
