@@ -318,14 +318,26 @@ No usó ni Read, ni Grep, ni Edit.
 
 No hay colisión de número con ninguna rama local ni remota. El `parser_state` no cambió de formato, por lo que hacer rollback del binario es seguro.
 
-**INCIDENTE (2026-09-25 07:04 UTC): 0175 quedó aplicada en producción por accidente.** Durante la preparación del E2E del ciclo 2, se invocó el binario recién compilado con `--version`, que no es un flag. El binario arrancó su comando por defecto: un daemon con el data dir por defecto `~/.ao/data`. Ese daemon migró la DB de producción de goose 174 a 175 y estuvo vivo unos 5 minutos, hasta que se detuvo. Consecuencias:
+**INCIDENTE (2026-09-25 07:04 UTC), ya REVERTIDO.**
 
-- El fichero `0175_agent_tool_observations.sql` de esta rama es idéntico al esquema aplicado y queda **congelado**. Cualquier cambio posterior necesita una migración nueva.
-- El inventario forense y la decisión pendiente están en el reporte de la noche.
+- Qué pasó:
+  - Se compiló `go build .` desde `backend/`. Eso produce el **wrapper de compatibilidad del daemon**, no el CLI.
+  - Se lanzó con `--version`. El wrapper ignoraba sus argumentos y arrancó un daemon sobre el data dir por defecto `~/.ao/data`.
+  - Ese daemon migró producción de goose 174 a 175 y estuvo vivo unos 5 minutos.
+- Recuperación, autorizada por Joaquín (opción B), el 2026-09-25 a las 15:08 UTC:
+  - backup consistente previo: `~/.ao/data/pre-0175-rollback-20260925T150644Z.db`, SHA256 `86df0917…5607`;
+  - ensayo sobre un clon;
+  - Down de 0175 con goose y las migraciones exactas de `4a86d5c49`.
+- Resultado:
+  - producción vuelve a goose **174**, con `integrity_check` ok y 0 violaciones de FK;
+  - no queda ningún objeto `agent_tool_*`;
+  - todas las demás tablas inventariadas son idénticas por hash antes y después.
+- Siguen, sin tocar, las escrituras secundarias del arranque accidental: finalización de usage, resync de memoria y grafo de 4 proyectos (MEDUSA no), y `renewed_at` de 2 branch locks de MEDUSA. Evidencia en `~/.ao/scratch/frente3/incident-recovery/`.
+- El guardrail que evita esta clase de incidente está en §12.
 
 ## 8. Producción (solo lectura, apertura `immutable=1`)
 
-> Estado hasta el 2026-09-24. Desde el incidente del 2026-09-25 (§7), producción está en goose **175**. `integrity_check` es ok y hay 0 violaciones de FK.
+> El incidente del 2026-09-25 (§7) llevó producción a goose 175. Se revirtió a **174** el mismo día; tras el rollback, `integrity_check` es ok y hay 0 violaciones de FK.
 
 - goose **174**
 - `integrity_check` **ok**
@@ -462,3 +474,31 @@ Codex CLI 0.153.4 hizo de revisor, en modo de solo lectura y con el encargo expl
 | P2 | Secuencias mezclando varios transcripts | `sources`; la secuencia sobre > 1 transcript es `unavailable`; el primer prompt se elige por tiempo |
 
 Codex marcó como **UNVERIFIED** build, vet, lint, short suite y el flake de tmux: su sandbox de solo lectura no deja compilar. En el ciclo 2 recibe los logs completos de los gates.
+
+## 12. Guardrail de producción (P0 tras el incidente)
+
+**Clase de incidente.** Una invocación inválida, o un binario experimental, cae en un daemon que usa el data dir por defecto (producción).
+
+**Corrección mínima, fail-closed (`backend/main.go`):**
+
+- el wrapper de desarrollo **rechaza cualquier argumento**, con exit 2;
+- exige `AO_DATA_DIR` y `AO_RUN_FILE` **explícitos**;
+- nunca cae a `~/.ao/data` ni a `~/.ao/running.json`;
+- la validación ocurre antes de abrir, crear o migrar nada.
+
+**Tests:**
+
+- `TestWrapperRefusesBeforeStarting`: el arranque nunca se invoca con `--version`, con subcomandos, con cualquier argumento o sin ubicaciones explícitas.
+- `TestWrapperProcessNeverTouchesDefaultDataDir`: ejecuta el `main()` real en un proceso hijo con un `HOME` temporal y comprueba exit 2 y que no se crea `~/.ao`. Con una mutación que desactiva el guard, el test falla: el daemon arranca confinado al `HOME` temporal.
+- `TestProbesAndMisuseNeverStartADaemon` (CLI `cmd/ao`): `--version`, `version`, `--help`, la invocación sin argumentos, un flag desconocido y un comando desconocido no arrancan daemon ni crean estado.
+
+**Riesgo residual, declarado.** Un binario experimental de `cmd/ao` ejecutado con un subcomando **explícito** de daemon (`ao daemon`, `ao server`, `ao start`) y sin `AO_DATA_DIR` sigue usando `~/.ao/data`. No es una invocación inválida: es la ruta legítima del app empaquetado, que también se compila con un `go build ./cmd/ao` sin sello de release. Hoy no hay forma de distinguir un binario "experimental" de uno "de release". Cerrarlo exige decidir una de dos cosas:
+
+- sellar las builds de release;
+- o exigir autorización explícita para migrar el data dir por defecto.
+
+Las dos son decisiones de arquitectura y release, y quedan para Joaquín. Mitigación operativa en las herramientas de experimentos de Frente 3:
+
+- `aoexp.py` compila siempre `./cmd/ao`;
+- rechaza rutas fuera de `~/.ao/scratch`;
+- fija e imprime `AO_DATA_DIR`, `AO_RUN_FILE` y el puerto antes de arrancar.

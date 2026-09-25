@@ -105,8 +105,10 @@ go build ./...
 
 ```bash
 cd backend
-# Start the daemon (loopback HTTP server on 127.0.0.1)
-go run .
+# Start the daemon (loopback HTTP server on 127.0.0.1). The wrapper refuses to
+# start unless both locations are explicit: it never falls back to ~/.ao/data or
+# ~/.ao/running.json, which hold real data. It also takes no arguments.
+AO_DATA_DIR=$HOME/.ao/dev/data AO_RUN_FILE=$HOME/.ao/dev/running.json go run .
 ```
 
 The CLI is built with Cobra. From `backend/`, run `go run ./cmd/ao --help` for
@@ -213,8 +215,10 @@ For CLI-only usage, open two terminals:
 
 ```bash
 cd backend
-go run .
+AO_DATA_DIR=$HOME/.ao/dev/data AO_RUN_FILE=$HOME/.ao/dev/running.json go run .
 ```
+
+Terminal 2 must use the same `AO_RUN_FILE` to find this daemon.
 
 **Terminal 2 -- interact while the daemon is running:**
 
