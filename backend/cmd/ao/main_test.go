@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -179,21 +180,22 @@ func TestAuthorizedStartsStillWork(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
 			cmd.Env = append(append([]string{}, c.env...), "AO_CMD_TEST_ARGS=daemon")
-			var out strings.Builder
-			cmd.Stdout, cmd.Stderr = &out, &out
+			out := &lockedBuffer{}
+			cmd.Stdout, cmd.Stderr = out, out
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
 			exited := make(chan struct{})
 			go func() { _ = cmd.Wait(); close(exited) }()
-			defer func() {
+			waitExit := func() {
 				select {
 				case <-exited:
 				case <-time.After(20 * time.Second):
 					_ = cmd.Process.Kill()
 					<-exited
 				}
-			}()
+			}
+			defer waitExit()
 			base := "http://127.0.0.1:" + strconv.Itoa(port)
 			deadline := time.Now().Add(45 * time.Second)
 			for {
@@ -211,6 +213,7 @@ func TestAuthorizedStartsStillWork(t *testing.T) {
 			if resp, err := http.Post(base+"/shutdown", "application/json", strings.NewReader("{}")); err == nil {
 				_ = resp.Body.Close()
 			}
+			waitExit()
 			if strings.Contains(out.String(), "refusing to use the default AO data dir") {
 				t.Fatalf("authorized start was refused:\n%s", out.String())
 			}
@@ -226,4 +229,23 @@ func freePort(t *testing.T) int {
 	}
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port
+}
+
+// lockedBuffer is an output sink safe to read while exec's copier goroutines
+// are still writing to it.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
