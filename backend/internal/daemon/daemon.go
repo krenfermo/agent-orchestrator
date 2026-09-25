@@ -898,7 +898,13 @@ func RunWithConfig(cfg config.Config) error {
 		// is where every role's context is assembled, budgeted and measured,
 		// and a parallel path would be a second place for the "never fail a
 		// dispatch" rule to be forgotten.
-		memoryProvisioning = memoryProvisioning.WithExternal(githubIntel)
+		//
+		// Frente 3 / 3D: AO_MEMORY_EXTERNAL=off keeps it out, so a memory
+		// A/B varies memory and nothing else. The choice is recorded in every
+		// run's policy_snapshot (contextSources.externalContext).
+		if memoryConfig(log).ExternalContext {
+			memoryProvisioning = memoryProvisioning.WithExternal(githubIntel)
+		}
 	}
 
 	// P4-E: external work management (Plane).

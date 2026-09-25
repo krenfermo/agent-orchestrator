@@ -1097,6 +1097,22 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 	case domain.WorkflowOutboxDispatched, domain.WorkflowOutboxAcknowledged:
 		// Dispatched: a previous attempt got at least as far as "about to
 		// launch," but we don't durably know if the launch itself completed.
+		//
+		// Unless that attempt is still running in THIS process: then it is not
+		// a previous attempt at all, and its launch is not unknown -- it is in
+		// progress. Recovery would probe a reviewer that does not exist yet,
+		// declare it absent and fail a review that is being launched. The live
+		// dispatch finishes the transition itself; this pass concludes nothing.
+		if entry.Status == domain.WorkflowOutboxDispatched && c.reviewInFlight.running(entry.ID, entry.DispatchGeneration) {
+			if c.log != nil {
+				c.log.Info("workflow: review dispatch in progress in this process; leaving it to finish",
+					"run", run.ID, "step", reviewStep.ID, "key", entry.IdempotencyKey)
+			}
+			if fresh, ok, ferr := c.getWorkflowStep(ctx, run.ID, reviewStep.ID); ferr == nil && ok {
+				return fresh, nil
+			}
+			return reviewStep, nil
+		}
 		return c.adoptReviewOrMarkAmbiguous(ctx, run, reviewStep, entry, sessionID, targetSHA, harness)
 	case domain.WorkflowOutboxFailed:
 		// Durably failed. Still no auto-retry — but a human-driven Continue on a
@@ -1439,6 +1455,11 @@ func (c *Coordinator) dispatchReviewFromPending(
 	claimed, err := c.store.ClaimWorkflowOutboxDispatch(ctx, entry.ID, now, dispatchGeneration)
 	if err != nil {
 		return reviewStep, err
+	}
+	if claimed {
+		// This process now executes the dispatch that owns this claim
+		// generation; recovery must not treat it as abandoned while it runs.
+		defer c.reviewInFlight.begin(entry.ID, dispatchGeneration)()
 	}
 	if !claimed {
 		if c.log != nil {

@@ -182,6 +182,10 @@ type ContextSourcesSnapshot struct {
 	MemoryMode string `json:"memoryMode,omitempty"`
 	// ContextRouter is on or off.
 	ContextRouter string `json:"contextRouter,omitempty"`
+	// ExternalContext names the external context attached to dispatches
+	// through memory provisioning ("github"), or "off". Empty on snapshots
+	// written before it was recorded.
+	ExternalContext string `json:"externalContext,omitempty"`
 }
 
 // Recorded reports whether the creating daemon stamped this snapshot.

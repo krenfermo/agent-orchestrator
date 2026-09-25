@@ -505,7 +505,8 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		router,
 		memoryProvisionerFor(memoryProvisioning),
 		log)
-	deps.ContextSources = effectiveContextSources(memoryProvisioning != nil, memoryConfig(log).Mode, router != nil)
+	memCfg := memoryConfig(log)
+	deps.ContextSources = effectiveContextSources(memoryProvisioning != nil, memCfg.Mode, router != nil, memCfg.ExternalContext)
 	coordinator := workflowcore.New(deps)
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }
@@ -514,10 +515,14 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 // recorded into every run's policy_snapshot (Frente 3 / 3C). A mode that was
 // requested but produced no provisioner (a rejected budget, no memory service)
 // is recorded as off, because off is what the run's dispatches receive.
-func effectiveContextSources(provisioned bool, mode durablememory.MemoryMode, routing bool) domain.ContextSourcesSnapshot {
-	out := domain.ContextSourcesSnapshot{MemoryMode: string(durablememory.ModeOff), ContextRouter: "off"}
+func effectiveContextSources(provisioned bool, mode durablememory.MemoryMode, routing, external bool) domain.ContextSourcesSnapshot {
+	out := domain.ContextSourcesSnapshot{MemoryMode: string(durablememory.ModeOff), ContextRouter: "off", ExternalContext: "off"}
 	if provisioned && mode.Enabled() {
 		out.MemoryMode = string(mode)
+		// External context rides on memory provisioning only.
+		if external {
+			out.ExternalContext = "github"
+		}
 	}
 	if routing {
 		out.ContextRouter = "on"
