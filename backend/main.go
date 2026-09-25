@@ -50,9 +50,9 @@ func run(args []string, lookupEnv func(string) (string, bool), start func() erro
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("%w: %s must be set explicitly. This development wrapper never falls back to the "+
-			"default ~/.ao/data or ~/.ao/running.json, which hold real data. Example: "+
-			"AO_DATA_DIR=$HOME/.ao/dev/data AO_RUN_FILE=$HOME/.ao/dev/running.json go run .",
+		return fmt.Errorf("%w: %s must be set explicitly; this development wrapper never falls back to the "+
+			"default ~/.ao/data or ~/.ao/running.json, which hold real data "+
+			"(example: AO_DATA_DIR=$HOME/.ao/dev/data AO_RUN_FILE=$HOME/.ao/dev/running.json go run .)",
 			errMisuse, strings.Join(missing, " and "))
 	}
 	return start()
