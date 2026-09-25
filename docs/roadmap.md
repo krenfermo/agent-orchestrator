@@ -164,9 +164,10 @@ opt-in por proyecto y por ejecución.
 | Shared task knowledge (P2-C) | **Integrado + medido** | 32 hechos compartidos en el mismo módulo, 0 en otro módulo |
 | Code graph | **Integrado** | `backend/internal/codegraph`, migración 0153 |
 | Context router | **Integrado, `off` por defecto** | `contextrouter`, flag `AO_CONTEXT_ROUTER` |
-| **Grae/Graphify como proveedor real** | **Pendiente** | Rama `feat/grae-graphify-memory` mergeada en ECC, pero **tener un contrato preparado no es tener un proveedor integrado** |
-| **3A — discovery y diseño** | **Hecho (docs, rama `docs/frente3-3a-project-memory`, sin integrar)** | [`frente3/`](frente3/README.md); hallazgos: el Worker no recibe memoria (bypass desde P5-A 2C), grafo de MEDUSA contaminado por un worktree (24,7 %), gaps de secretos/symlinks/framing; [ADR 0012](adr/0012-project-memory-in-tree-core.md) *Proposed* |
-| **3B — hardening de Project Memory** | **Hecho (rama `feat/frente3-3b-memory-hardening`, sin integrar)** | [`frente3/3b-implementation.md`](frente3/3b-implementation.md): wiring del Worker, elegibilidad git, symlinks fail-closed, secretos, redacción, repo como DATO, aislamiento, freshness, equivalencia incremental; memoria/router siguen `off` |
+| **Grae/Graphify como proveedor real** | **Pendiente (no integrado; evaluado como alternativa, ADR 0012 Proposed)** | Rama `feat/grae-graphify-memory` mergeada en ECC, pero **tener un contrato preparado no es tener un proveedor integrado** |
+| **3A — discovery y diseño** | **Completado e integrado en ECC** (vía merge 3B `b7c12f0b4`) | [`frente3/`](frente3/README.md); hallazgos: el Worker no recibe memoria (bypass desde P5-A 2C), grafo de MEDUSA contaminado por un worktree (24,7 %), gaps de secretos/symlinks/framing; [ADR 0012](adr/0012-project-memory-in-tree-core.md) *Proposed* |
+| **3B — hardening de Project Memory** | **Completado e integrado en ECC** (merge `b7c12f0b4`, sin migración: prod sigue en goose 174) | [`frente3/3b-implementation.md`](frente3/3b-implementation.md): wiring del Worker, elegibilidad git, symlinks fail-closed, secretos, redacción, repo como DATO, aislamiento, freshness, equivalencia incremental; memoria/router siguen `off` |
+| **3C — instrumentación de la exploración real del agente** | **Siguiente, no iniciado** | lecturas de ficheros por tool call, split harness/AO, modo de memoria congelado por run ([`frente3/06-benchmark-plan.md`](frente3/06-benchmark-plan.md) §2) |
 
 **Nota de honestidad exigida:** Grae/Graphify **no** debe marcarse integrado. Lo
 que existe es el contrato/adaptador; falta evaluarlo como proveedor real con

@@ -2,7 +2,7 @@
 
 Fecha: 2026-09-24 · Rama: `feat/frente3-3b-memory-hardening` (worktree
 `../ao-frente3-3b`, desde ECC `3030d85f2`) · Estado: **implementado y probado
-en scratch; sin merge ni push; producción sin tocar.**
+en scratch; integrado en ECC con el merge `b7c12f0b4`; producción sin tocar.**
 
 3B no construye Project Memory. Hace **correcta y segura** la infraestructura
 que ya existía (`projectmemory`, `codegraph`, `contextrouter`, packs, UI de
