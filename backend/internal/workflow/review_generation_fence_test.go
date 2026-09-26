@@ -32,7 +32,7 @@ func reviewOutboxEntry(t *testing.T, store *fakeStore) domain.WorkflowOutboxEntr
 // reclaimAsForeignGeneration models a VALID ownership change: N's claim is
 // released through the generation-conditioned release, and generation N+1 --
 // a dispatch live somewhere else, not yet bound to the step -- wins the CAS.
-func reclaimAsForeignGeneration(t *testing.T, ctx context.Context, store *fakeStore, clk *fakeClock, next string) string {
+func reclaimAsForeignGeneration(ctx context.Context, t *testing.T, store *fakeStore, clk *fakeClock, next string) string {
 	t.Helper()
 	e := reviewOutboxEntry(t, store)
 	released, err := store.ReleaseDispatchedWorkflowOutboxGeneration(ctx, e.ID, "", e.DispatchGeneration)
@@ -92,7 +92,7 @@ func TestReviewLaunchStaleGenerationIsFencedAfterValidReclaim(t *testing.T) {
 			var stale string
 			endN1 := func() {}
 			reclaim := func() {
-				stale = reclaimAsForeignGeneration(t, ctx, store, clk, next)
+				stale = reclaimAsForeignGeneration(ctx, t, store, clk, next)
 				// N+1 is a dispatch live in this process (the only way a valid
 				// reclaim happens under the daemon lock): reserved, mid-flight.
 				endN1 = c.ReserveReviewDispatchForTest(reviewOutboxEntry(t, store).ID, next)
@@ -177,7 +177,7 @@ func TestReviewLaunchFailureOfASupersededDispatchLeavesTheSuccessorAlone(t *test
 
 	const next = "wfc-generation-N+1"
 	launcher.beforePreflight = func() {
-		reclaimAsForeignGeneration(t, ctx, store, clk, next)
+		reclaimAsForeignGeneration(ctx, t, store, clk, next)
 		t.Cleanup(c.ReserveReviewDispatchForTest(reviewOutboxEntry(t, store).ID, next))
 	}
 	if _, err := c.ContinueRun(ctx, created.Run.ID); err != nil {
