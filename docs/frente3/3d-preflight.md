@@ -367,3 +367,33 @@ Es profundo, por contenido.
 - Restricción del laboratorio: las tareas no pueden depender de red loopback. El fixture no la usa.
 - Estado de Claude que sigue legible porque Claude lo necesita: `shell-snapshots`, `sessions`, `session-env`, y la lista de proyectos de `~/.claude.json` (solo rutas, confianza y versión, sin prompts). Nada de esto contiene etiquetas de brazo.
 - Caché de prompts del proveedor (servidor), cuenta y límites: compartidos y no aislables. Se reparten con el intercalado y se reportan como covariables.
+
+### Revisión de Codex del ciclo 3: NO-GO (P0 0 / P1 3 / P2 5 / P3 1)
+
+Revisión completa en `~/.ao/scratch/frente3/reviews/3d-preflight/cycle3/redteam/review.md`.
+
+**Cerrado según Codex:**
+
+- La fuga del ciclo 2 (`AO_DATA_DIR` → `ao.db` → `policy_snapshot`, API de exploración).
+- El fencing de generación en la topología soportada.
+- La procedencia del congelamiento.
+- La igualdad de tratamiento entre brazos en los datos.
+- Producción intacta.
+
+**P1 abiertos (todos en el harness, ninguno en el producto):**
+
+1. `~/.claude.json` sigue legible (el perfil hace `allow default` y solo niega `~/.claude/projects`). Contiene rutas de corridas antiguas de 3C/3D con los componentes literales `/assisted/` y `/off/`. No mapean el tag opaco actual a su brazo, pero son etiquetas explícitas alcanzables. La sonda no inspeccionaba ese fichero, y la documentación afirmaba lo contrario.
+2. `check_probe` acepta un canal de la sonda que devolvió error (`processTable`, `ownTreeInventory`, `lan`). Con esa mutación, una muestra seguiría siendo VALID.
+3. El `reviewDepth` efectivo se registra pero no se exige. Con la mutación light→full, la muestra pasa.
+
+**P2:**
+
+- Aserciones no fatales: el commit del rebuild, `explorationSettled`, `tmuxTeardown`, y una excepción genérica en `post_checks` que puede dejar `COMPLETE`.
+- La mayor parte de `~/.claude.json` solo se observa, no se congela.
+- La rama `not failed_classes` de la regla de capacidad puede ocultar un fallo posterior no relacionado.
+- El fence depende del launcher concreto: falta un test de la cadena de producción.
+- La mutación G4 sobrevive, y `TestP9Crash_C10` es flaky (no es topología de producción).
+
+**P3:** la publicación del preregistro está anclada solo localmente (commit sin push).
+
+**PRECONDITION_3D = NO-GO.** 3D no se ejecuta.
