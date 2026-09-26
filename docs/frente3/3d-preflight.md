@@ -397,3 +397,112 @@ Revisión completa en `~/.ao/scratch/frente3/reviews/3d-preflight/cycle3/redteam
 **P3:** la publicación del preregistro está anclada solo localmente (commit sin push).
 
 **PRECONDITION_3D = NO-GO.** 3D no se ejecuta.
+
+## Ciclo 4 — cierre del NO-GO del ciclo 3
+
+Autorización: un solo ciclo, solo para cerrar los hallazgos. Los P1 eran del harness. Producto: únicamente tests nuevos (`35e3ad6e7`); ningún cambio en código productivo.
+
+### P1-1: estado de Claude aislado por repetición
+
+- Cada repetición tiene un **`HOME` de proveedor propio** (`<own>/home`), compartido por su daemon y sus agentes.
+  - El daemon también lo usa: AO registra la confianza del workspace en el `~/.claude.json` del `HOME` del daemon y localiza los transcripts ahí.
+  - Consecuencia: el `~/.claude.json` real del operador ya **no recibe ninguna entrada** del laboratorio. Se comprueba antes y después de cada intento (`real_claude_json_lab_entries`), y cualquier entrada aborta.
+- `CLAUDE_CONFIG_DIR` descartado: con un directorio distinto, Claude busca otra entrada del llavero (`loggedIn: false`). Copiar la credencial está prohibido.
+- Solución verificada:
+  - `HOME` aislado con `Library/Keychains` como **symlink** al llavero real. `security(1)` resuelve el llavero de login por `$HOME`.
+  - Claude autentica exactamente como siempre (`loggedIn: true`, llamada real OK) y la credencial nunca se lee ni se copia.
+- **Contenido del `HOME` de proveedor:**
+  - `settings.json` y `.gitconfig`: copias del snapshot preregistrado.
+  - `~/.claude.json`: semilla mínima con solo banderas de onboarding.
+  - Sin plugins ni skills del operador.
+  - Sin autoinstalación del marketplace oficial (`CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`). Un ensayo mostró que un `HOME` nuevo lo descarga, y su README contiene la palabra "assisted".
+- **`agent.sb`** niega todo el estado real de proveedores: `~/.claude`, `~/.claude.json*`, `~/.cache/claude`, las cachés, Application Support y logs de Claude y OpenAI, y `~/.codex` salvo `auth`, `skills` y `plugins` en solo lectura.
+- **La sonda** comprueba explícitamente cada uno de esos almacenes (`providerState`), incluido el `~/.claude.json` real y sus hermanos, y que el `HOME` del agente es el de la repetición.
+- **Estado del lado del servidor** (flags de funcionalidad `cachedGrowthBookFeatures` y `cachedExperimentFeatures`, skills y plugins sincronizados de la cuenta). Los ensayos mostraron que no es determinista en un `HOME` nuevo:
+  - un `userID`/`machineID` aleatorio por home daba flags distintas (3 de 724);
+  - la sincronización asíncrona llegaba o no según el tiempo;
+  - aun con IDs fijos, 13 flags cambiaron entre la plantilla y la corrida, porque hay flags dinámicas (p. ej. avisos de capacidad).
+
+  Solución:
+  1. El preregistro construye **una plantilla de home de Claude**: IDs fijos de laboratorio derivados de la semilla preregistrada, nunca copiados del operador; se inicializa hasta que el estado queda completo y estable en dos corridas seguidas.
+  2. Se guarda y digiere; cada repetición parte de una copia idéntica.
+  3. Durante las corridas no se vuelve a pedir nada al servidor (`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, verificado: el estado queda idéntico tras llamadas reales).
+  4. Tras cada corrida el estado debe seguir igual a la plantilla; si no, aborta.
+
+### P1-2: sonda fail-closed
+
+- `check_probe` exige los 9 canales obligatorios: env, processTable, filesystemReach, providerState, ownTreeInventory, loopback, lan, gatewayControlPlane y escapes.
+- Un canal falla si:
+  - falta o está mal formado;
+  - contiene `error`, aunque además traiga valores plausibles;
+  - trae valores fuera de lo esperado.
+- El shim escribe un marcador de lanzamiento **antes** de la sonda. Cada marcador exige un reporte legible, con `rc=0` y stderr vacío.
+- Los ensayos hicieron abortar el lote por tres causas reales, ya corregidas:
+  - `healthz` 502 antes de que el daemon escuche (ahora solo se acepta 502 en esa ruta);
+  - sockets unix contados como archivos omitidos;
+  - `ENOBUFS` con varias sondas escaneando a la vez (reintento acotado; si persiste, error).
+
+### P1-3: reviewDepth efectivo
+
+- Se exige requested = light, source = explicit **y** effective = light en el checkpoint durable `review_depth_decision`.
+- Si falta el checkpoint o hay otro valor: ABORT.
+- Las lecturas de la DB de la repetición pasan de `immutable=1` a `mode=ro`, que respeta el WAL. Los tests lo detectaron: con `immutable`, una lectura podía ser anterior al último commit.
+
+### P2 cerrados
+
+- Aserciones fatales:
+  - commit del rebuild igual a EXPECTED_FIXTURE_SHA;
+  - `explorationSettled`;
+  - teardown de tmux (el servidor debe dejar de responder);
+  - `contextRouter` = off;
+  - cualquier excepción en post-checks = ABORTED;
+  - el lote nunca termina `COMPLETE` si hay menos muestras VALID que las planeadas, si cambió producción o si hubo una excepción.
+- **Capacidad:** se eliminó la rama que permitía que un checkpoint de capacidad ocultara un fallo posterior. Ahora hace falta que todos los intentos fallidos sean de capacidad; un checkpoint `review_capacity_retry` por sí solo nunca invalida una muestra. Además, como regla de análisis se reportan los eventos por brazo y hay un análisis de sensibilidad que cuenta los inválidos por capacidad como fallos.
+- **Cadena del fence:** `TestReviewerLaunchFenceSurvivesTheProductionDecoratorChain` construye la cadena con la función de composición real (`instrumentAgentDispatch`, los tres decoradores activos) y el launcher real. Las mutaciones F1 y F2 (un decorador descarta el fence) las detecta.
+- **G4:** `TestReviewReleaseBySupersededHolderSpendsNothingOnTheSuccessorsBudget` detecta la mutación.
+- **Guarda P9-C10 en el laboratorio:** una repetición con confirmaciones de dispatch de worker duplicadas se aborta.
+
+### TestP9Crash_C10: NEEDS_ATTENTION del producto (fuera del alcance de 3D)
+
+Investigación completa: `~/.ao/scratch/frente3/reviews/3d-preflight/cycle4/p9c10-investigation.md`.
+
+- **No** es solo una topología no soportada. `adoptLiveLaunch` no tiene un claim atómico de "una confirmación por launch".
+- Con **un solo daemon**, dos `ContinueRun` concurrentes sobre un launch "unconfirmed" pueden confirmar dos veces. Medido: 5 de 400 rondas.
+- Condición de disparo: el daemon murió entre crear el runtime del worker y confirmarlo, y al reiniciar el runtime sigue vivo.
+- Consecuencia: filas duplicadas en el ledger. No hay doble worker.
+- No se corrige en este ciclo porque sería un cambio productivo material.
+- En 3D no ocurre (ningún daemon del laboratorio se cae a mitad de un lanzamiento), y la guarda del laboratorio aborta la repetición si ocurriera.
+
+### Mutaciones del harness (`mutate_harness.py`)
+
+`test_harness.py` tiene 32 tests. Se reintroducen 13 defectos (H1–H13), uno por vez, en una copia temporal de `run.py`, y el control pasa. Todos los mutantes mueren. Entre ellos:
+
+- H1: se ignoran los errores de canal;
+- H2: no se exige el `reviewDepth` efectivo;
+- H3: un checkpoint de capacidad oculta el resultado;
+- H4: `COMPLETE` con muestras faltantes;
+- H5: una excepción cuenta como muestra;
+- H8: no se exige comprobar el `~/.claude.json` real;
+- H10: un marcador sin reporte;
+- H13: se aceptan confirmaciones duplicadas.
+
+### Ciclo 4 — preregistro del mini-E2E (publicado ANTES de ejecutarlo)
+
+Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c4minie2e-20260926T100425.json`, sha256 `a5a40e8fb8b5a8dc31009fa9d6df1459dd109d9f731110673e155c719876b0f8`
+
+| Valor | Preregistrado |
+|---|---|
+| PRODUCT_HEAD | `35e3ad6e7` (binario `vcs.revision=35e3ad6e71e3`, `vcs.modified=false`) |
+| EXPECTED_AO_BINARY_SHA | `2f72ddf8974fb0bbdb0afdfa366617a1f90870c6fae47d5952d235c89fd0354c` (firmado ad-hoc `-o restrict`) |
+| EXPECTED_FIXTURE_SHA | `b09478c0afd7e1cf1ea4af1b40d30ae4a2c8d388` |
+| EXPECTED_HARNESS_SHA | `0e5e7fcb7d93bcf4fcf9a7e58132b82bf78434fe0cf33b7ee9f9be76164f6f2b` |
+| Fingerprint FROZEN del proveedor (digest) | `1ca42cbcf28cc5d61a2c18705973c1e08fe796b210a5a7ab535a4909b4b5a1c5` |
+| Snapshot del proveedor | `.claude/settings.json`=a1bd71fb14f3…, `.codex/config.toml`=da1f8924e536…, `.codex/rules`=26ec784c13a2…, `.gitconfig`=7c6485a8ca7a… |
+| Plantilla de Claude (estado del servidor) | flags `cbb528f735e9…`, experimentos `176deca107b6…`, skills sincronizadas `140478f4406a…` |
+| Proveedor/modelo | worker {'effortLevel': 'high', 'harness': 'claude-code', 'model': 'opus[1m]'}; reviewer {'harness': 'codex', 'model': 'gpt-5.6-sol', 'reasoningEffort': 'medium'} |
+| reviewDepth | {'effective': 'light', 'requested': 'light', 'source': 'explicit'} |
+| memoryMode / router / external | {'assisted': 'assisted (AO_MEMORY_MODE=assisted)', 'off': 'off (AO_MEMORY_MODE unset)'} / off / off (AO_MEMORY_EXTERNAL=off) |
+| planSha (semilla y plan privados) | `389555efc1b4b2652821a685c9202d6659ca6ab58505dc8e6dff1b3152f20af2`, N=2 por brazo |
+
+Políticas preregistradas (texto completo en el archivo): capacity, isolation, probe, failure.
+
