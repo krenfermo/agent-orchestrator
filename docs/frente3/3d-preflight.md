@@ -177,3 +177,10 @@ Harness: `~/.ao/scratch/frente3/tools/preflight3d.py`.
 - **D. Orden:** pares barajados con semilla aleatoria; la semilla y el plan exacto se guardan en `results.json`.
 - **E. Fixture:** por cada repetición se verifican el origen, el SHA exacto y el árbol limpio; se aborta si no coinciden.
 - **F. Contexto externo:** `AO_MEMORY_EXTERNAL=off` se imprime en el preflight y se verifica `externalContext=off` en el snapshot.
+
+### Procesos huérfanos entre repeticiones (hallado durante el ciclo 2)
+
+- AO mantiene vivas las sesiones de los agentes cuando el daemon se para. Es intencional, para poder recuperarlas.
+- Tras los E2E quedaban **28 servidores tmux de scratch** con paneles de reviewer de runs anteriores. En 3D eso sería contaminación de recursos entre repeticiones.
+- Se cerraron (solo sockets cuyos paneles estaban todos bajo `~/.ao/scratch/frente3/`).
+- El harness ahora destruye el socket `aolab-<tag>` de cada repetición justo después de parar su daemon (`tmuxTeardown`).
