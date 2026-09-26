@@ -1156,6 +1156,9 @@ func RunWithConfig(cfg config.Config) error {
 		}
 		return err
 	}
+	// The last composition-time read of the memory/router switches is above
+	// (MemoryMode); from here on no child may inherit them.
+	withholdDaemonOnlySwitchesFromChildren()
 	previewDone := preview.NewPoller(store, sessionSvc, "http://"+srv.Addr().String(), preview.PollerConfig{Logger: log}).Start(ctx)
 
 	// P4-G: keep every project's code graph current without anybody running a
