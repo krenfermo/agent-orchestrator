@@ -184,3 +184,54 @@ Harness: `~/.ao/scratch/frente3/tools/preflight3d.py`.
 - Tras los E2E quedaban **28 servidores tmux de scratch** con paneles de reviewer de runs anteriores. En 3D eso sería contaminación de recursos entre repeticiones.
 - Se cerraron (solo sockets cuyos paneles estaban todos bajo `~/.ao/scratch/frente3/`).
 - El harness ahora destruye el socket `aolab-<tag>` de cada repetición justo después de parar su daemon (`tmuxTeardown`).
+
+## Ciclo 3 — preregistro del mini-E2E (publicado ANTES de ejecutarlo)
+
+Archivo privado (fuera del alcance de los agentes): `~/.ao/scratch/frente3/3d-private/prereg-minie2e-20260926T003041.json`
+sha256 del archivo: `4abfa69b0ffdde62fe7c1f8b9b174b595b4fe8634ebefcfa92c07fccda7e211b`
+
+| Valor | Preregistrado |
+|---|---|
+| EXPECTED_FIXTURE_SHA | `b09478c0afd7e1cf1ea4af1b40d30ae4a2c8d388` (tomado de la evidencia del ciclo 2, no del fixture a validar) |
+| EXPECTED_AO_BINARY_SHA | `9e2b5739eda47de5b2b252a39a8914a2e87ed5344daef78c8514f07d029849f3` (binario de `e85a620a8`, compilado desde un clon limpio, firmado ad-hoc `-o restrict`; sin firmar: `cef3c231669c4d5a4c90e8696e6cad514e9ff9203089cba6aafcb9e9e39007cf`) |
+| EXPECTED_HARNESS_SHA | `a9b08247c9227a9c90136812a8ba6bc392d9bcf13703a658d878a75831b00eac` |
+| planSha (semilla y plan privados) | `d3b64ecb7e0a6433106afb5b4305fbdb0a34d61f217e47f027da54aed9caab59` |
+| N por brazo | 2 |
+| Snapshot Codex config.toml / rules | `96db92453db61e1a…` / `e20489d400dbb8cc…` |
+| Reintentos por capacidad | máximo 2 por muestra (regla completa abajo) |
+
+Archivos del harness y su sha256:
+
+- `.ao/scratch/3c/run-claude.json`: `4e7ffd384dfa8db7…`
+- `.ao/scratch/frente3/tools/aoexp.py`: `65ab8d6b960e59c2…`
+- `.ao/scratch/frente3/tools/lab3d/agent.sb`: `786e33358c4d019a…`
+- `.ao/scratch/frente3/tools/lab3d/analyze.py`: `4def361102dd1f71…`
+- `.ao/scratch/frente3/tools/lab3d/gateway.py`: `153846521447af17…`
+- `.ao/scratch/frente3/tools/lab3d/labcore.py`: `ca41f856ae1f0adb…`
+- `.ao/scratch/frente3/tools/lab3d/prereg.py`: `9a374c0fcb8dce9d…`
+- `.ao/scratch/frente3/tools/lab3d/probe.py`: `ed297de79d88be63…`
+- `.ao/scratch/frente3/tools/lab3d/run.py`: `914c797ad6629933…`
+- `.ao/scratch/frente3/tools/lab3d/shim.sh.tmpl`: `8111cf305467d638…`
+
+Regla de capacidad preregistrada:
+
+> An attempt is INVALID_PROVIDER_CAPACITY iff (1) AO durably recorded at least one provider capacity event (workflow_attempts.error_class in rate_limited|capacity_exhausted, or a review_capacity_retry checkpoint), (2) the run did not reach state=completed, and (3) every failed attempt of the run carries a capacity error class (no non-capacity failure). Such an attempt is kept as evidence, never counted, and the SAME planned sample (same task, same arm, same plan position) is re-run under a fresh opaque tag, at most 2 times. A third capacity-invalid attempt for one sample STOPS the experiment (NEEDS_ATTENTION). Every other attempt that passed its preconditions is a VALID sample whatever its outcome (completed, failed, needs_attention, timeout); a completed run that saw capacity events is VALID and reports capacityEvents as a covariate. No sample is ever selected, dropped or re-run on the basis of its outcome.
+
+Precondiciones que ABORTAN (el intento no cuenta y el lote se detiene):
+
+- externalContext != off
+- persisted reviewDepth != light/explicit
+- fixture clone SHA != EXPECTED_FIXTURE_SHA
+- fixture clone dirty
+- fixture source SHA != EXPECTED_FIXTURE_SHA
+- AO binary sha256 != EXPECTED_AO_BINARY_SHA
+- harness digest != EXPECTED_HARNESS_SHA
+- provider FROZEN fingerprint != pre-registered (before or after)
+- live aolab tmux server from an earlier repetition
+- arm switch visible in the run's tmux global env
+- non-opaque tag/project/socket
+- probe: explicit arm label reachable
+- probe: reach table != expected
+- probe: a loopback port other than the gateway connectable
+- gateway: response-leak violation
+- no probe report from a launched agent
