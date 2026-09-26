@@ -286,6 +286,16 @@ type ReviewerLaunchRequest struct {
 	WorkflowStepID string
 	OwnerUserID    domain.UserID
 	Generation     int64
+
+	// LaunchFence, when set, is the dispatch's last authorization check. A
+	// launcher calls it immediately before the irreversible act -- after any
+	// context it assembles, right before the runtime creates the reviewer --
+	// and launches nothing if it returns an error, returning that error as-is.
+	// It re-reads durable state (the claim's exact dispatch generation, the
+	// step, the run), so a dispatch whose claim passed to a newer generation
+	// while it was preparing never launches. Decorators pass it through
+	// untouched; nil means the caller asked for no fence.
+	LaunchFence func(stdctx.Context) error
 }
 
 // ReviewerLaunchResult is the runtime handle created for a reviewer launch.
@@ -1714,6 +1724,17 @@ func (c *Coordinator) dispatchReviewFromPending(
 		OwnerUserID:    runOwner,
 		Generation:     int64(cycleNumber),
 	}
+	// The last durable check, carried INTO the launch. Context provisioning
+	// runs inside the launcher chain and can take seconds, so a check made
+	// here alone would still leave that whole window between it and the
+	// external act. The launcher calls this immediately before the runtime
+	// creates the reviewer; any refusal launches nothing.
+	launchReq.LaunchFence = func(fctx stdctx.Context) error {
+		if ok, why := c.reviewLaunchStillAuthorized(fctx, run.ID, reviewStep.ID, entry, authorization); !ok {
+			return fmt.Errorf("%w: %s", errReviewLaunchFenced, why)
+		}
+		return nil
+	}
 	// P2-C §7: a Reviewer is entitled to exactly what the Worker it reviews was
 	// entitled to. Reviewing a change against knowledge the author did not have
 	// is how a review reports a "regression" that is actually a decision the
@@ -1732,6 +1753,17 @@ func (c *Coordinator) dispatchReviewFromPending(
 		projectmemory.WithRoleHead(c.withTaskAuthority(ctx, run), targetSHA),
 		c.expectedWriteSetFor(ctx, run))
 	launch, adopted, err := c.ensureReviewerLaunched(reviewCtx, launchReq, authorization.HandleID)
+	if errors.Is(err, errReviewLaunchFenced) {
+		// Refused at the last moment, with nothing attempted: the same close-out
+		// as the READY TO LAUNCH refusal above, never a launch failure.
+		why := strings.TrimPrefix(err.Error(), errReviewLaunchFenced.Error()+": ")
+		if c.log != nil {
+			c.log.Warn("workflow: refusing to launch a reviewer whose authorization no longer holds",
+				"run", run.ID, "step", reviewStep.ID, "reviewRun", reviewRunID, "why", why, "at", "launch fence")
+		}
+		return c.abandonUnlaunchedReviewRun(ctx, run, reviewStep, entry, reviewRunID,
+			"review_dispatch: "+why, why)
+	}
 	if err != nil {
 		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStageLaunch, fmt.Errorf("launch reviewer: %w", err))
 	}

@@ -286,6 +286,15 @@ type fakeReviewerLauncher struct {
 	// change durable state in the window between the review identity being
 	// created and the reviewer existing.
 	beforeLaunch func()
+	// beforePreflight fires inside Preflight -- AFTER the dispatch's READY TO
+	// LAUNCH re-check and before the launch fence -- so a test can move the
+	// durable claim in the window only the fence covers.
+	beforePreflight func()
+	// honorFence makes Launch behave like the production launcher: it runs the
+	// provisioning window (beforeLaunch), consults req.LaunchFence, and only
+	// then "creates" the reviewer, counting launchCalls at creation rather than
+	// at entry.
+	honorFence bool
 	// externalExited models AO's own reviewer whose process has exited while its
 	// session lingers.
 	externalExited map[string]bool
@@ -315,10 +324,29 @@ type fakeReviewerLauncher struct {
 
 func (f *fakeReviewerLauncher) Preflight(_ context.Context, _ domain.ReviewerHarness, _ string) error {
 	f.preflightCalls++
+	if hook := f.beforePreflight; hook != nil {
+		f.beforePreflight = nil
+		hook()
+	}
 	return f.preflightErr
 }
 
-func (f *fakeReviewerLauncher) Launch(_ context.Context, req workflowcore.ReviewerLaunchRequest) (workflowcore.ReviewerLaunchResult, error) {
+func (f *fakeReviewerLauncher) Launch(ctx context.Context, req workflowcore.ReviewerLaunchRequest) (workflowcore.ReviewerLaunchResult, error) {
+	if f.honorFence {
+		// The production launcher's shape: context provisioning first (the
+		// beforeLaunch window), then the fence, then the runtime creating the
+		// reviewer -- which is the only thing launchCalls counts in this mode.
+		f.lastReq = req
+		if hook := f.beforeLaunch; hook != nil {
+			f.beforeLaunch = nil
+			hook()
+		}
+		if req.LaunchFence != nil {
+			if err := req.LaunchFence(ctx); err != nil {
+				return workflowcore.ReviewerLaunchResult{}, err
+			}
+		}
+	}
 	f.launchCalls++
 	f.lastPrompt = req.Prompt
 	f.lastReq = req
