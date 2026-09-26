@@ -538,6 +538,16 @@ func effectiveContextSources(provisioned bool, mode durablememory.MemoryMode, ro
 // the same reason: an operator who mistyped a setting must get the previous
 // behaviour and a warning, not a dispatch shaped by a guess.
 func memoryConfig(log *slog.Logger) durablememory.Config {
+	if cfg, ok := resolvedMemoryConfig(); ok {
+		return cfg
+	}
+	return readMemoryConfig(log)
+}
+
+// readMemoryConfig is memoryConfig's environment read. RunWithConfig does it
+// once, before any child starts, and then withholds the variables (see
+// resolveAndWithholdDaemonOnlySwitches).
+func readMemoryConfig(log *slog.Logger) durablememory.Config {
 	cfg, err := durablememory.ConfigFromEnv()
 	if err != nil {
 		if log != nil {
@@ -666,7 +676,7 @@ func projectMemoryBaselineRecorder(log *slog.Logger) *projectmemory.Recorder {
 // path (docs/p2-project-memory-audit.md §5, §8). A nil repository keeps the
 // pre-P2-A JSON-backed source, and the flag still gates everything.
 func contextRouterFor(log *slog.Logger, memoryRepo durablememory.Repository, memory *durablememory.Service) *contextrouter.Router {
-	if !contextrouter.Enabled() {
+	if !contextRouterEnabled() {
 		return nil
 	}
 	// P2-B: when the memory mode is enabled, memory reaches the roles through

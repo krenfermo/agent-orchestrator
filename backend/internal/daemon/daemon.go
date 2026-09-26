@@ -124,6 +124,9 @@ func RunWithConfig(cfg config.Config) error {
 	ignoreBrokenPipeSignal()
 
 	log := newLogger()
+	// Before anything can start a child: read the memory/router switches once
+	// and drop them from this process's environment.
+	defer resolveAndWithholdDaemonOnlySwitches(log)()
 	log.Info("daemon starting", "data_dir", cfg.DataDir, "listen", cfg.Addr(), "frontend_root", cfg.WebRoot)
 	// P9: the daemon's two identities, resolved before anything can launch or
 	// publish a run-file. A data dir whose installation identity cannot be read
@@ -1156,9 +1159,6 @@ func RunWithConfig(cfg config.Config) error {
 		}
 		return err
 	}
-	// The last composition-time read of the memory/router switches is above
-	// (MemoryMode); from here on no child may inherit them.
-	withholdDaemonOnlySwitchesFromChildren()
 	previewDone := preview.NewPoller(store, sessionSvc, "http://"+srv.Addr().String(), preview.PollerConfig{Logger: log}).Start(ctx)
 
 	// P4-G: keep every project's code graph current without anybody running a
