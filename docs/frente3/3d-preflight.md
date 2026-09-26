@@ -506,3 +506,42 @@ Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c4minie2e-20260926T100
 
 Políticas preregistradas (texto completo en el archivo): capacity, isolation, probe, failure.
 
+
+### Ciclo 4 — mini-E2E (`3d-private/batch-20260926T100457`, binario `35e3ad6e7`, preregistro `a5a40e8f…`)
+
+| Muestra | Brazo | Estado | Review | reviewDepth pedido / efectivo | `contextSources` | Manifests | Sondas (marcadores / reportes) | Capacidad | Colisión / carrera / confirmación duplicada | `~/.claude.json` real |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | assisted | completed | complete/approved (codex) | light / light | assisted/off/off | worker, reviewer | 10/10 PASS | 0 | 0/0/0 | 0 entradas |
+| 2 | off | completed | complete/approved (codex) | light / light | off/off/off | — | 11/11 PASS | 0 | 0/0/0 | 0 entradas |
+| 3 | off | completed | complete/approved (codex) | light / light | off/off/off | — | 10/10 PASS | 0 | 0/0/0 | 0 entradas |
+| 4 | assisted | completed | complete/approved (codex) | light / light | assisted/off/off | worker, reviewer | 10/10 PASS | 0 | 0/0/0 | 0 entradas |
+
+- Veredicto del lote: **COMPLETE**. 4/4 VALID, sin intentos inválidos ni reemplazos.
+- En todas: rebuild = `b09478c0`, exploración estable, teardown OK, estado del servidor de Claude igual a la plantilla, fingerprint FROZEN sin deriva.
+- **Diferencial de cegamiento:** 0 diferencias consistentes con el brazo, ni en el worker ni en el reviewer.
+  - Todo lo que varía lo hace también dentro de un mismo brazo: IDs y tokens por repetición, reflogs de git, transcripts y sesiones de la propia repetición, telemetría local de Go.
+  - El gateway dejó pasar las mismas rutas en ambos brazos.
+- **Nota:** el reviewer puede leer el transcript del worker de **su misma repetición**, que en ASSISTED contiene el pack. Es contenido del tratamiento dentro de la misma repetición, no una etiqueta; el reviewer recibe además su propio pack.
+- Producción: goose 174, mismo mtime y tamaño antes y después.
+
+### Ciclo 4 — gates (HEAD `6de7684d1`; el código productivo es igual a `35e3ad6e7`)
+
+Todos se corrieron con `GOTMPDIR` y `TMPDIR` **fuera de `~/.ao`** desde el principio. Logs en `~/.ao/scratch/frente3/reviews/3d-preflight/cycle4/gates/`.
+
+| Gate | Resultado |
+|---|---|
+| build | PASS |
+| vet `./...` | PASS |
+| gofmt (archivos cambiados vs `e2e9c741d`) | 0 archivos |
+| lint delta vs `e2e9c741d` (`./...`) | 0 issues |
+| race: daemon, tmux, projectmemory, contextrouter | PASS |
+| race: `./internal/workflow/...` completo | PASS |
+| short suite completa (2 corridas) | Solo fallan dos tests preexistentes e intermitentes; el resto pasa |
+
+Los dos tests que fallan en la short suite:
+
+- **`TestRealTmux_Large*PromptArrivesAsOneBracketedPaste`**: test contra tmux real, sensible a la carga.
+  - Aislado: 20/20 en HEAD y 20/20 en la base.
+  - Con el paquete completo 5 veces: HEAD 5/5, **base 1 fallo de 5** (el test hermano).
+  - Es preexistente y esta rama no lo introduce: el paquete tmux no cambió en este ciclo.
+- **`TestP9Crash_C10`**: la carrera de producto documentada arriba. También falla en la base.
