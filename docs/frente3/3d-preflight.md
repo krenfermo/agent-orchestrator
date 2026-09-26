@@ -545,3 +545,35 @@ Los dos tests que fallan en la short suite:
   - Con el paquete completo 5 veces: HEAD 5/5, **base 1 fallo de 5** (el test hermano).
   - Es preexistente y esta rama no lo introduce: el paquete tmux no cambió en este ciclo.
 - **`TestP9Crash_C10`**: la carrera de producto documentada arriba. También falla en la base.
+
+### Ciclo 4 — revisión de Codex: SIN VEREDICTO (límite de uso)
+
+Codex agotó su límite de uso a mitad de la auditoría y no emitió veredicto. El próximo intento es posible el 2026-09-28 a las 10:42; el prompt está en `~/.ao/scratch/frente3/reviews/3d-preflight/cycle4/codex/`. El mismo límite afecta al reviewer Codex del laboratorio, así que tampoco se puede correr un mini-E2E nuevo hasta entonces.
+
+**Hallazgos parciales de Codex, ya cerrados en el harness** (sin validar todavía con una corrida real):
+
+1. `providerState` se aceptaba aunque omitiera la mayoría de los almacenes. Ahora cada almacén de `PROVIDER_STORES` debe aparecer; un test asegura que la lista de la sonda y la del runner son idénticas; la mutación H15 se detecta.
+2. Un resultado LAN vacío se aceptaba. Ahora hace falta al menos una dirección escaneada; la mutación H16 se detecta.
+3. Cada `CODEX_HOME` nuevo descargaba catálogos remotos (`cache/remote_plugin_catalog`, `cache/codex_apps_tools`, ~27 MB) con contenido distinto en las 4 repeticiones. La sonda solo registraba el tamaño de los archivos grandes.
+   - Ahora se hashean por contenido.
+   - El `config.toml` del laboratorio desactiva las funciones `apps` y `plugins` de Codex, igual en ambos brazos.
+   - **Sin validar:** requiere una corrida real de Codex.
+
+Los otros hallazgos parciales confirmaron lo afirmado:
+
+- el código productivo no cambió desde `35e3ad6e7`;
+- el agujero de `~/.claude.json` del ciclo 3 está cerrado;
+- 34/34 tests y 14/14 mutantes, verificado de forma independiente;
+- los tests de fencing del daemon pasan.
+
+La parte de fencing de workflow quedó en UNKNOWN: el disco se llenó.
+
+**Incidente de disco:** el volumen de datos llegó al 100% (483 MB libres). Se borraron únicamente cachés de compilación de Go creadas por las revisiones y gates de estos ciclos (13.5 GB); ninguna evidencia. Producción verificada después, en solo lectura: goose 174, `integrity_check` ok, sin violaciones de FK, mismo mtime y tamaño.
+
+**Estado:** el mini-E2E `batch-20260926T100457` (4/4 VALID) se ejecutó con el harness **anterior** a estas tres correcciones, así que no vale como evidencia final. Hace falta:
+
+1. un preregistro nuevo;
+2. un mini-E2E nuevo;
+3. la revisión de Codex.
+
+**PRECONDITION_3D = NO-GO (no demostrado).**
