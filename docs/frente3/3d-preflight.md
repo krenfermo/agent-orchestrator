@@ -235,3 +235,135 @@ Precondiciones que ABORTAN (el intento no cuenta y el lote se detiene):
 - probe: a loopback port other than the gateway connectable
 - gateway: response-leak violation
 - no probe report from a launched agent
+
+## Ciclo 3 — cegamiento experimental, fencing de generación y harness fail-closed
+
+Motivo: el NO-GO del ciclo 2 (Codex). P1: el agente podía leer su brazo (`AO_DATA_DIR` → `ao.db` → `policy_snapshot.contextSources.memoryMode`, y la API de exploración). P2: fencing de generación, controles del harness que solo registraban, regla de capacidad.
+
+Principio: **cegar al agente, no reducir la observabilidad del producto.** `memoryMode`, `policy_snapshot` y la exploración siguen intactos en AO; lo que cambia es lo que un agente del laboratorio puede alcanzar.
+
+### Cambios en el producto (mínimos)
+
+| Commit | Qué |
+|---|---|
+| `2c5614f88`, `9cf25d244` | El daemon lee `AO_MEMORY_MODE` / `AO_MEMORY_EXTERNAL` / `AO_CONTEXT_ROUTER` una vez, al inicio de `RunWithConfig`, y los quita de su entorno antes de lanzar ningún hijo. Motivo: macOS deja leer el entorno de cualquier proceso del mismo usuario (`KERN_PROCARGS2`), y los hijos fuera de tmux (probes de proveedor, comandos de verificación) heredaban los interruptores. La sonda del laboratorio lo detectó en los probes de arranque. |
+| `5b30da51d`, `e85a620a8` | Fencing de generación del lanzamiento del reviewer (ver abajo). |
+
+Ninguna API productiva cambió.
+
+### Laboratorio (harness, fuera del producto): `~/.ao/scratch/frente3/tools/lab3d/`
+
+- **Shim por repetición** (`shim.sh.tmpl`): el PATH del daemon resuelve `claude`/`codex` a un shim que da al agente un entorno por lista blanca y lo encierra, junto con todos sus hijos (hooks, shells, herramientas), en `agent.sb` (Seatbelt).
+- **`agent.sb`** niega:
+  - todo `~/.ao` salvo el árbol propio de la repetición, y dentro de él `ao.db*` y `daemon.lock` (se permite solo `stat` de ancestros, necesario para git);
+  - los árboles de código y docs de AO;
+  - en `~/.claude`: `projects` salvo el propio, `history.jsonl`, `paste-cache` (contiene el texto del diseño pegado por el operador) y `file-history`;
+  - todo `~/.codex` salvo `auth.json`, `skills` y `plugins`;
+  - todos los puertos loopback salvo el del gateway, los sockets de tmux (escape del sandbox), el socket supervisor del daemon, y `launchctl`/`open`/`osascript`/`tmux`.
+  Todas las reglas se verificaron empíricamente. Tres hallazgos:
+  - un deny de ficheros **no** impide `connect(2)` a un socket unix;
+  - una regla de red filtrada por ruta también afecta a conexiones IP de loopback, por eso el orden importa;
+  - `exec` se evalúa sobre la ruta resuelta (el tmux de Homebrew está en `Cellar`).
+- **`CODEX_HOME` por repetición:** sesiones, historial y estado nuevos. `config.toml` y `rules` son copias del snapshot preregistrado (otras sesiones de Codex del equipo reescriben los vivos). `auth.json`, `skills` y `plugins` son symlinks: el secreto nunca se lee ni se copia.
+- **Gateway** (`gateway.py`): el único endpoint de AO que alcanza un agente.
+  - Lista blanca: `GET /healthz`; `POST` a `sessions/{id}/activity`, `reviews/{id}/activity`, `usage/subject-hook`, `sessions/{id}/work-report` y `sessions/{id}/reviews/{submit,cancel,trigger}`.
+  - Todo lo demás recibe 403.
+  - Una respuesta permitida que contenga un campo revelador se sustituye por 502 y se registra como violación.
+  - El shim reescribe el `AO_RUN_FILE` que el adaptador de Codex pasa por `-c shell_environment_policy.set`, para que apunte al run file del gateway.
+- **Daemon firmado ad-hoc `-o restrict`** (CS_RESTRICT): su entorno no es legible vía `procargs2`. Se verificó que Seatbelt no puede filtrar `procargs2` sin romper el runtime del agente.
+- **El daemon recibe un entorno por lista blanca**, no el del operador.
+- **Sonda adversarial** (`probe.py`): se ejecuta con exactamente el entorno y el sandbox del agente, justo antes de lanzarlo, en cada lanzamiento (worker y reviewer). Prueba:
+  - env;
+  - `procargs2` de todos los procesos del usuario;
+  - alcance del filesystem;
+  - inventario normalizado del árbol propio;
+  - escaneo completo de puertos loopback (1–65535) y LAN;
+  - rutas de control-plane a través del gateway;
+  - sockets tmux, supervisor y browser;
+  - `launchctl`/`open`/`osascript`/`ps`/`tmux`.
+- **Diferencial entre brazos** (`analyze.py`): busca claves cuyo valor es constante dentro de cada brazo y distinto entre brazos. Eso es lo que parecería una etiqueta.
+
+### Harness fail-closed (`run.py`)
+
+Cualquier violación ABORTA el intento. El intento no cuenta y el lote se DETIENE (NEEDS_ATTENTION). Las precondiciones y la regla de capacidad son las del preregistro de arriba. Se comprueban antes de **cada** intento:
+
+- binario;
+- digest del harness;
+- fixture (fuente y clon);
+- fingerprint profundo del proveedor;
+- servidores tmux vivos;
+- IDs opacos.
+
+Después de cada intento:
+
+- `externalContext`;
+- `memoryMode` entregado igual al asignado;
+- sondas;
+- violaciones del gateway;
+- fingerprint;
+- symlinks de `codex-home`.
+
+Se vio funcionar en los smokes:
+
+- una edición del harness en caliente abortó el intento siguiente;
+- un cambio de `~/.claude/skills` y `~/.codex/rules` hecho fuera del laboratorio abortó el smoke 3. El primero es un marcador de sincronización (ahora excluido); el segundo motivó el snapshot de Codex.
+
+### Fingerprint del proveedor
+
+Es profundo, por contenido.
+
+**FROZEN** (un cambio aborta):
+
+- `~/.claude/settings.json`;
+- árboles `skills` y `plugins` de Claude y de Codex;
+- `mcpServers` de `~/.claude.json`;
+- binario de Claude (ruta y sha256) y `--version`;
+- árbol del paquete de Codex (incluye el binario nativo) y `--version`;
+- `codex features list`;
+- `memories` = false y 0 filas;
+- snapshot de `config.toml` y `rules` de Codex.
+
+**OBSERVED** (solo se registra):
+
+- `stat` de `auth.json` (nunca se lee);
+- tamaños de los historiales;
+- digest de la copia viva de `config.toml` y `rules`.
+
+### Fencing de generación (P2)
+
+- `reviewClaimOwned`: la fila durable debe ser la misma entrada, estar `dispatched` y tener **exactamente** la generación de este dispatch.
+- `LaunchFence` viaja dentro de la petición de lanzamiento. Se comprueba:
+  - en el ready check;
+  - tras el probe, en `ensureReviewerLaunched`;
+  - en el launcher del daemon, inmediatamente antes de `runtime.Create` (después del aprovisionamiento de contexto).
+- Un titular que ya se sabe desplazado no toca el step, el presupuesto ni el outbox del sucesor.
+- Tests deterministas, sin sleeps:
+  - reclaim antes y después del ready check;
+  - fallo de un N obsoleto;
+  - dos coordinadores solapados;
+  - ventana de aprovisionamiento dentro del launcher;
+  - recuperación tras reinicio, con exactamente un reviewer.
+- Mutaciones: G1, G2, G3 y G5 las detectan los tests; G4 (guarda en la ruta de liberación) sobrevive porque hoy no hay camino que la ejercite.
+- Residual: la ventana es `runtime.Create` en sí, y explotarla requiere dos daemons sobre el mismo data dir, cosa que impide el lock exclusivo.
+
+### Mini-E2E (`3d-private/batch-20260926T003103`, binario `e85a620a8`)
+
+| Muestra | Brazo | Estado | Review | `contextSources` | Manifests | Capacidad | Sondas de lanzamiento |
+|---|---|---|---|---|---|---|---|
+| 1 | off | completed | complete/approved (codex) | off/off/off | — | 0 | worker + reviewer: PASS |
+| 2 | assisted | completed | complete/approved (codex) | assisted/off/off | worker, reviewer | 0 | PASS |
+| 3 | assisted | completed | complete/approved (codex) | assisted/off/off | worker, reviewer | 0 | PASS |
+| 4 | off | completed | complete/approved (codex) | off/off/off | — | 0 | PASS |
+
+- 4/4 VALID. `reviewDepth` efectivo light en las 4. 0 colisiones de sesión, 0 síntomas de carrera.
+- **Diferencial de cegamiento:** 0 diferencias consistentes con el brazo, en worker y en reviewer. Todo lo que varía lo hace también dentro de un mismo brazo: IDs y tokens aleatorios, reflogs de git, los commits del propio agente y temporales de Codex. El pack de memoria llega en el prompt: no hay fichero ni variable que lo delate.
+- El gateway dejó pasar las mismas rutas en ambos brazos.
+- Producción: goose 174, mismo mtime y tamaño antes y después.
+
+### Residuales documentados
+
+- Seatbelt comparte UID con el operador. Un agente que ejecute código nativo arbitrario para escapar del sandbox queda fuera del modelo de amenaza, aunque las vías conocidas (tmux, launchd, LaunchServices, osascript) están cerradas. El aislamiento fuerte requeriría otro usuario del SO o una VM.
+- `AO_BROWSER_RUNTIME_ADDRESS` sigue alcanzable: es herramienta del agente e igual en ambos brazos.
+- Restricción del laboratorio: las tareas no pueden depender de red loopback. El fixture no la usa.
+- Estado de Claude que sigue legible porque Claude lo necesita: `shell-snapshots`, `sessions`, `session-env`, y la lista de proyectos de `~/.claude.json` (solo rutas, confianza y versión, sin prompts). Nada de esto contiene etiquetas de brazo.
+- Caché de prompts del proveedor (servidor), cuenta y límites: compartidos y no aislables. Se reparten con el intercalado y se reportan como covariables.
