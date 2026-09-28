@@ -664,3 +664,35 @@ Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c4final3-20260928T1129
 | Plantilla de Claude | flags `0ea146006ac2…`, experimentos `176deca107b6…` |
 | planSha | `389555efc1b4b2652821a685c9202d6659ca6ab58505dc8e6dff1b3152f20af2`, N=2 por brazo |
 
+
+### Mini-E2E FINAL (`3d-private/batch-20260928T113032`, preregistro `c4final3` `925fa7f9…`)
+
+| Muestra | Brazo | Estado | Review | reviewDepth pedido / efectivo | `contextSources` | Manifests | Sondas | Rollouts de Codex / catálogos | Capacidad | Colisión / carrera / confirmación duplicada | `~/.claude.json` real |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | assisted | completed | complete/approved | light / light | assisted/off/off | worker, reviewer | 10/10 PASS | 2 / ninguno | 0 | 0/0/0 | 0 entradas |
+| 2 | off | completed | complete/approved | light / light | off/off/off | — | 10/10 PASS | 2 / ninguno | 0 | 0/0/0 | 0 entradas |
+| 3 | off | completed | complete/approved | light / light | off/off/off | — | 9/9 PASS | 2 / ninguno | 0 | 0/0/0 | 0 entradas |
+| 4 | assisted | completed | complete/approved | light / light | assisted/off/off | worker, reviewer | 10/10 PASS | 2 / ninguno | 0 | 0/0/0 | 0 entradas |
+
+- Veredicto del lote: **COMPLETE**. 4/4 VALID, sin reemplazos.
+- En todas: rebuild = `b09478c0`, exploración estable, teardown OK, estado del servidor de Claude igual a la plantilla, sin deriva del fingerprint FROZEN, todos los agentes lanzados corrieron.
+- **Diferencial de cegamiento:** 0 diferencias consistentes con el brazo, ni en el worker ni en el reviewer. Lo que varía (IDs, tokens, temporales de Codex, reflogs) también varía dentro de cada brazo. El gateway dejó pasar las mismas rutas en ambos brazos.
+- Producción: goose 174, mismo mtime y tamaño antes y después.
+
+### Gates FINALES (HEAD `c1d48e6ea`; backend idéntico a `35e3ad6e7`; temporales fuera de `~/.ao`; cachés de Go borradas al terminar)
+
+| Gate | Resultado |
+|---|---|
+| build / vet / gofmt / lint delta | PASS / PASS / 0 archivos / 0 issues |
+| race: daemon, tmux, projectmemory, contextrouter | PASS |
+| race: `./internal/workflow/...` completo | PASS |
+| harness (`test_harness.py`, 41 tests) y mutaciones (H1–H18) | PASS, todos los mutantes detectados |
+| short suite completa | un solo fallo: `TestGeneratedProtocolMatchesTheInstalledProvider` |
+
+Ese fallo es **ambiental** y también ocurre en la base `e2e9c741d`:
+
+- El test compara el protocolo generado con el binario `codex` instalado, que el host actualizó de 0.153.4 a 0.157.1: 28 métodos nuevos y 1 retirado.
+- Corregirlo implica regenerar código del producto, fuera de este cierre.
+- El laboratorio no usa ese adaptador: el reviewer va por el adaptador TUI de Codex.
+
+Los dos tests intermitentes conocidos (pegado de tmux y `TestP9Crash_C10`) no fallaron en esta corrida.
