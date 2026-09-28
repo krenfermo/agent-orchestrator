@@ -1011,3 +1011,39 @@ Revisión completa: `~/.ao/scratch/frente3/reviews/3d-preflight/cycle6/codex/rev
   - (c) aceptarlo como riesgo residual documentado.
 
 **PRECONDITION_3D = NO-GO. STOP + NEEDS_ATTENTION.**
+
+## Ciclo de cierre de los 2 P1 del cycle6 (autorizado): STOP + NEEDS_ATTENTION en el P1-2
+
+### P1-1 capacidad: CERRADO (opción B, solo harness)
+
+- **Se eliminó por completo el reemplazo por capacidad.** Toda muestra preregistrada que pasa sus comprobaciones cuenta con su resultado (completed, failed, needs_attention o timeout).
+- La capacidad es solo una covariable: `capacity_covariates` devuelve datos, nunca un estado.
+- `run_plan` ejecuta cada muestra una sola vez y en orden. Cualquier intento no VALID **detiene el lote** y nunca se repite ni se sustituye.
+- Tests adversariales: para cualquier combinación de intentos o checkpoints manipulados (incluida la reproducción de Codex, `rate_limited` más `dirty_worktree`, además de intentos sin terminar, `review_capacity_retry`, reviews abiertas y fallos ajenos) y cualquier estado final (incluido timeout), la muestra sigue siendo VALID. Ya no existe ningún clasificador.
+- Mutantes: H40 (la capacidad invalida la muestra) y H41 (se repite un intento no válido) detectados. En total, 60 tests y 36 mutantes detectados.
+
+### P1-2 relanzamiento del proveedor: NO cerrable de forma robusta solo con Seatbelt → STOP
+
+Hallazgos verificados en esta sesión:
+
+- Los binarios de Claude y Codex tienen **hardened runtime**. Claude no tiene `allow-dyld-environment-variables`, así que no se le puede inyectar una restricción tras arrancar.
+- Seatbelt evalúa `process-exec` también en el `exec` inicial, y los perfiles son estáticos y se heredan: no distinguen al agente legítimo de sus hijos.
+- **Cualquier proceso dentro del sandbox del agente alcanza las credenciales de la cuenta:**
+  - la entrada del llavero `Claude Code-credentials` responde (rc=0 con el `HOME` del laboratorio y también con el real);
+  - `~/.codex/auth.json` es legible.
+
+  El agente legítimo las necesita, así que no se pueden negar a sus hijos.
+- Por tanto, bloquear la re-ejecución de `claude`/`codex` (por PATH, por ruta absoluta o con wrappers) **no cerraría el P1**: un hijo podría usar la credencial directamente contra las APIs de la cuenta (conectores de claude.ai, `RemoteTrigger`, apps de ChatGPT) o correr Claude Code en JavaScript con `node`. Es un "mecanismo equivalente" descubierto durante la implementación.
+
+**Opciones** (requieren una decisión del operador):
+
+1. **Nivel cuenta:** desactivar los conectores de claude.ai y las apps de ChatGPT de las cuentas durante el experimento. El harness lo verificaría con un canario: una sesión **sin restricciones** en el `HOME` del laboratorio debe dar `mcp_servers=[]` en cada preregistro y repetición. Queda pendiente decidir qué hacer con `RemoteTrigger`, una capacidad de la cuenta de claude.ai.
+2. **Credenciales dedicadas del laboratorio sin conectores:** una API key de Anthropic Console para Claude (sin conectores de claude.ai ni `RemoteTrigger`) y una API key de OpenAI para Codex (sin apps de ChatGPT). Hay que evaluar el estado de servidor que expone cada API key, p. ej. la Files API de Anthropic como posible canal. Cambia la vía de autenticación (igual en ambos brazos) y el costo.
+3. **Proxy de credenciales fuera del sandbox:** el agente no tendría credenciales. Requiere que el harness maneje secretos, lo que contradice la política actual de no leer ni copiar credenciales.
+4. **Aceptar el riesgo residual:** rechazado explícitamente por el operador.
+
+El bloqueo de re-ejecución de binarios **no se implementó**: sería una defensa parcial que no cierra el P1 y se decide junto con la opción elegida. No se corrió preregistro, mini-E2E ni revisión de Codex, conforme a la instrucción de no gastar disco ni cuota en un diseño con un defecto detectable estáticamente.
+
+Observación de entorno: Claude Code se autoactualizó a 2.1.284 durante el día (quedan versiones antiguas ejecutables en `~/.local/share/claude/versions`). El laboratorio lo detecta como deriva del fingerprint FROZEN y aborta; el próximo preregistro congelará la versión vigente.
+
+**PRECONDITION_3D = NO-GO. STOP + NEEDS_ATTENTION.**
