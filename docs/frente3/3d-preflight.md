@@ -806,3 +806,35 @@ Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c5final-20260928T13251
 | Plantilla de Claude | flags `46f15044730e…`, experimentos `176deca107b6…` |
 | planSha | `389555efc1b4b2652821a685c9202d6659ca6ab58505dc8e6dff1b3152f20af2`, N=2 por brazo |
 
+
+### Mini-E2E FINAL (`3d-private/batch-20260928T132546`, preregistro `c5final` `47a3cfdc…`)
+
+| Muestra | Brazo | Estado | Review | reviewDepth pedido / efectivo | `contextSources` | Manifests | Sondas | Canario Unix / sockets revisados | Rollouts de Codex / catálogos | Capacidad (eventos / sin terminar / reviews abiertas) | Colisión / carrera / duplicada | `~/.claude.json` real |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | assisted | completed | approved | light / light | assisted/off/off | worker, reviewer | 10/10 PASS | DENIED / 137 | 2 / ninguno | 0 / 0 / 0 | 0/0/0 | 0 entradas |
+| 2 | off | completed | approved | light / light | off/off/off | — | 10/10 PASS | DENIED / 137 | 2 / ninguno | 0 / 0 / 0 | 0/0/0 | 0 entradas |
+| 3 | off | completed | approved | light / light | off/off/off | — | 10/10 PASS | DENIED / 137 | 2 / ninguno | 0 / 0 / 0 | 0/0/0 | 0 entradas |
+| 4 | assisted | completed | approved | light / light | assisted/off/off | worker, reviewer | 10/10 PASS | DENIED / 137 | 2 / ninguno | 0 / 0 / 0 | 0/0/0 | 0 entradas |
+
+- Veredicto del lote: **COMPLETE**. 4/4 VALID, sin reemplazos. Rebuild = `b09478c0` en todas.
+- **Producción:** goose 174, mismo mtime y tamaño antes y después.
+- **Diferencial de cegamiento:** worker con 0 diferencias consistentes con el brazo; reviewer con **1**.
+  - Es un objeto de la caché de compilación de Go (`home/Library/Caches/go-build/ea/…-d`) cuyo contenido es la salida cacheada de `go test`: `ok example.com/ledgerlite/internal/ledger 0.228s`.
+  - Las cuatro repeticiones tienen la entrada equivalente; solo cambia la duración medida (0.223–0.409 s). Las dos ASSISTED coincidieron en 0.228 s y por eso comparten el hash de contenido.
+  - Es ruido de tiempo del trabajo del worker. **No es una etiqueta de brazo** ni metadato de control.
+- El gateway dejó pasar las mismas rutas en ambos brazos.
+
+### Gates FINALES (HEAD `d1de8e5a4`; backend idéntico a `35e3ad6e7`; temporales fuera de `~/.ao`; cachés de Go borradas)
+
+| Gate | Resultado |
+|---|---|
+| build / vet / gofmt / lint delta | PASS / PASS / 0 archivos / 0 issues |
+| race: daemon, tmux, projectmemory, contextrouter | PASS |
+| race: `./internal/workflow/...` completo | PASS |
+| harness: 49 tests; mutantes H1–H28 más H18 | PASS, todos detectados |
+| short suite | solo dos fallos, ambos preexistentes y confirmados en la base `e2e9c741d` |
+
+Los dos fallos de la short suite:
+
+- `TestGeneratedProtocolMatchesTheInstalledProvider`: ambiental, por el Codex 0.157.1 instalado. No está en la ruta de 3D.
+- `TestRealTmux_LargeFixPromptArrivesAsOneBracketedPaste`: intermitente con carga; en la base falló 1 de 5 corridas del paquete completo.
