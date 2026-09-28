@@ -941,3 +941,29 @@ Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c6final2-20260928T1559
 | Plantilla de Claude | flags `9bd5b3a0b021…` |
 | planSha | `389555efc1b4b2652821a685c9202d6659ca6ab58505dc8e6dff1b3152f20af2`, N=2 por brazo |
 
+
+### Mini-E2E FINAL (`3d-private/batch-20260928T155936`, preregistro `c6final2` `c256eba5…`)
+
+| Muestra | Brazo | Estado | Review | reviewDepth pedido / efectivo | `contextSources` | Manifests | Sondas | Herramientas externas expuestas | Capacidad | Colisión / carrera / duplicada | `~/.claude.json` real |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | assisted | completed | approved | light / light | assisted/off/off | worker, reviewer | 10/10 PASS | ninguna | 0 | 0/0/0 | 0 entradas |
+| 2 | off | completed | approved | light / light | off/off/off | — | 10/10 PASS | ninguna | 0 | 0/0/0 | 0 entradas |
+| 3 | off | completed | approved | light / light | off/off/off | — | 10/10 PASS | ninguna | 0 | 0/0/0 | 0 entradas |
+| 4 | assisted | completed | approved | light / light | assisted/off/off | worker, reviewer | 10/10 PASS | ninguna | 0 | 0/0/0 | 0 entradas |
+
+- Veredicto del lote: **COMPLETE**. 4/4 VALID, sin reemplazos; rebuild = `b09478c0` en todas.
+- **Diferencial de cegamiento:** 0 diferencias consistentes con el brazo, ni en el worker ni en el reviewer.
+- El gateway dejó pasar las mismas rutas en ambos brazos.
+- Producción: goose 174, mismo mtime y tamaño antes y después.
+
+### Gates FINALES (HEAD `29d323d6d`; backend idéntico a `35e3ad6e7`)
+
+| Gate | Resultado |
+|---|---|
+| build / vet / gofmt / lint delta | PASS / PASS / 0 archivos / 0 issues |
+| race: daemon, tmux, projectmemory, contextrouter | PASS |
+| race: `./internal/workflow/...` completo | PASS |
+| harness: 66 tests; 38 mutantes | PASS, todos detectados |
+| short suite | único fallo: `TestGeneratedProtocolMatchesTheInstalledProvider` |
+
+Ese fallo es ambiental (Codex 0.157.1 instalado frente al protocolo generado), también ocurre en la base `e2e9c741d` y no está en la ruta de 3D.
