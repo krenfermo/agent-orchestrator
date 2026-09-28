@@ -913,3 +913,31 @@ Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c6final-20260928T15511
 | Plantilla de Claude | flags `50d70d15757b…`, experimentos `425de3db8474…` |
 | planSha | `d3b64ecb7e0a6433106afb5b4305fbdb0a34d61f217e47f027da54aed9caab59`, N=2 por brazo |
 
+
+### Preregistro `c6final` (`82b01c4f…`) ANULADO: falso positivo del harness
+
+- En la primera repetición, la comprobación de exposición marcaba cualquier **mención de texto** `mcp__` fuera del registro de capacidad.
+- El texto de la descripción de una skill (`built-in-browser`: "tools are named mcp__Claude_Browser__*…") lo disparaba.
+- El registro de capacidad estaba limpio: sin herramientas MCP ni prohibidas.
+- El lote se detuvo antes de gastar cuota de Codex, se conserva como evidencia y no cuenta.
+
+Corrección:
+
+- Se marcan las **llamadas reales** (`tool_use` de una herramienta `mcp__*` o prohibida) y el registro de capacidad, que sigue siendo la fuente fail-closed.
+- Una línea ilegible del transcript aborta.
+- Tests: 66 OK, incluido "mención en texto de skill no es capacidad" y "llamada a `RemoteTrigger` aborta". Mutantes: 38, todos detectados (nuevo H39).
+
+### Preregistro FINAL `c6final2` (publicado ANTES del mini-E2E)
+
+Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c6final2-20260928T155916.json`, sha256 `c256eba505c0a83d4b8a50b0e1cfca7e7f71894959f0996b51ee70be92465134`
+
+| Valor | Preregistrado |
+|---|---|
+| PRODUCT_HEAD / binario | `35e3ad6e7` / `2f72ddf8974fb0bbdb0afdfa366617a1f90870c6fae47d5952d235c89fd0354c` |
+| Fixture | `b09478c0afd7e1cf1ea4af1b40d30ae4a2c8d388` |
+| EXPECTED_HARNESS_SHA | `ebd9028fdf2d1ad06996f91b6296c2735ce1735f5f225062abb50baa414d2053` |
+| Config de Codex del laboratorio | `da556eab59f214cffdd180670294494602941f5834332188ddfc154faf12759c` |
+| Proveedor | 2.1.284 (Claude Code); codex-cli 0.157.1; digest FROZEN `e25f28a0f09fd350d316ee6d02f1583a50f8b7bca60ff098a03556330aa94587` |
+| Plantilla de Claude | flags `9bd5b3a0b021…` |
+| planSha | `389555efc1b4b2652821a685c9202d6659ca6ab58505dc8e6dff1b3152f20af2`, N=2 por brazo |
+
