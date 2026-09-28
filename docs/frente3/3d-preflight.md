@@ -741,3 +741,68 @@ Revisión completa: `~/.ao/scratch/frente3/reviews/3d-preflight/cycle4/codex/fin
 4. Preregistro, mini-E2E y revisión de Codex nuevos.
 
 **PRECONDITION_3D = NO-GO. STOP + NEEDS_ATTENTION.**
+
+## Ciclo final de cierre (autorizado 2026-09-28): correcciones del NO-GO
+
+Todo es solo harness; el producto no cambia (código `35e3ad6e7`).
+
+**P1: escape por sockets Unix.**
+
+- `agent.sb` pasa a **negar por defecto** todo `connect(2)` a sockets Unix, con esta allowlist:
+  - `/private/var/run/mDNSResponder`, necesario para DNS (sin él, HTTPS falla, verificado);
+  - los sockets dentro del árbol propio de la repetición, donde ahora vive el `TMPDIR` del agente; el data dir de AO (socket supervisor) sigue negado.
+- Así quedan fuera Docker/Colima, el IPC de Codex, `cc-socks`, VS Code, `ssh-askpass`, tmux y cualquier socket equivalente.
+- Se niega ejecutar `docker`, `colima`, `lima`, `limactl` y `podman`, además de Docker.app.
+- Nuevo canal obligatorio de la sonda, `unixSockets`:
+  - un **canario vivo** (un listener Unix que el harness abre fuera del árbol) debe dar DENIED;
+  - todos los sockets descubiertos (`/private/tmp`, `/private/var/run`, el temp dir del usuario, `~/.colima`, `.lima`, `.docker`, `.ssh`) y las rutas conocidas (sockets Docker, `~/.codex/ipc`) deben dar DENIED o no existir.
+
+  En el ensayo: 136 sockets descubiertos, todos inaccesibles; canario DENIED; DNS y HTTPS OK.
+- La sonda también intenta ejecutar `docker`, `colima` y `limactl`; debe resultar denegado.
+
+**P1: clasificador de capacidad.** Una muestra es inválida por capacidad solo si se cumple todo lo siguiente:
+
+- la run terminó en `failed` o `needs_attention` (un timeout nunca cuenta);
+- todos los intentos terminaron y tienen clase;
+- todos los intentos fallidos son de capacidad;
+- el intento **determinante** (el último) falló por capacidad;
+- no queda ninguna review abierta.
+
+Cualquier otro caso es una muestra VALID con su resultado: timeout, fallo ajeno, intento incompleto, fallo sin clase o review abierta. La reproducción de Codex (un `rate_limited` más un intento sin terminar) ahora da VALID.
+
+**P2: esquema de la sonda.**
+
+- Campos obligatorios, con tipo: `role`, `pid`, `cwd`, `checks`, `labelHits`, `explicitLabelFound` (debe coincidir con `labelHits`) y `seconds`.
+- Los 10 canales obligatorios.
+- Archivos `.json`, `.rc` y `.err` obligatorios: si falta alguno, es inválido y se aborta.
+
+**Tests y mutaciones:**
+
+- `test_harness.py`: 49 tests OK.
+- Mutantes H1–H28 más H18 de `labcore`: todos detectados. Los nuevos:
+  - H19: el canario no se exige DENIED;
+  - H20: se acepta un socket alcanzable;
+  - H21: no se exige el esquema;
+  - H22: se acepta un `.err` faltante;
+  - H23 a H26: el clasificador ignora intentos sin terminar, el intento determinante, el estado timeout o las reviews abiertas;
+  - H27: se permite ejecutar `docker`;
+  - H28: se aceptan campos de etiqueta inconsistentes.
+
+**P9-C10:** sin cambios. Sigue como deuda del producto y el laboratorio aborta la repetición si aparece.
+
+**Ensayo** (`c5smoke1`, no es evidencia): COMPLETE, 2/2 VALID. Claude y Codex funcionan con los sockets Unix negados por defecto.
+
+### Preregistro FINAL `c5final` (publicado ANTES del mini-E2E)
+
+Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c5final-20260928T132517.json`, sha256 `47a3cfdcdbf9446c803c2d84725c2d015e83d465726342876dc922ec729327f8`
+
+| Valor | Preregistrado |
+|---|---|
+| PRODUCT_HEAD / binario | `35e3ad6e7` / `2f72ddf8974fb0bbdb0afdfa366617a1f90870c6fae47d5952d235c89fd0354c` |
+| Fixture | `b09478c0afd7e1cf1ea4af1b40d30ae4a2c8d388` |
+| EXPECTED_HARNESS_SHA | `f02eeb12f84f421dc7ebeaf9d84d360d589a267caae3370a1a276f5630354bba` |
+| Config de Codex del laboratorio | `23e3bb40fa9dbc2b81ff09aff5e57a2683e9441ff171fc5a583cb4b0e528b4cb` |
+| Proveedor | 2.1.284 (Claude Code); codex-cli 0.157.1; digest FROZEN `e25f28a0f09fd350d316ee6d02f1583a50f8b7bca60ff098a03556330aa94587` |
+| Plantilla de Claude | flags `46f15044730e…`, experimentos `176deca107b6…` |
+| planSha | `389555efc1b4b2652821a685c9202d6659ca6ab58505dc8e6dff1b3152f20af2`, N=2 por brazo |
+
