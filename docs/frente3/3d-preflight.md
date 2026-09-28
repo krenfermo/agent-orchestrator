@@ -641,3 +641,26 @@ Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c4final2-20260928T1124
 | Modelos | worker opus[1m] (high); reviewer gpt-5.6-sol (medium) |
 | planSha | `a793452038b222c9ae6ee6dadd047fc2b0b22257349bc6b9a980df8b9958af6e`, N=2 por brazo |
 
+
+### Preregistro `c4final2` (`0eb2ad76…`) ANULADO: la sonda falló de forma cerrada ante DNS transitorio
+
+- En `batch-20260928T112435` (primera repetición, ASSISTED), la run completó y el review quedó aprobado.
+- El reviewer Codex **sí corrió**: rollouts en `CODEX_HOME`, veredicto por el gateway. La corrección anterior funciona, y no aparecieron catálogos de Codex.
+- Pero una sonda devolvió `lan errored: gaierror(8)`: la resolución DNS/mDNS del hostname falló en ese momento. El runner abortó, como corresponde.
+
+Corrección (solo harness): la sonda obtiene las IPv4 de las interfaces (`getifaddrs`), sin resolver el hostname. Cero direcciones sigue siendo un fallo. Verificado dentro del sandbox: 4 direcciones. Tests 41 OK y mutantes detectados. El lote se conserva como evidencia y no cuenta.
+
+### Preregistro FINAL `c4final3` (publicado ANTES del mini-E2E)
+
+Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c4final3-20260928T112951.json`, sha256 `925fa7f9b6c65e557281c19675a0356dfb9d123ff0e42f08f0ced10f81076c5c`
+
+| Valor | Preregistrado |
+|---|---|
+| PRODUCT_HEAD / binario | `35e3ad6e7` / `2f72ddf8974fb0bbdb0afdfa366617a1f90870c6fae47d5952d235c89fd0354c` |
+| Fixture | `b09478c0afd7e1cf1ea4af1b40d30ae4a2c8d388` |
+| EXPECTED_HARNESS_SHA | `d90cee72843ca0b0ab0ab982180c22c7306bb37e218aee20ae962f026e949b94` |
+| Config de Codex del laboratorio | `23e3bb40fa9dbc2b81ff09aff5e57a2683e9441ff171fc5a583cb4b0e528b4cb` |
+| Proveedor | 2.1.283 (Claude Code); codex-cli 0.157.1; digest FROZEN `6b4e4f9c00ac985321932a6c99a125c9de9dc8198445258f49443c0577333303` |
+| Plantilla de Claude | flags `0ea146006ac2…`, experimentos `176deca107b6…` |
+| planSha | `389555efc1b4b2652821a685c9202d6659ca6ab58505dc8e6dff1b3152f20af2`, N=2 por brazo |
+
