@@ -838,3 +838,29 @@ Los dos fallos de la short suite:
 
 - `TestGeneratedProtocolMatchesTheInstalledProvider`: ambiental, por el Codex 0.157.1 instalado. No está en la ruta de 3D.
 - `TestRealTmux_LargeFixPromptArrivesAsOneBracketedPaste`: intermitente con carga; en la base falló 1 de 5 corridas del paquete completo.
+
+### Revisión de Codex del ciclo final: SIN VEREDICTO (límite de uso hasta las 15:48) + P1 nuevo confirmado → STOP
+
+Codex agotó otra vez su límite de uso a mitad de la auditoría (`cycle5/codex/review.jsonl`).
+
+**Mensajes parciales:**
+
+- los dos P1 anteriores quedan cerrados: la reproducción de capacidad (`rate_limited` más un intento sin terminar) ahora da VALID, y la mutación light→full se detecta;
+- 49/49 tests;
+- lote 4/4 con estado de Claude congelado idéntico.
+
+Pero Codex abrió un **hallazgo nuevo, que verifiqué en los transcripts de la repetición 1**:
+
+- La sesión de Claude del laboratorio carga los **conectores de claude.ai de la cuenta** como herramientas disponibles: Claude Docs (create, read, update, delete, batch), Gmail (get_message, create_draft, labels…) y otros.
+- No se usaron en este lote (el worker solo usó Bash), pero son **accesibles**.
+- Son estado externo compartido, fuera del sandbox (van por el servicio de claude.ai, no por sockets locales), con escritura. Suponen un canal entre repeticiones y una vía posible a información del experimento.
+- **P1** (contaminación/cegamiento). No estaba en el alcance autorizado de este ciclo.
+
+**Corrección propuesta** (solo harness; requiere autorización):
+
+1. Desactivar los servidores MCP de claude.ai en el `HOME` de proveedor del laboratorio (variable de entorno o ajuste en la copia de `settings.json`), igual en ambos brazos.
+2. Añadir a la sonda y al runner una comprobación: cero herramientas `mcp__claude_ai_*` en la sesión inicial de cada agente; abortar si aparece alguna.
+3. Revisar también los conectores o apps del lado de Codex.
+4. Preregistro, mini-E2E y revisión de Codex nuevos.
+
+**PRECONDITION_3D = NO-GO. STOP.**
