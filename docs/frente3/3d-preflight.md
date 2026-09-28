@@ -967,3 +967,47 @@ Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c6final2-20260928T1559
 | short suite | único fallo: `TestGeneratedProtocolMatchesTheInstalledProvider` |
 
 Ese fallo es ambiental (Codex 0.157.1 instalado frente al protocolo generado), también ocurre en la base `e2e9c741d` y no está en la ruta de 3D.
+
+### Revisión FINAL de Codex (corrección de conectores): NO-GO (P0 0 / P1 2 / P2 4 / P3 2)
+
+Revisión completa: `~/.ao/scratch/frente3/reviews/3d-preflight/cycle6/codex/review.md`.
+
+**Confirmado:**
+
+- cegamiento por la vía normal (el shim);
+- aislamiento de estado entre repeticiones;
+- sonda fail-closed;
+- reviewDepth efectivo;
+- fencing de generación;
+- reproducibilidad y preregistro;
+- comparabilidad observada (0 diferencias consistentes con el brazo; mini-E2E 4/4 VALID);
+- producción intacta.
+
+**P1 nuevos (STOP según la autorización):**
+
+1. **Clasificador de capacidad.** No concilia su conclusión con la causa terminal real de la run: el último checkpoint o la razón de atención. Codex modificó una copia de la DB (último intento `rate_limited` y último checkpoint `dirty_worktree`, una parada ajena) y el harness la clasificó como `INVALID_PROVIDER_CAPACITY`. Es una vía de selección de muestras.
+2. **Evasión de las restricciones de conectores.** Las restricciones (`ENABLE_CLAUDEAI_MCP_SERVERS=0`, `--strict-mcp-config`, `--disallowedTools`) las pone el shim. Pero `agent.sb` permite ejecutar binarios y el binario real de Claude es ejecutable desde el agente, así que un agente con Bash podría relanzar `claude` sin esas flags ni esa variable y recuperar los conectores de claude.ai y `RemoteTrigger`/`SendMessage` a través de la cuenta compartida. Codex no lo explotó en vivo (tenía prohibido lanzar agentes), pero el camino es concreto.
+
+**P2:**
+
+- P9-C10: deuda del producto; el laboratorio aborta si aparece.
+- En `CODEX_HOME`, `auth`, `skills` y `plugins` están enlazados en solo lectura.
+- La cobertura del escaneo LAN es limitada.
+- Test de protocolo ambiental.
+
+**P3:**
+
+- La publicación del preregistro queda en el mismo segundo que el lote.
+- La repetición en Seatbelt anidado fue UNKNOWN en el sandbox del auditor.
+
+**Correcciones posibles** (requieren una decisión del operador):
+
+- **P1-1:**
+  - (a) exigir además que el último checkpoint o razón terminal sea de capacidad;
+  - (b) o eliminar el reemplazo por capacidad: toda muestra cuenta con su resultado y la capacidad queda como covariable (intención de tratar pura).
+- **P1-2** (más de fondo: el agente no debe poder abrir una sesión nueva del proveedor con las credenciales de la cuenta):
+  - (a) negar en `agent.sb` la ejecución de los binarios de Claude y Codex para los procesos hijos. Hay que verificar si Seatbelt permite distinguir el primer `exec` (el del propio agente) de los siguientes, por ejemplo con un binario lanzador separado;
+  - (b) bloquear en red los endpoints de MCP de claude.ai;
+  - (c) aceptarlo como riesgo residual documentado.
+
+**PRECONDITION_3D = NO-GO. STOP + NEEDS_ATTENTION.**
