@@ -696,3 +696,48 @@ Ese fallo es **ambiental** y también ocurre en la base `e2e9c741d`:
 - El laboratorio no usa ese adaptador: el reviewer va por el adaptador TUI de Codex.
 
 Los dos tests intermitentes conocidos (pegado de tmux y `TestP9Crash_C10`) no fallaron en esta corrida.
+
+### Revisión FINAL de Codex (cierre, 2026-09-28): NO-GO (P0 0 / P1 2 / P2 3 / P3 2)
+
+Revisión completa: `~/.ao/scratch/frente3/reviews/3d-preflight/cycle4/codex/final/review.md`.
+
+**Confirmado por Codex:**
+
+- el cegamiento por los canales ordinarios;
+- el aislamiento del estado de Claude por archivos;
+- la sonda fail-closed (41 tests; mutantes detectados);
+- el reviewDepth efectivo (mutación light→full rechazada);
+- el fencing de generación (F1, F2 y G4 detectados);
+- la reproducibilidad del preregistro, incluida la cronología local, y que anular `c4final` y `c4final2` es metodológicamente limpio;
+- la comparabilidad en los datos: catálogos de Codex ausentes, plantilla idéntica, indexación idéntica;
+- producción intacta.
+
+**P1 abiertos** (corregibles solo en el harness, **no aplicados**: la autorización exige STOP ante un P1 nuevo):
+
+1. **Escape por sockets Unix.** `agent.sb` es allow-by-default y no niega sockets Unix externos del mismo usuario:
+   - el socket Docker de Colima (vivo: `~/.colima/default/docker.sock`), con `docker` en el PATH del agente y `docker run` permitido por la política copiada de Claude;
+   - `~/.codex/ipc/ipc.sock`;
+   - `/private/tmp/cc-socks/*.sock`.
+
+   Un daemon Docker externo podría montar la DB de la repetición o los logs privados, que contienen `memoryMode` y `mode=assisted`: una etiqueta explícita alcanzable a través de un intermediario fuera de Seatbelt. Codex no ejecutó el montaje, para no mutar estado externo.
+2. **Clasificador de capacidad.** Un intento `rate_limited` fallido más otro intento sin terminar se clasifica como `INVALID_PROVIDER_CAPACITY` aunque la run termine en timeout, `needs_attention` o un fallo ajeno. Es una vía de selección dependiente del resultado.
+
+**P2:**
+
+- Esquema de la sonda: se aceptan reportes sin `explicitLabelFound` ni `labelHits`, y una sonda sin archivo `.err`.
+- P9-C10: deuda del producto, reproducida; el laboratorio aborta la repetición si aparece.
+- Test de protocolo de Codex 0.157.1: ambiental; también falla en la base.
+
+**P3:**
+
+- La publicación del preregistro solo está anclada localmente.
+- Documentación imprecisa del conteo de mutantes: 16 en el script más H18 aparte; H8 ya no existe.
+
+**Correcciones propuestas** (solo harness; requieren autorización):
+
+1. Negar por defecto la conexión a sockets Unix y permitir solo los necesarios (p. ej. mDNSResponder para DNS). Negar la ejecución de `docker`, `colima` y similares. La sonda debe probar esas familias de sockets.
+2. Clasificar un intento como inválido por capacidad solo si todos sus intentos terminaron y la causa terminal de la run es de capacidad.
+3. Exigir el esquema completo de la sonda y todos sus artefactos.
+4. Preregistro, mini-E2E y revisión de Codex nuevos.
+
+**PRECONDITION_3D = NO-GO. STOP + NEEDS_ATTENTION.**
