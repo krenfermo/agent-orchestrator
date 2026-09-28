@@ -864,3 +864,52 @@ Pero Codex abrió un **hallazgo nuevo, que verifiqué en los transcripts de la r
 4. Preregistro, mini-E2E y revisión de Codex nuevos.
 
 **PRECONDITION_3D = NO-GO. STOP.**
+
+## Corrección del P1 de conectores externos (autorizada 2026-09-28)
+
+Todo es solo harness; el producto no cambia.
+
+**Claude:**
+
+- Mecanismos soportados, verificados con `claude -p --output-format stream-json`:
+  - `ENABLE_CLAUDEAI_MCP_SERVERS=0` elimina los conectores de claude.ai. Ojo: el valor `false` **no** los elimina; se verificó que seguían los 4.
+  - `--strict-mcp-config` deja solo los MCP pasados explícitamente, y AO no pasa ninguno.
+  Se usan los dos.
+- También `--disallowedTools=RemoteTrigger,SendMessage,ListAgents`: rutinas en la nube de claude.ai y mensajería con otras sesiones locales. Con eso, la sesión queda con `mcp_servers=[]` y 0 herramientas prohibidas.
+- El shim aplica las flags solo a las sesiones, no a subcomandos (`auth`, `mcp`, `--version`…); el entorno va a daemon y agentes.
+- Herramientas que quedan: Bash, Read/Edit/Write, Task, Skill, WebFetch/WebSearch (lectura sin estado compartido), Cron/ScheduleWakeup (en memoria de la sesión) y Workflow (local). Ninguna es un canal entre repeticiones.
+
+**Codex:**
+
+- La config heredada del operador traía:
+  - MCP `node_repl`, **habilitado**, de la app de ChatGPT, con browser-use y computer-use;
+  - MCP `computer-use`;
+  - `notify`, que lanzaba el cliente de Computer Use en cada turno;
+  - tablas `plugins`, `marketplaces` y `desktop`.
+- La config del laboratorio **elimina** las tablas `mcp_servers`, `plugins`, `apps`, `connectors`, `marketplaces` y `desktop` y la clave `notify`, y desactiva las funciones `apps`, `plugins`, `in_app_browser`, `in_app_chat` e `in_app_local_automation`. Se valida con `tomllib`.
+- Precondición en cada repetición: `codex mcp list --json` debe ser `[]` y `codex features list` debe mostrar esas funciones apagadas.
+
+**Verificación fail-closed por sesión:**
+
+- **Claude:** cada transcript debe registrar su capacidad (`deferred_tools_delta`). Aborta si registra cualquier `mcp__*`, `RemoteTrigger`, `SendMessage` o `ListAgents`, o servidores MCP pendientes o fallidos, o si no registra capacidad alguna.
+- **Codex:** aborta si un rollout contiene una llamada MCP o `mcp_attribution` distinto de `none`.
+
+**Tests y mutaciones:**
+
+- `test_harness.py`: 64 tests. Entre ellos, casos que inoculan un conector (`mcp__claude_ai_Gmail…`, un MCP local, `RemoteTrigger`, un servidor pendiente, una llamada MCP de Codex, un MCP inyectado en `config.toml` y `apps` reactivado) y exigen ABORT. El shim real se prueba con un binario falso.
+- Mutantes: 37, todos detectados. Nuevos: H29–H34 (en `run.py`), H35–H36 (`labcore`: conservar `mcp_servers` o `notify`) y H37–H38 (shim sin flags o sin la variable de entorno).
+
+### Preregistro FINAL `c6final` (publicado ANTES del mini-E2E)
+
+Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c6final-20260928T155110.json`, sha256 `82b01c4fc2abe1d9dc2e95c3477318991bdc1d7a2c548f7a515b8cd48625f8be`
+
+| Valor | Preregistrado |
+|---|---|
+| PRODUCT_HEAD / binario | `35e3ad6e7` / `2f72ddf8974fb0bbdb0afdfa366617a1f90870c6fae47d5952d235c89fd0354c` |
+| Fixture | `b09478c0afd7e1cf1ea4af1b40d30ae4a2c8d388` |
+| EXPECTED_HARNESS_SHA | `f1a6f1951012254c68866b8045a0623bc847b841b81c26a0097bee5ad2d2de1f` |
+| Config de Codex del laboratorio (sin MCP, plugins, apps, desktop ni notify; validada por Codex) | `da556eab59f214cffdd180670294494602941f5834332188ddfc154faf12759c` |
+| Proveedor | 2.1.284 (Claude Code); codex-cli 0.157.1; digest FROZEN `e25f28a0f09fd350d316ee6d02f1583a50f8b7bca60ff098a03556330aa94587` |
+| Plantilla de Claude | flags `50d70d15757b…`, experimentos `425de3db8474…` |
+| planSha | `d3b64ecb7e0a6433106afb5b4305fbdb0a34d61f217e47f027da54aed9caab59`, N=2 por brazo |
+
