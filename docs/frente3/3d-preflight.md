@@ -606,3 +606,38 @@ Comprobaciones previas del 28-sep:
 - harness: 35 tests OK y 15 de 15 mutantes detectados;
 - Codex disponible.
 
+
+### Preregistro `c4final` (`c730822c…`) ANULADO: defecto del harness detectado en su lote
+
+El mini-E2E `batch-20260928T104903` se detuvo tras la primera muestra.
+
+**Qué pasó:**
+
+- El `~/.codex/config.toml` del operador ganó una tabla `[features]` después del 26-sep.
+- El harness **añadía** otra `[features]` a la copia del laboratorio. Eso produce un TOML inválido (`duplicate key`), y el reviewer Codex nunca arrancó: no hubo sesión ni veredicto, y la run quedó en timeout.
+- La regla preregistrada contaba ese timeout como muestra VALID: un fallo del instrumento que entraba al dataset.
+- Afectaba igual a los dos brazos (no era una fuga de cegamiento) y era corregible solo en el harness.
+
+**Corrección** (solo harness, fail-closed):
+
+1. `codex_lab_config` fusiona las funciones en la tabla `[features]` existente y valida el resultado con `tomllib`. La config efectiva se digiere en el preregistro.
+2. Precondición: el propio Codex debe cargar la config de la repetición (`codex features list` con ese `CODEX_HOME`) y reportar `apps` y `plugins` desactivados. Se valida también al preregistrar.
+3. Regla de instrumento: cada agente lanzado debe dejar un transcript (Claude en su home, Codex con un rollout en `CODEX_HOME`); si no, se ABORTA. Un timeout cuenta como resultado solo si todos los agentes lanzados corrieron.
+
+Tests: 41 OK. Mutantes H1–H17 y H18 (añadir una segunda `[features]` en `labcore`) detectados. El lote anulado se conserva como evidencia y no cuenta.
+
+### Preregistro FINAL `c4final2` (publicado ANTES del mini-E2E)
+
+Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c4final2-20260928T112405.json`, sha256 `0eb2ad76785d38af7ab6768f822de57a4288c05d4496c37ec949cf4ef54a3d8a`
+
+| Valor | Preregistrado |
+|---|---|
+| PRODUCT_HEAD / binario | `35e3ad6e7` / `2f72ddf8974fb0bbdb0afdfa366617a1f90870c6fae47d5952d235c89fd0354c` |
+| Fixture | `b09478c0afd7e1cf1ea4af1b40d30ae4a2c8d388` |
+| EXPECTED_HARNESS_SHA | `9f6205e55d97e78efb890829bf6126cdc49f6f324abc93f80e4df750d191b91a` |
+| Config de Codex del laboratorio (validada por Codex) | `23e3bb40fa9dbc2b81ff09aff5e57a2683e9441ff171fc5a583cb4b0e528b4cb` |
+| Proveedor | 2.1.283 (Claude Code); codex-cli 0.157.1; digest FROZEN `6b4e4f9c00ac985321932a6c99a125c9de9dc8198445258f49443c0577333303` |
+| Plantilla de Claude | flags `4f80cf5b0de4…`, experimentos `176deca107b6…` |
+| Modelos | worker opus[1m] (high); reviewer gpt-5.6-sol (medium) |
+| planSha | `a793452038b222c9ae6ee6dadd047fc2b0b22257349bc6b9a980df8b9958af6e`, N=2 por brazo |
+
