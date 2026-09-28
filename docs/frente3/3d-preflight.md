@@ -577,3 +577,32 @@ La parte de fencing de workflow quedó en UNKNOWN: el disco se llenó.
 3. la revisión de Codex.
 
 **PRECONDITION_3D = NO-GO (no demostrado).**
+
+## Cierre de PRECONDITION_3D (2026-09-28): preregistro FINAL (publicado ANTES del mini-E2E)
+
+El preregistro `a5a40e8f…` del 26-sep **no cuenta** como evidencia final.
+
+Archivo privado: `~/.ao/scratch/frente3/3d-private/prereg-c4final-20260928T104824.json`, sha256 `c730822cd0e82c18ffa92754c177835a0377e7a5f27cedc25791af05cc024026`
+
+| Valor | Preregistrado |
+|---|---|
+| PRODUCT_HEAD | `35e3ad6e7` (binario `vcs.modified=false`) |
+| EXPECTED_AO_BINARY_SHA | `2f72ddf8974fb0bbdb0afdfa366617a1f90870c6fae47d5952d235c89fd0354c` |
+| EXPECTED_FIXTURE_SHA | `b09478c0afd7e1cf1ea4af1b40d30ae4a2c8d388` |
+| EXPECTED_HARNESS_SHA | `f9805de00b60df850ef9956eb03819895dfa3cacfe24fddbd6dc46f42ab5b88f` (incluye las correcciones de providerState completo, LAN, apps/plugins de Codex desactivados y hash de archivos grandes) |
+| Proveedor | 2.1.283 (Claude Code); codex-cli 0.157.1; digest FROZEN `6b4e4f9c00ac985321932a6c99a125c9de9dc8198445258f49443c0577333303` |
+| Snapshot | `.claude/settings.json`=a1bd71fb14f3…, `.codex/config.toml`=52ff54cd0474…, `.codex/rules`=26ec784c13a2…, `.gitconfig`=7c6485a8ca7a… |
+| Plantilla de Claude | flags `1661f7e3d97e…`, experimentos `176deca107b6…` (3 corridas de inicialización) |
+| Modelos | worker opus[1m] (high); reviewer gpt-5.6-sol (medium) |
+| reviewDepth / memoryMode / router / external | light pedido = efectivo / off-assisted / off / off |
+| planSha | `8906e404919dff83ed60ccf3c111128651b78e2f9c50608b3b0d255d53a1bb05`, N=2 por brazo (semilla y plan privados) |
+
+Comprobaciones previas del 28-sep:
+
+- disco: 11 GB libres;
+- producción: goose 174, `integrity_check` ok, FK 0, mismo mtime y tamaño;
+- sin daemons experimentales ni servidores tmux de laboratorio vivos;
+- worktree limpio en `bdd6b6af4`, sin cambios en el backend desde `35e3ad6e7`;
+- harness: 35 tests OK y 15 de 15 mutantes detectados;
+- Codex disponible.
+
