@@ -1,5 +1,8 @@
 # Prompt de revisión adversarial de Codex: PRECONDITION_3D_AUTH_DESIGN_V3
 
+> **HISTÓRICO.** Este prompt ya se ejecutó. La revisión produjo NEEDS_CHANGES y
+> la especificación vigente es V4. No volver a usar este prompt como norma.
+
 Uso futuro, sólo después de autorización explícita del operador. Esta entrega
 prepara el prompt pero **no lo ejecuta**:
 

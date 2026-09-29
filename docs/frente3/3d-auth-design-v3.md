@@ -1,10 +1,16 @@
 # Frente 3 / 3D — PRECONDITION_3D_AUTH_DESIGN_V3
 
+> **SUSTITUIDO (2026-09-28).** La revisión REAL de Codex dio
+> `PRECONDITION_3D_AUTH_DESIGN_V3 = NEEDS_CHANGES`. La única especificación
+> vigente es [3d-auth-design-v4.md](3d-auth-design-v4.md), con la función total
+> de [06-benchmark-plan.md](06-benchmark-plan.md) §§3–5. V3 es historial no
+> normativo.
+
 Fecha: 2026-09-28. Rama: `feat/frente3-3d-prerequisites`.
 
 ## 0. Autoridad, alcance y estado
 
-Este documento es la **única especificación normativa** de aislamiento,
+Este documento era la especificación V3 de aislamiento,
 autenticación e integridad de muestra para 3D. La función estadística normativa
 está en [06-benchmark-plan.md](06-benchmark-plan.md) §§3–5 y forma parte de V3.
 No hay otra regla de decisión. V1 y V2 se conservan sólo como historia y no

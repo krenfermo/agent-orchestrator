@@ -1,6 +1,6 @@
 # Frente 3 / 3A — Plan de medición y piloto
 
-Fecha: 2026-09-28 · Estado: **norma V3; no ejecutado.**
+Fecha: 2026-09-28 · Estado: **norma V4; no ejecutado.**
 
 Regla heredada de `docs/project-memory-baseline.md`: **un número que AO no pudo
 medir nunca se presenta como medido.** Un `0` medido y un `null` no disponible
@@ -49,10 +49,10 @@ exploración:
 
 ---
 
-## 3. Métricas del piloto (norma V3)
+## 3. Métricas del piloto (norma V4)
 
 Esta sección y las §§4–5 contienen la **única regla normativa** del piloto.
-`3d-auth-design.md` y `3d-auth-design-v2.md` son historia y no pueden aportar
+`3d-auth-design.md`, V2 y V3 son historia y no pueden aportar
 umbrales, excepciones ni reglas alternativas. Los umbrales se congelan sin
 cambios en el preregistro; observar resultados nunca autoriza cambiar `N`, una
 imputación ni una frontera.
@@ -84,14 +84,12 @@ bytes del pack y relecturas.
 - **Q5** — revisión humana ciega de una muestra de diffs (descriptiva; no
   decide este experimento);
 - **Q6** — localización estructurada de la tarea C, definida en
-  [3d-auth-design-v3.md](3d-auth-design-v3.md) §4. Q6 sólo es aplicable a C;
+  [3d-auth-design-v4.md](3d-auth-design-v4.md) §6. Q6 sólo es aplicable a C;
   `NA` en A, B y D no es un dato faltante.
 
-Para una muestra que termina en timeout, denegación, sanción, crash u otro
-fallo después de iniciarse, Q1/Q4 y Q6 cuando aplique valen `0`. En M1u y M2 se
-imputan los topes preregistrados de tokens y llamadas, no el consumo parcial;
-M3 vale `1`. No se reintenta la muestra. Los reintentos HTTP internos del
-cliente sí cuentan como llamadas y consumo de esa misma muestra.
+La normalización total de estados, nulls y valores inválidos está en §5.2. No
+se reintenta una muestra. Los retries HTTP internos del cliente cuentan como
+llamadas y consumo de esa misma muestra.
 
 ---
 
@@ -123,7 +121,7 @@ medida. Criterios que debe cumplir:
 - **ASSISTED:** `AO_MEMORY_MODE=assisted`.
 
 `PREFERRED` queda fuera de este experimento. Sólo podría evaluarse en otro
-plan y preregistro posteriores, nunca como reinterpretación del lote V3.
+plan y preregistro posteriores, nunca como reinterpretación del lote V4.
 
 **Controles:**
 
@@ -132,7 +130,7 @@ plan y preregistro posteriores, nunca como reinterpretación del lote V3.
   la varianza de `~/.claude` (217 K vs 45 K) no domine;
 - mismo commit;
 - ámbitos de proveedor nuevos, exclusivos por repetición y rol, sólo cuando
-  los gates de [3d-auth-design-v3.md](3d-auth-design-v3.md) demuestren que el
+  los gates de [3d-auth-design-v4.md](3d-auth-design-v4.md) demuestren que el
   ámbito es una partición real; los cooldowns no son un control de aislamiento;
 - **N se fija una sola vez, con N ≥ 5 por tarea y brazo**, antes del lote. Para
   OFF/ASSISTED y el mínimo N=5 son 4 × 2 × 5 = **40 muestras**. `preferred` no
@@ -145,64 +143,168 @@ ejecuta junto a un AO vivo cargado y se usa un data dir aislado
 
 ---
 
-## 5. Única función de decisión ejecutable
+## 5. Única función de decisión total y ejecutable
 
-### 5.1 Entradas congeladas
+### 5.1 Dominio, caps y registros
 
-La función recibe el plan preregistrado (`N ≥ 5`), las 40 o más posiciones en
-su orden sorteado, el estado del instrumento, y para cada posición: tarea,
-brazo, estado terminal, M1u, M2, M3, Q1, Q4 y Q6/`NA`. M1u y M2 son el total de
-todos los roles de la muestra; M3 usa el rol focal definido en §3. Q2, Q3, M1
-y Q5 se reportan, pero no cambian el veredicto. La ausencia de una muestra
-planificada no se ignora: sólo puede ser `NOT_RUN_INSTRUMENT` tras terminar el
-experimento por fallo del instrumento.
-
-Mediana significa el estadístico usual (promedio de los dos valores centrales
-si el número es par). Para una métrica `X`, `ratio(t, X) =
-median(ASSISTED_t.X) / median(OFF_t.X)`. Si la mediana OFF es cero, el ratio
-cumple sólo cuando la mediana ASSISTED también es cero; en A/B/C un par cero
-no cuenta como mejora. Los límites son inclusivos: exactamente `0.85`, `0.80`,
-`0.90` o `1.10` cumple. Cualquier otro empate en A/B/C no es mejora.
-
-### 5.2 Algoritmo
+El plan fija `N ≥ 5`, tareas `{A,B,C,D}`, brazos `{OFF,ASSISTED}`, orden, roles
+posibles y, para cada tarea `t` y rol `r`, dos enteros positivos:
 
 ```text
-decide(plan, samples, instrument):
-  if instrument.failed_after_start
-     or any planned sample == NOT_RUN_INSTRUMENT:
-       return INSTRUMENT_NO_GO
+TOKEN_CAP_ROLE[t,r] = máximo input no cacheado permitido al rol
+CALL_CAP_ROLE[t,r]  = máximo de requests al provider, incluidos retries
+TOKEN_CAP[t]        = Σ_r TOKEN_CAP_ROLE[t,r]
+CALL_CAP[t]         = Σ_r CALL_CAP_ROLE[t,r]
+```
 
-  if samples do not equal exactly the preregistered task × arm × N positions:
-       return INSTRUMENT_NO_GO
+Un rol no utilizado tiene ambos caps `0`. Los caps, el máximo de retries por
+clase y los roles se congelan en el preregistro raíz; no se estiman a partir de
+la muestra observada. M1u y M2 válidos son totales de todos los roles y deben
+ser enteros en `[0,TOKEN_CAP[t]]` y `[0,CALL_CAP[t]]`. M3 debe ser finito en
+`[0,1]`. Q1 y Q4 deben ser `0|1`; Q6 debe ser `0|1` sólo en C y el literal
+`NA` en A/B/D. Todo otro tipo, `null`, NaN, infinito o valor fuera de dominio es
+`MALFORMED_SAMPLE`.
 
-  normalize every post-start failure as:
-       Q1=0; Q4=0; Q6=0 when task C;
-       M1u=TOKEN_CAP; M2=CALL_CAP; M3=1
+Estados terminales permitidos para posiciones de eficacia:
 
-  quality = for every task t:
-       pass_count(ASSISTED, Q1, t) >= pass_count(OFF, Q1, t)
-       and pass_count(ASSISTED, Q4, t) >= pass_count(OFF, Q4, t)
-       and, only for C,
-           pass_count(ASSISTED, Q6, C) >= pass_count(OFF, Q6, C)
+```text
+COMPLETED
+FAILED_WORKER | FAILED_REVIEWER | TIMEOUT | GATEWAY_DENIAL
+PROVIDER_RETRY_EXHAUSTED | PROVIDER_RATE_LIMITED | PROVIDER_POLICY_FAILURE
+PROVIDER_TERMINAL_FAILURE | PROVIDER_SANCTION | AGENT_INDUCED_FAILURE
+BLOCKED_BY_PRIOR_SAMPLE | MALFORMED_SAMPLE
+```
 
-  efficiency = for each t in {A,B,C}:
-       ratio(t, M1u) <= 0.85
-       and (ratio(t, M2) <= 0.80 or ratio(t, M3) <= 0.80)
+Todos requieren `SAMPLE_START` salvo `BLOCKED_BY_PRIOR_SAMPLE`, que el
+supervisor asigna a una posición todavía no iniciada cuando una muestra previa
+impide causalmente ejecutarla. Esa excepción cuenta como fallo y nunca como
+unrun.
 
-  negative_control = for each X in {M1u,M2,M3}:
-       if median(OFF_D.X) == 0:
-           median(ASSISTED_D.X) == 0
-       else 0.90 <= ratio(D, X) <= 1.10
+`INSTRUMENT_NO_GO` y `NOT_RUN_INSTRUMENT` pertenecen al experimento/lineage,
+no son estados de eficacia de una muestra iniciada. La clasificación causal
+que puede producirlos está cerrada en [3d-auth-design-v4.md](3d-auth-design-v4.md)
+§2.
+
+### 5.2 Normalización total por muestra
+
+`normalize(sample)` siempre retorna un tuple completo
+`(M1u,M2,M3,Q1,Q4,Q6)`:
+
+1. La identidad de la posición siempre procede del plan/ledger host-only, no
+   del record producido por la muestra. Si, después de `SAMPLE_START`, el
+   record trae task/arm/sample_id ajenos, duplicados, corruptos o ausentes, la
+   posición host-only correspondiente se clasifica `MALFORMED_SAMPLE`; records
+   extra se conservan como evidencia pero nunca crean/eliminan posiciones.
+2. Si el estado es `COMPLETED` y **todos** los campos satisfacen §5.1, conserva
+   sus valores.
+3. Si el estado es cualquier fallo permitido, o es `COMPLETED` con al menos un
+   campo null/malformed/out-of-domain, reclasifica `MALFORMED_SAMPLE` cuando
+   corresponda y retorna:
+
+```text
+M1u = TOKEN_CAP[task]
+M2  = CALL_CAP[task]
+M3  = 1
+Q1  = 0
+Q4  = 0
+Q6  = 0 si task=C; NA si task∈{A,B,D}
+```
+
+No se conservan parcialmente campos “buenos” de un registro inválido. Un
+timeout, provider error, sanction, fallo de parser/gateway alcanzable por la
+muestra y agotamiento de retries siguen la regla 3. Cada retry del cliente
+incrementa M2 y sus tokens incrementan M1u; si el sample termina en éxito y no
+excede caps, sus totales observados son válidos. Exceder un cap es
+`AGENT_INDUCED_FAILURE` y usa la imputación, aunque el cliente declare éxito.
+
+### 5.3 Validación total del experimento
+
+`validate(plan, records, lineage)` retorna exactamente uno:
+
+- `INVALID_EXPERIMENT_INPUT`: exclusivamente schema/plan/cap/lineage inválido
+  detectado **antes del primer SAMPLE_START**, o ledger WORM roto por una causa
+  demostrablemente no alcanzable por ninguna muestra;
+- `INSTRUMENT_NO_GO`: existe un evento independiente válido según V4 §2 y por
+  ello una o más posiciones son `NOT_RUN_INSTRUMENT`;
+- `SCOREABLE`: existen exactamente `4 × 2 × N` posiciones, cada una iniciada o
+  `BLOCKED_BY_PRIOR_SAMPLE`, y todas normalizan por §5.2.
+
+Después del primer `SAMPLE_START`, task/arm/ID corrupto, record duplicado,
+ausente o ilegible, parser failure y ledger-write failure alcanzable por una
+muestra se normalizan como fallo de esa posición, no como
+`INVALID_EXPERIMENT_INPUT`. Si la ejecución cesa sin un evento independiente
+válido, cada posición restante pasa determinísticamente a
+`BLOCKED_BY_PRIOR_SAMPLE`. Así siempre hay `4×2×N` posiciones y no existe un
+operator abort limpio. `INVALID_EXPERIMENT_INPUT` es un NO-GO del instrumento
+pre-start; una posición bloqueada nunca se marca unrun.
+
+### 5.4 Función de eficacia
+
+Mediana es el estadístico usual, promediando los dos centrales si son pares.
+Para una métrica X y tarea t:
+
+```text
+off = median(OFF_t.X)
+assisted = median(ASSISTED_t.X)
+
+improves(t,X,limit):
+  if off == 0: false
+  else: assisted/off <= limit
+
+neutral_D(X):
+  if off == 0: assisted == 0
+  else: 0.90 <= assisted/off <= 1.10
+```
+
+Los límites son inclusivos. Un empate ordinario en A/B/C no mejora; cero/cero
+en A/B/C tampoco. Entonces:
+
+```text
+decide(plan, records, lineage):
+  v = validate(plan, records, lineage)
+  if v == INVALID_EXPERIMENT_INPUT: return INSTRUMENT_NO_GO
+  if v == INSTRUMENT_NO_GO: return INSTRUMENT_NO_GO
+
+  S = normalize(each preregistered position)
+
+  quality = for every t in {A,B,C,D}:
+      pass_count(ASSISTED,t,Q1) >= pass_count(OFF,t,Q1)
+      and pass_count(ASSISTED,t,Q4) >= pass_count(OFF,t,Q4)
+      and (t != C or
+           pass_count(ASSISTED,C,Q6) >= pass_count(OFF,C,Q6))
+
+  efficiency = for every t in {A,B,C}:
+      improves(t,M1u,0.85)
+      and (improves(t,M2,0.80) or improves(t,M3,0.80))
+
+  negative_control = for every X in {M1u,M2,M3}: neutral_D(X)
 
   if quality and efficiency and negative_control: return GO
   return NO_GO
 ```
 
-No existe `ITERATE`, análisis por subconjunto, sustitución, relote ni regla
-secundaria capaz de cambiar el resultado. Los intervalos, rangos, M1, Q2, Q3,
-Q5, costes y análisis de sensibilidad se publican como diagnóstico. Un fallo
-del instrumento produce `INSTRUMENT_NO_GO`, no un resultado de eficacia, y no
-autoriza otro lote bajo el mismo preregistro.
+### 5.5 Resultado de lineage
+
+La readiness nunca recibe sólo “el último batch”. Recibe la lineage append-only
+de V4 §3. Un root permite como máximo `MAX_SUCCESSORS=1`, fijado antes del
+primer `SAMPLE_START`. El successor sólo puede corregir el instrumento; no
+puede cambiar tareas, brazos, N, umbrales, caps, modelos ni estimando.
+
+```text
+lineage_decide(lineage):
+  if family registry/ledger invalid, missing, rewritten or has >1 successor:
+      return NO_GO(reason=LINEAGE_INVALID)
+  compute and retain decide(...) for every preregistration
+  if any predecessor ended for an event not independently admissible by V4 §2:
+      return NO_GO(reason=INVALID_PREDECESSOR)
+  if terminal preregistration result == GO:
+      return GO(with mandatory disclosed_lineage=true)
+  return NO_GO(reason=TERMINAL_NOT_GO)
+```
+
+Todos los resultados intermedios, abortos y posiciones se publican. No existe
+`ITERATE`, selección por subconjunto, replacement, relot ni regla secundaria.
+M1, Q2, Q3, Q5, costes y análisis de sensibilidad son sólo diagnósticos.
 
 ---
 

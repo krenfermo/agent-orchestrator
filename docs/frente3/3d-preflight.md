@@ -2,11 +2,11 @@
 
 Fecha: 2026-09-25. Rama: `feat/frente3-3d-prerequisites`, creada desde ECC `e2e9c741d`, donde 3C ya está CLOSED.
 
-> **Estado normativo desde V3 (2026-09-28).** Este documento conserva el
+> **Estado normativo desde V4 (2026-09-28).** Este documento conserva el
 > historial de ciclos y evidencia preflight. Sus reglas antiguas de muestra,
 > capacidad, retries, cegamiento, autenticación y STOP **no son normativas**.
 > La única especificación vigente es
-> [3d-auth-design-v3.md](3d-auth-design-v3.md), y la única función de decisión
+> [3d-auth-design-v4.md](3d-auth-design-v4.md), y la única función de decisión
 > está en [06-benchmark-plan.md](06-benchmark-plan.md) §§3–5.
 
 **Alcance.** Neutralizar los cuatro bloqueantes que salieron en los E2E de 3C antes de ejecutar ningún A/B. **El experimento de 3D no se ha ejecutado.**
@@ -1151,3 +1151,35 @@ pero no se ejecutó.
 **PRECONDITION_3D_AUTH_DESIGN_V3 = READY_FOR_CODEX_REVIEW.** No hay P0/P1 de
 diseño conocidos; P1-2 sigue `REQUIRES_GATE` por G6 y no se presenta como
 cerrado. **PRECONDITION_3D = NO-GO.** No se implementó ni ejecutó nada.
+
+## Revisión REAL de V3 y corrección estricta V4 (2026-09-28)
+
+La revisión real de V3 dio
+`PRECONDITION_3D_AUTH_DESIGN_V3 = NEEDS_CHANGES`. Reconoció las mejoras de V3,
+pero reabrió la clasificación de fallos, optional stopping entre
+preregistraciones, G6, compatibilidad de respuestas, binding de rol, construct
+de Q6, totalidad de la función, provenance post-adapter, G4, contaminación de
+gates, estado host y extracción hostil.
+
+[3d-auth-design-v4.md](3d-auth-design-v4.md) es una corrección estricta:
+
+- todo fallo post-start alcanzable por bytes/timing/connections/volumen/recursos
+  o requests de la muestra cuenta como fallo de esa posición;
+- `INSTRUMENT_NO_GO` y pause tienen allowlists cerradas;
+- lineage WORM publica preregistrations, starts, abortos, successors y resultados;
+- G6 usa A/B/C/D por once capas, positive controls y bounds preregistrados;
+- responses siguen un único state machine comparado con provider directo;
+- worker recibe un broker no exportable y reviewer espera quiescencia total;
+- Q6 v2 fija target/lines/causal line/IoU y elimina explanation del quality construct;
+- 06 §5 totaliza caps, null, malformed, retries, failures y unrun positions;
+- provenance llega a wire/decoded model-facing bytes;
+- G4 usa clusters independientes, fresh prefixes/scope pairs y bounds cross-org;
+- gate organizations se retiran; host/extraction inventories quedan completos.
+
+El prompt adversarial nuevo está en
+[3d-auth-design-v4-codex-review-prompt.md](3d-auth-design-v4-codex-review-prompt.md)
+y no se ejecutó.
+
+**PRECONDITION_3D_AUTH_DESIGN_V4 = READY_FOR_CODEX_REVIEW.** No hay P0/P1
+`OPEN`; los cierres que dependen de evidencia permanecen `REQUIRES_GATE`.
+**PRECONDITION_3D = NO-GO.** No se implementó ni ejecutó nada.

@@ -56,8 +56,10 @@ demostrado ningún ahorro de tokens; eso le corresponde al piloto.
 | Documento | Contenido |
 |---|---|
 | [3d-preflight.md](3d-preflight.md) | Bloqueantes, laboratorio de cegamiento, ciclos de preregistro, mini-E2E y revisiones de Codex |
-| [3d-auth-design-v3.md](3d-auth-design-v3.md) | **Única especificación vigente.** Sin replacements/relotes; estado de proveedor condicionado a gates u organizaciones independientes; roles separados; Q6 anti-shotgun; tratamiento `Provisioned.Render()` con typed spans. Veredicto: READY_FOR_CODEX_REVIEW |
-| [3d-auth-design-v3-codex-review-prompt.md](3d-auth-design-v3-codex-review-prompt.md) | Nuevo prompt adversarial de V3, preparado pero no ejecutado |
+| [3d-auth-design-v4.md](3d-auth-design-v4.md) | **Única especificación vigente.** Causalidad conservadora, lineage WORM, G6 factorial, state machine de respuestas, broker por rol, Q6 v2, provenance model-facing. Veredicto: READY_FOR_CODEX_REVIEW |
+| [3d-auth-design-v4-codex-review-prompt.md](3d-auth-design-v4-codex-review-prompt.md) | Prompt adversarial V4, preparado pero no ejecutado |
+| [3d-auth-design-v3.md](3d-auth-design-v3.md) | Historial sustituido. La revisión REAL de Codex dio **NEEDS_CHANGES** |
+| [3d-auth-design-v3-codex-review-prompt.md](3d-auth-design-v3-codex-review-prompt.md) | Prompt ejecutado para la revisión V3 |
 | [3d-auth-design-v2.md](3d-auth-design-v2.md) | Historial sustituido. La segunda revisión REAL de Codex dio **NO-GO** (P1 6 / P2 4 / P3 1) |
 | [3d-auth-design-v2-codex-review-prompt.md](3d-auth-design-v2-codex-review-prompt.md) | Prompt ejecutado para la revisión de V2 |
 | [3d-auth-design-codex-review.md](3d-auth-design-codex-review.md) | Revisión REAL de Codex del diseño v1: **NO-GO** (P0 1 / P1 5 / P2 5 / P3 1) |

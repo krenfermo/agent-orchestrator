@@ -2,7 +2,7 @@
 
 > **SUSTITUIDO (2026-09-28).** La segunda revisión REAL de Codex dio
 > **NO-GO** (P1 6 / P2 4 / P3 1). La única especificación vigente es
-> [3d-auth-design-v3.md](3d-auth-design-v3.md) y la única función de decisión
+> [3d-auth-design-v4.md](3d-auth-design-v4.md) y la única función de decisión
 > está en [06-benchmark-plan.md](06-benchmark-plan.md) §§3–5. Este documento es
 > sólo historial; ninguna regla, gate o afirmación suya es normativa.
 

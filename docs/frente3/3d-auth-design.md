@@ -1,6 +1,6 @@
 # Frente 3 / 3D — PRECONDITION_3D_AUTH_DESIGN: identidades dedicadas del laboratorio
 
-> **SUSTITUIDO (2026-09-28).** La revisión REAL de Codex dio **NO-GO** ([3d-auth-design-codex-review.md](3d-auth-design-codex-review.md)). La única especificación vigente es [3d-auth-design-v3.md](3d-auth-design-v3.md). Este documento se conserva solo como historial: **no se implementa** y ninguna de sus secciones es normativa. La revisión provisional de §9.2 (no Codex) queda anulada.
+> **SUSTITUIDO (2026-09-28).** La revisión REAL de Codex dio **NO-GO** ([3d-auth-design-codex-review.md](3d-auth-design-codex-review.md)). La única especificación vigente es [3d-auth-design-v4.md](3d-auth-design-v4.md). Este documento se conserva solo como historial: **no se implementa** y ninguna de sus secciones es normativa. La revisión provisional de §9.2 (no Codex) queda anulada.
 
 Fecha: 2026-09-29. Rama: `feat/frente3-3d-prerequisites`, partiendo de `48149d1bc`.
 
