@@ -95,7 +95,7 @@ Símbolos: ✗ = canal abierto; ✓ = cerrado; ~ = cerrado con una condición in
 | 13 | Rate limits compartidos (cabeceras `ratelimit-remaining`) | ✗ | ~ | ~ | ~ (el gateway elimina las cabeceras; hay enfriamiento entre repeticiones) |
 | 14 | **Internet público**: pastebins, webhooks, gists; `curl` o WebFetch desde el agente | ✗ | ✗ | ✗ | ✓ **solo si** además se niega todo el egress salvo el gateway (§4.4) |
 | 15 | Credenciales personales ajenas a los LLM (llavero con git osxkeychain o `gh`, `~/.config/gh`, `~/.ssh`, `~/.netrc`): push a un repo o gist como canal | ✗ | ✗ | ✗ | ✓ **solo si** se niegan el llavero y esos archivos (§4.4) |
-| 16 | Estado local: HOME, `CODEX_HOME`, `~/.claude*`, cachés, tmux, sockets, Docker | cerrado en ciclos anteriores | igual | igual | igual; se endurece (§4.4) |
+| 16 | Estado local: HOME, `CODEX_HOME`, `~/.claude*`, cachés, tmux, sockets, Docker | lecturas cerradas en ciclos anteriores; **escrituras fuera del árbol de la repetición NO** (`/private/tmp`, home real, defaults, pasteboard). Procesos que sobreviven al teardown tampoco | ✗ | ✗ | ✗ sin §9.2 (usuario de macOS dedicado o write-deny + reaping) |
 | 17 | Telemetría y flags del proveedor (GrowthBook, Statsig, Datadog) | congelado con plantilla | igual | igual | ✓ (el egress directo queda negado; el gateway no los reenvía) |
 
 **Conclusiones del modelo:**
@@ -116,7 +116,7 @@ Símbolos: ✗ = canal abierto; ✓ = cerrado; ~ = cerrado con una condición in
 
 **OpenAI.** Una **organización de Platform dedicada**, que no es la de ChatGPT del operador.
 
-- Dentro, **un proyecto por repetición**, con una clave de service account del proyecto.
+- Dentro, ~~un proyecto por repetición~~ **un único proyecto** con una clave de service account (enmendado en §9.2).
 
 **Límite en ambas.** Límite de gasto por workspace o proyecto, y ningún modelo más allá de los preregistrados (worker `opus[1m]`, reviewer `gpt-5.6-sol`).
 
@@ -206,7 +206,7 @@ La caché es el único canal que el gateway no puede cerrar solo, porque un hijo
 - Se retira la excepción de `mDNSResponder`: con `base_url` en loopback no hace falta DNS.
 - Consecuencias:
   - WebFetch y WebSearch dejan de funcionar, igual en ambos brazos;
-  - el fixture debe compilar y pasar tests **sin red**: `GOFLAGS=-mod=mod` y `GOPROXY=off`, con la caché de módulos del snapshot (**VERIFICAR** en el ensayo);
+  - el fixture debe compilar y pasar tests **sin red**: `GOFLAGS=-mod=readonly` (o vendor), `GOTOOLCHAIN=local`, `GOPROXY=off`, `GOSUMDB=off` y telemetría de Go desactivada. La caché de módulos debe ser una copia por repetición o de solo lectura; si no, es un canal (**VERIFICAR** en el ensayo);
   - esto se añade a la restricción de tareas preregistrada.
 
 **Nuevos canales obligatorios de la sonda** (fail-closed, mismo esquema que los 10 actuales):
@@ -280,12 +280,13 @@ Se demuestra por eliminación:
 - **Identidad (organización) dedicada:** una por proveedor para todo el experimento.
 - **Credencial y alcance de servidor:**
   - Anthropic: uno **por repetición** (workspace + clave limitada);
-  - OpenAI: un proyecto por repetición más el enfriamiento de §4.3.
+  - OpenAI: un único proyecto más el enfriamiento de §4.3 y el registro de prefijos del gateway (enmendado en §9.2).
 - **El agente nunca ve la credencial**: solo un token de capacidad por repetición del gateway.
 - **Mecanismo adicional necesario:** el gateway con allowlist y el egress denegado (§4.4).
 
 ## 6. Qué tiene que crear o configurar el operador (cuando se autorice; **no ahora**)
 
+0. **Un usuario de macOS dedicado al laboratorio** (obligatorio tras la revisión, §9.2 P1-A). El harness, los daemons del laboratorio y los agentes corren con ese usuario. No tiene ninguna sesión personal de Claude, ChatGPT, GitHub ni ssh.
 1. **Anthropic Console:**
    - una organización nueva y dedicada al laboratorio, con facturación propia y límite de gasto;
    - sin SSO ni miembros compartidos con otros usos.
@@ -296,7 +297,7 @@ Se demuestra por eliminación:
    Las claves solo se crean en la UI de Console. Para 3D (3 tareas × 2 brazos × 5 = 30 repeticiones) son ~32 workspaces y claves. **Decisión del operador:** aceptar ese trabajo manual, o reducirlo con el enfriamiento de §4.3 (un solo workspace, con enfriamiento > 1 h entre repeticiones; más débil, porque depende del TTL).
 3. **OpenAI Platform:**
    - una organización nueva y dedicada (no la de ChatGPT);
-   - un proyecto por repetición, con una clave de service account por proyecto, o la vía de la Admin API (§8, pregunta abierta);
+   - **un único proyecto** con una clave de service account (enmendado en §9.2: un proyecto por repetición no aísla la caché);
    - límite de gasto;
    - sin ChatGPT ni Codex cloud en esa organización.
 4. **Almacenar las claves** en un llavero dedicado del laboratorio o en 1Password, con los nombres que fije el runner. **No** pegarlas en el chat, en el repo ni en `~/.ao`.
@@ -320,17 +321,80 @@ Se demuestra por eliminación:
 1. **Seatbelt comparte UID con el operador.** Un escape con código nativo arbitrario sigue fuera del modelo, igual que hasta ahora. El aislamiento fuerte sería otro usuario del SO o una VM.
    - Con este diseño, el daño de un escape **baja**: el llavero del laboratorio contiene solo claves de alcance por repetición.
    - Pero el llavero de login personal seguiría alcanzable para un escape. Mitigación opcional: correr el laboratorio con otro usuario de macOS.
-2. **Caché de OpenAI.** El aislamiento por proyecto no está demostrado. Se cierra con el enfriamiento y la comprobación de lectura = 0 en el primer turno; esa comprobación es el control y el enfriamiento, la defensa. **VERIFICAR** que Codex expone `cached_tokens` en el rollout.
+2. **Caché de OpenAI.** El aislamiento por proyecto no está demostrado. La comprobación de lectura = 0 en el primer turno **no es un control suficiente** (revisión, P1-C). Ver §9.2: registro de prefijos en el gateway, eliminación de los campos de caché y enfriamiento que empieza al revocar el token.
 3. **Inventario de rutas y betas.** El allowlist se fija con un ensayo que registre cada petición real de Claude Code 2.1.284 y Codex 0.157.1 contra el gateway. Si alguna ruta necesaria tiene estado, hay que decidir: bloquearla (la función se degrada igual en ambos brazos) o aceptarla con alcance por repetición. La evidencia de Codex viene de `main` (0.158.x), no de la 0.157.1 instalada.
 4. **Flags del servidor de Claude Code.** Con API key y `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, y sin egress directo, se espera que no haya flags remotas. Hay que reconstruir la plantilla de `HOME` y demostrar su estabilidad, como en el ciclo 4.
 5. **Cambio de autenticación.** El modelo servido y los límites pueden diferir entre suscripción y API. Es igual en ambos brazos, pero invalida la comparación con los lotes anteriores: 3D empieza de cero con la nueva configuración.
 6. **Costo:** 30 repeticiones con worker `opus[1m]` más reviewer `gpt-5.6-sol` por API. Se estima en el preregistro.
 7. **OpenAI Admin API y claves de proyecto:** falta **VERIFICAR** si permite crear service accounts con clave por API. Si sí, el harness podría provisionarlas, pero eso le daría una clave de administrador, que es una superficie mayor. **Recomendación:** creación manual.
 
+
 ## 9. Revisión adversarial
 
-Ver §9.1, que se rellena con el resultado de la revisión.
+### 9.1 Codex: **NO EJECUTADA (bloqueada por el entorno)**
+
+Este ciclo se hizo desde un contenedor en la nube. En él:
+
+- no está el binario `codex`;
+- `api.openai.com` está bloqueado por el proxy de salida;
+- no hay credenciales, y la instrucción era no pedirlas.
+
+Por eso **no hay revisión de Codex**, y **no se afirma lo contrario**. El prompt está listo en [3d-auth-design-codex-review-prompt.md](3d-auth-design-codex-review-prompt.md). Tiene reglas de solo lectura: sin sesiones, sin credenciales y sin tocar producto, producción ni evidencia. Se ejecuta en la máquina del laboratorio.
+
+### 9.2 Revisión adversarial independiente provisional (NO es Codex)
+
+La hizo un subagente de contexto limpio, en solo lectura, sobre este documento, `3d-preflight.md`, las cadenas del binario de Claude Code 2.1.284 y el código de `openai/codex` `main`. No tuvo acceso al harness del laboratorio.
+
+**Veredicto: NEEDS_CHANGES (P0 0 / P1 4 / P2 6 / P3 5).** Todo lo que sigue queda incorporado al diseño como enmiendas obligatorias.
+
+**Confirmado por la revisión:** las filas 1–4 y 8–10 quedan cerradas con un gateway que solo usa API key y negando el llavero y los archivos personales. **Esto cierra el P1-2 original.**
+
+| # | Hallazgo | Enmienda al diseño |
+|---|---|---|
+| P1-A | La fila 16 no estaba cerrada. `agent.sb` es allow-by-default y nunca negó **escrituras** fuera del árbol de la repetición: `/private/tmp`, el home real por ruta absoluta, defaults, pasteboard, notificaciones. Ni la sonda ni `analyze.py` miran ahí. Es un canal local entre repeticiones, **abierto también en el cycle6** | **Usuario de macOS dedicado al laboratorio, obligatorio** (deja de ser opcional, §8.1): su home, llavero, `/tmp` por usuario y procesos son distintos de los del operador. Además, escrituras denegadas por defecto salvo el árbol de la repetición, y canarios de escritura fuera del árbol en la sonda |
+| P1-B | Nada garantiza que los procesos de una repetición hayan muerto antes de la siguiente. Un proceso desligado de tmux sobrevive y puede pasar estado adelante (puertos loopback, `procargs2`) | En el teardown, enumerar y matar todo proceso del UID del laboratorio (o descendiente del shim) y exigir **cero** antes de la siguiente repetición; si no, ABORT. Cada repetición recibe un puerto nuevo para el gateway de credenciales, ya ocupado antes de lanzar el agente |
+| P1-C | "Lectura de caché = 0 en el primer turno" es insuficiente por los dos lados. **No detecta** el sondeo activo, que hacen los hijos en peticiones posteriores. **Da falsos positivos correlacionados con el resultado**: canarios, probes de AO, un segundo reviewer, un worker relanzado o subagentes que acierten prefijos de la propia repetición. Como el lote se detiene, eso es selección | Canarios y probes en workspaces o proyectos **separados**. El gateway guarda un registro por repetición de hashes de prefijo y aborta ante una lectura de caché cuyo prefijo no se envió antes **en la misma repetición**. El gateway quita de las respuestas `cache_read_input_tokens`, `cache_creation_input_tokens` y `cached_tokens` y los registra en privado: así el agente pierde el oráculo. El canal de tiempo se cubre con el aislamiento estructural y el enfriamiento |
+| P1-D | Abortar ante cualquier petición rechazada, con las herramientas por defecto, provoca abortos sistemáticos o disparables por el agente. Codex `main` tiene `web_search_mode = Cached` por defecto (`core/src/config/mod.rs:3768-3769`), así que se enviaría `web_search` alojado en cada petición. Claude Code tiene como herramientas de servidor `web_search_20250305` y `advisor_20260301`. Y un agente que va perdiendo podría abortar a propósito | Apagarlas en el cliente, igual en ambos brazos: `--disallowedTools` suma `WebSearch` y `WebFetch`; Codex `web_search = "disabled"` (**VERIFICAR** en 0.157.1). Una petición rechazada **no aborta**: se rechaza, se registra y la muestra cuenta con su resultado (coherente con "toda muestra cuenta"). Solo aborta lo que indique una fuga (credencial, egress o prefijo ajeno) |
+| P2-E | El enfriamiento de OpenAI descansa en hechos no verificados: retención ≤ 1 h, ausencia de retención extendida por defecto en el modelo, alcance por organización | El gateway **fija** explícitamente la retención en memoria si la API lo acepta. El enfriamiento cuenta desde la revocación del token o la última petición del gateway. Canario de caché positivo en el ensayo para medir la cota |
+| P2-F | El aislamiento de caché por workspace de Anthropic viene de la documentación, no de una medición | Canario en el ensayo: prefijo escrito en el workspace X, leído desde el Y; debe dar 0 |
+| P2-G | Claude Code llama a `https://api.anthropic.com` sin pasar por `ANTHROPIC_BASE_URL` para `/api/claude_code/settings`, `policy_limits` y `organizations/metrics_enabled` (esta última se salta `DISABLE_NONESSENTIAL_TRAFFIC`) | Con el egress denegado, fallan. **VERIFICAR** que el arranque no se bloquea ni cambia de comportamiento, y construir la plantilla de `HOME` bajo la misma política de egress |
+| P2-H | Detalles del egress denegado: `GOFLAGS=-mod=mod` era incorrecto (ya corregido en §4.4); la caché de módulos compartida es un canal; el `base_url` debe ser `127.0.0.1` literal; `AO_BROWSER_RUNTIME_ADDRESS` queda bloqueado (era un egress residual); ¿alguna ruta del gateway de AO hace que el daemon, que no está en sandbox, salga a la red (confused deputy)? | §4.4 corregido. Auditar las rutas del gateway de AO para ese caso (**VERIFICAR**) |
+| P2-I | Endurecimiento del gateway de credenciales | Binario compilado y firmado con hardened runtime y `-o restrict`. Nada de intérprete: una ACL del llavero sobre `python3` confía en cualquier script. Claves fuera de argv y env. Logs y llavero del laboratorio negados al sandbox por ruta. Mensajes de rechazo genéricos |
+| P2-J | Regresiones de §4.6 que hay que declarar | Plantilla de `HOME` reconstruida con la identidad del laboratorio. Los symlinks de `skills` y `plugins` de Codex a `~/.codex` pasan a ser **copias preregistradas**. No hay otras regresiones |
+| P3 | Nombre del *provider* ≠ "OpenAI" (`is_openai()` compara el nombre, `model-provider-info/src/lib.rs:606`); fijar `model_catalog_url` o verificar `{base_url}/models`; allowlist con `?beta=true`; normalizar el cuerpo de los 429; límite de gasto por workspace obligatorio | Incorporado |
+
+**Revisión de §5 (alcance).**
+
+- **Anthropic:** workspace por repetición confirmado como la única clausura estructural de la caché.
+- **OpenAI:** un proyecto por repetición no aporta nada a la caché, que es al menos por organización. Los endpoints con estado ya los cierra el allowlist. **Enmienda:** OpenAI usa **un único proyecto** dedicado. El control es el enfriamiento, más el registro y el borrado de campos del gateway (P1-C, P2-E). Así se evitan ~30 proyectos manuales.
+- **Falta, y ahora es obligatorio:** el usuario de macOS dedicado y el *reaping* de procesos (P1-A, P1-B).
+
+**Alcance final:**
+
+- **Anthropic:** una organización dedicada, un workspace y una clave limitada por repetición, más 1 para el ensayo y 1 para los canarios.
+- **OpenAI:** una organización dedicada, un proyecto y una clave, más el enfriamiento.
+- **Local:** un usuario de macOS dedicado.
+- **El agente no ve nunca ninguna clave.**
 
 ## 10. Veredicto
 
-Ver §10.1.
+**PRECONDITION_3D_AUTH_DESIGN = NEEDS_CHANGES.**
+
+- El diseño cierra el P1-2 original: sin credencial personal en el sandbox, relanzar el proveedor no da nada nuevo.
+- La revisión provisional encontró 4 P1 más:
+  - dos locales y **preexistentes**: escrituras fuera del árbol y procesos que sobreviven;
+  - dos sobre la verificación de la caché y los abortos.
+- Todos tienen enmienda de diseño, pero nada está implementado ni medido.
+- **La revisión de Codex exigida no se pudo ejecutar.**
+- El cierre **requiere un gateway de credenciales**. Según la instrucción, su arquitectura queda documentada (§4.2 y §9.2) y el trabajo se detiene antes de implementarlo.
+
+**Siguiente paso exacto:**
+
+1. El operador ejecuta la revisión de Codex con [3d-auth-design-codex-review-prompt.md](3d-auth-design-codex-review-prompt.md) en la máquina del laboratorio, en solo lectura, y la guarda en `~/.ao/scratch/frente3/reviews/3d-preflight/auth-design/codex/`.
+2. Se incorporan sus hallazgos a este documento.
+3. Con un veredicto sin P0/P1 abiertos, el operador decide y autoriza:
+   - las cuentas y el usuario de macOS (§6, con el alcance final de §9.2);
+   - la implementación del gateway y de los cambios de sandbox, sonda y teardown.
+4. Solo después: ensayo con canarios (§9.2: P1-C, P2-E, P2-F y P2-G), preregistro nuevo, mini-E2E y revisión de Codex.
+
+3D sigue sin ejecutarse.

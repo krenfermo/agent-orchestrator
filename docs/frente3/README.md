@@ -50,3 +50,11 @@ memoria y router OFF.
 
 **Siguiente: prerequisitos de 3D** (carrera de review, ruta de review, aislamiento de sesiones, contexto externo). Después, el piloto A/B. Project Memory sigue **desactivada** por defecto. No se ha
 demostrado ningún ahorro de tokens; eso le corresponde al piloto.
+
+## 3D — prerequisitos (en curso, NO-GO)
+
+| Documento | Contenido |
+|---|---|
+| [3d-preflight.md](3d-preflight.md) | Bloqueantes, laboratorio de cegamiento, ciclos de preregistro, mini-E2E y revisiones de Codex |
+| [3d-auth-design.md](3d-auth-design.md) | Rediseño de la autenticación: identidades dedicadas, gateway de credenciales, alcance por repetición. Veredicto: NEEDS_CHANGES |
+| [3d-auth-design-codex-review-prompt.md](3d-auth-design-codex-review-prompt.md) | Prompt de la revisión adversarial de Codex (pendiente) |

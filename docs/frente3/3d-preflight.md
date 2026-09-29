@@ -1047,3 +1047,26 @@ El bloqueo de re-ejecución de binarios **no se implementó**: sería una defens
 Observación de entorno: Claude Code se autoactualizó a 2.1.284 durante el día (quedan versiones antiguas ejecutables en `~/.local/share/claude/versions`). El laboratorio lo detecta como deriva del fingerprint FROZEN y aborta; el próximo preregistro congelará la versión vigente.
 
 **PRECONDITION_3D = NO-GO. STOP + NEEDS_ATTENTION.**
+
+## Rediseño de la autenticación del laboratorio (2026-09-29): solo diseño
+
+El P1-2 (relanzar el proveedor con las credenciales de la cuenta) ya no se intenta cerrar con Seatbelt. El nuevo diseño:
+
+- usa identidades dedicadas del laboratorio;
+- mete un gateway de credenciales fuera del sandbox;
+- limita el alcance a cada repetición;
+- deniega el egress;
+- corre el laboratorio con un usuario de macOS dedicado.
+
+Diseño completo, modelo de canales, revisión adversarial provisional y veredicto: [3d-auth-design.md](3d-auth-design.md).
+
+No se implementó nada ni se tocaron credenciales, harness, preregistro ni corridas. La revisión de Codex quedó **bloqueada por el entorno** (contenedor en la nube sin Codex ni acceso a la API) y está pendiente de ejecutarse en la máquina del laboratorio.
+
+La revisión provisional encontró dos canales locales **preexistentes** que el cycle6 no cubría:
+
+- escrituras fuera del árbol de la repetición;
+- procesos que sobreviven al teardown.
+
+También vio que WebFetch y `curl` hacia internet público funcionan como canal de escritura.
+
+**PRECONDITION_3D_AUTH_DESIGN = NEEDS_CHANGES. PRECONDITION_3D = NO-GO.** 3D no se ejecuta.
