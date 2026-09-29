@@ -1,5 +1,7 @@
 # Frente 3 / 3D — PRECONDITION_3D_AUTH_DESIGN: identidades dedicadas del laboratorio
 
+> **SUSTITUIDO (2026-09-28).** La revisión REAL de Codex dio **NO-GO** ([3d-auth-design-codex-review.md](3d-auth-design-codex-review.md)). La especificación vigente es [3d-auth-design-v2.md](3d-auth-design-v2.md). Este documento se conserva solo como historial: **no se implementa** y ninguna de sus secciones es normativa. La revisión provisional de §9.2 (no Codex) queda anulada.
+
 Fecha: 2026-09-29. Rama: `feat/frente3-3d-prerequisites`, partiendo de `48149d1bc`.
 
 **Alcance.** Solo diseño y revisión. Sustituye el intento de cerrar con Seatbelt el P1-2 del cycle6 (relanzamiento del proveedor con las credenciales de la cuenta, ver [3d-preflight.md](3d-preflight.md), última sección).
@@ -341,7 +343,7 @@ Este ciclo se hizo desde un contenedor en la nube. En él:
 
 Por eso **no hay revisión de Codex**, y **no se afirma lo contrario**. El prompt está listo en [3d-auth-design-codex-review-prompt.md](3d-auth-design-codex-review-prompt.md). Tiene reglas de solo lectura: sin sesiones, sin credenciales y sin tocar producto, producción ni evidencia. Se ejecuta en la máquina del laboratorio.
 
-### 9.2 Revisión adversarial independiente provisional (NO es Codex)
+### 9.2 Revisión adversarial independiente provisional (NO es Codex) — ANULADA por la revisión real de Codex
 
 La hizo un subagente de contexto limpio, en solo lectura, sobre este documento, `3d-preflight.md`, las cadenas del binario de Claude Code 2.1.284 y el código de `openai/codex` `main`. No tuvo acceso al harness del laboratorio.
 

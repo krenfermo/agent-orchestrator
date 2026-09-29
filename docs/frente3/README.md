@@ -56,5 +56,8 @@ demostrado ningún ahorro de tokens; eso le corresponde al piloto.
 | Documento | Contenido |
 |---|---|
 | [3d-preflight.md](3d-preflight.md) | Bloqueantes, laboratorio de cegamiento, ciclos de preregistro, mini-E2E y revisiones de Codex |
-| [3d-auth-design.md](3d-auth-design.md) | Rediseño de la autenticación: identidades dedicadas, gateway de credenciales, alcance por repetición. Veredicto: NEEDS_CHANGES |
-| [3d-auth-design-codex-review-prompt.md](3d-auth-design-codex-review-prompt.md) | Prompt de la revisión adversarial de Codex (pendiente) |
+| [3d-auth-design-v2.md](3d-auth-design-v2.md) | **Especificación vigente.** Cegamiento redefinido (se oculta la asignación, no el contenido; sin placebo), VM desechable por repetición, workspace por repetición, gateway en el host, gates G0–G9. Veredicto: NEEDS_CHANGES (sin P0/P1 conocidos; pendiente de la revisión de Codex de v2) |
+| [3d-auth-design-v2-codex-review-prompt.md](3d-auth-design-v2-codex-review-prompt.md) | Prompt de la revisión de Codex de v2 (pendiente) |
+| [3d-auth-design-codex-review.md](3d-auth-design-codex-review.md) | Revisión REAL de Codex del diseño v1: **NO-GO** (P0 1 / P1 5 / P2 5 / P3 1) |
+| [3d-auth-design.md](3d-auth-design.md) | v1, **sustituido** por v2 (solo historial) |
+| [3d-auth-design-codex-review-prompt.md](3d-auth-design-codex-review-prompt.md) | Prompt de la revisión de Codex del v1 (ejecutada) |

@@ -1070,3 +1070,39 @@ La revisión provisional encontró dos canales locales **preexistentes** que el 
 También vio que WebFetch y `curl` hacia internet público funcionan como canal de escritura.
 
 **PRECONDITION_3D_AUTH_DESIGN = NEEDS_CHANGES. PRECONDITION_3D = NO-GO.** 3D no se ejecuta.
+
+## Revisión REAL de Codex del diseño de autenticación v1 y rediseño v2 (2026-09-28): solo diseño
+
+La revisión de Codex del diseño v1, ejecutada por el operador en la máquina del laboratorio, dio **NO-GO (P0 1 / P1 5 / P2 5 / P3 1)**. Copia literal: [3d-auth-design-codex-review.md](3d-auth-design-codex-review.md). Sustituye a la revisión provisional, que no era de Codex.
+
+- **P0:** el cegamiento exigido era imposible, porque el pack de ASSISTED está en el prompt.
+- **P1:**
+  - estado de usuario de macOS compartido entre repeticiones;
+  - procesos huérfanos;
+  - cuotas compartidas;
+  - enfriamiento de la caché de OpenAI sin fundamento;
+  - normas contradictorias sobre peticiones rechazadas.
+
+Respuesta: [3d-auth-design-v2.md](3d-auth-design-v2.md), que **reemplaza** a v1 en vez de enmendarlo:
+
+- **Cegamiento redefinido.** Se oculta la asignación (etiqueta, `memoryMode`, plan, otras repeticiones, evidencia), no el contenido que el agente recibe. **Sin placebo**: cambiaría la pregunta y contaminaría M1.
+- **Medidas separadas.** Las objetivas (M1–M3 del registro del gateway, Q1 y Q4) quedan separadas de los juicios de agentes expuestos al tratamiento (Q2 y Q3, no ciegos).
+- **Frontera: una VM macOS desechable por repetición**, con el lab actual dentro. Cierra el estado local y los huérfanos por destrucción.
+- **Workspace de proveedor por repetición**, más un gateway en el host.
+- **Reviewer Codex** solo si se demuestra que la caché de OpenAI no cruza proyectos; si no, reviewer Claude.
+- **Cuotas:** regla ventana/presupuesto.
+- **Norma única de muestra:** todo cuenta; STOP del lote solo ante una fuga demostrada o un fallo del instrumento.
+
+No se implementó nada ni se tocaron credenciales, cuentas, harness ni corridas.
+
+**Bloqueo operativo:** el volumen de datos del host tiene 6,4 GB libres (99 %), y una imagen macOS necesita ~60–80 GB.
+
+**Comprobación interna antes de entregar** (subagente, no Codex): la primera redacción de v2 tenía 6 P1. Todos quedan incorporados en v2 §12.1:
+- secuestro del ssh de control;
+- Q4 ejecutado en el host;
+- STOP provocable por el agente;
+- falso positivo de caché;
+- invariante de prompt mal definido;
+- tarea C sin puerta de calidad.
+
+**PRECONDITION_3D_AUTH_DESIGN_V2 = NEEDS_CHANGES** (sin P0/P1 conocidos; las correcciones no han pasado un segundo ataque; hace falta la revisión de Codex de v2). **PRECONDITION_3D = NO-GO.** 3D no se ejecuta.
