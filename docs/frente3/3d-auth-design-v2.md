@@ -1,8 +1,14 @@
 # Frente 3 / 3D — PRECONDITION_3D_AUTH_DESIGN_V2: frontera desechable por repetición
 
+> **SUSTITUIDO (2026-09-28).** La segunda revisión REAL de Codex dio
+> **NO-GO** (P1 6 / P2 4 / P3 1). La única especificación vigente es
+> [3d-auth-design-v3.md](3d-auth-design-v3.md) y la única función de decisión
+> está en [06-benchmark-plan.md](06-benchmark-plan.md) §§3–5. Este documento es
+> sólo historial; ninguna regla, gate o afirmación suya es normativa.
+
 Fecha: 2026-09-28. Rama: `feat/frente3-3d-prerequisites`, partiendo de `faec13599`.
 
-**Qué es.** La especificación **única y autoritativa** del aislamiento y la autenticación del laboratorio de 3D. Responde a la revisión REAL de Codex del diseño v1 ([3d-auth-design-codex-review.md](3d-auth-design-codex-review.md): **NO-GO**, P0 1 / P1 5 / P2 5 / P3 1).
+**Qué era.** La especificación V2 del aislamiento y la autenticación del laboratorio de 3D. Respondía a la revisión REAL de Codex del diseño v1 ([3d-auth-design-codex-review.md](3d-auth-design-codex-review.md): **NO-GO**, P0 1 / P1 5 / P2 5 / P3 1).
 
 - [3d-auth-design.md](3d-auth-design.md) (v1) queda **sustituido**. Se conserva como historial: no se implementa ni se cita como norma. Su §9.2 (revisión provisional, no Codex) queda anulada por la revisión real.
 - Este documento no enmienda v1: lo reemplaza. Donde v1 y v2 difieren, vale v2 (P3-1 de Codex).

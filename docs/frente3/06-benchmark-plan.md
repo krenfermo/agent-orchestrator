@@ -1,6 +1,6 @@
 # Frente 3 / 3A — Plan de medición y piloto
 
-Fecha: 2026-09-24 · Estado: **diseño; no ejecutado.**
+Fecha: 2026-09-28 · Estado: **norma V3; no ejecutado.**
 
 Regla heredada de `docs/project-memory-baseline.md`: **un número que AO no pudo
 medir nunca se presenta como medido.** Un `0` medido y un `null` no disponible
@@ -49,16 +49,27 @@ exploración:
 
 ---
 
-## 3. Métricas del piloto
+## 3. Métricas del piloto (norma V3)
 
-**Primarias (las decisivas para el GO):**
+Esta sección y las §§4–5 contienen la **única regla normativa** del piloto.
+`3d-auth-design.md` y `3d-auth-design-v2.md` son historia y no pueden aportar
+umbrales, excepciones ni reglas alternativas. Los umbrales se congelan sin
+cambios en el preregistro; observar resultados nunca autoriza cambiar `N`, una
+imputación ni una frontera.
+
+**Métricas de consumo:**
 
 - **M1 — Input acumulado de la sesión** (Σ `input_tokens`) por rol y por run.
-  Incluye caché, porque es la señal de "cuánto contexto se procesó". Se
-  reporta aparte **M1u**, el input sin caché, porque es la señal de coste.
+  Incluye caché y se reporta como diagnóstico; no decide el GO.
+- **M1u — Input acumulado sin caché.** Es la señal decisiva de coste.
 - **M2 — Nº de llamadas al modelo** por rol.
-- **M3 — Llamadas de exploración** antes de la 1.ª edición (I6) y ficheros
-  distintos leídos (I1).
+- **M3 — carga normalizada de exploración.** Para A, B y D se mide en el worker
+  antes de la primera edición; para C, en el reviewer antes del primer
+  veredicto estructurado. Si `c` es el número de llamadas de exploración y `f`
+  el de ficheros distintos, `M3 = max(c/C_cap, f/F_cap)`, acotado a `[0,1]`.
+  `C_cap` y `F_cap` son límites del harness fijados en el preregistro. Si no hay
+  primera edición/veredicto, el rol falla o falta cualquiera de los dos datos,
+  `M3 = 1`. Así un fallo barato no puede parecer eficiente.
 
 **Secundarias:** duración de pared, coste USD (sólo Claude), pico de contexto,
 bytes del pack y relecturas.
@@ -66,11 +77,21 @@ bytes del pack y relecturas.
 **Calidad (gates, no métricas de ahorro):**
 
 - **Q1** — verify pasa;
-- **Q2** — veredicto final del reviewer `approved`;
-- **Q3** — nº de ciclos de fix;
-- **Q4** — oráculo de tareas: tests ocultos que el agente no ve, ejecutados
-  por AO al final;
-- **Q5** — revisión humana ciega de una muestra de diffs.
+- **Q2** — veredicto final del reviewer `approved` (**descriptivo; no decide**);
+- **Q3** — nº de ciclos de fix (**descriptivo; no decide**);
+- **Q4** — oráculo de tareas: tests ocultos que el agente no ve, ejecutados por
+  el supervisor en la VM de oráculo al final;
+- **Q5** — revisión humana ciega de una muestra de diffs (descriptiva; no
+  decide este experimento);
+- **Q6** — localización estructurada de la tarea C, definida en
+  [3d-auth-design-v3.md](3d-auth-design-v3.md) §4. Q6 sólo es aplicable a C;
+  `NA` en A, B y D no es un dato faltante.
+
+Para una muestra que termina en timeout, denegación, sanción, crash u otro
+fallo después de iniciarse, Q1/Q4 y Q6 cuando aplique valen `0`. En M1u y M2 se
+imputan los topes preregistrados de tokens y llamadas, no el consumo parcial;
+M3 vale `1`. No se reintenta la muestra. Los reintentos HTTP internos del
+cliente sí cuentan como llamadas y consumo de esa misma muestra.
 
 ---
 
@@ -100,8 +121,9 @@ medida. Criterios que debe cumplir:
 
 - **OFF:** `AO_MEMORY_MODE=off`.
 - **ASSISTED:** `AO_MEMORY_MODE=assisted`.
-- **PREFERRED:** `AO_MEMORY_MODE=preferred`, sólo si ASSISTED no degrada la
-  calidad.
+
+`PREFERRED` queda fuera de este experimento. Sólo podría evaluarse en otro
+plan y preregistro posteriores, nunca como reinterpretación del lote V3.
 
 **Controles:**
 
@@ -109,12 +131,13 @@ medida. Criterios que debe cumplir:
 - mismo `HOME` aislado para todos los brazos (runtime-home `strict`), para que
   la varianza de `~/.claude` (217 K vs 45 K) no domine;
 - mismo commit;
-- caché de provider caliente o fría **igual** en todos los brazos: orden
-  aleatorio intercalado y ≥ 6 minutos entre corridas (TTL 5 m), o reportar
-  aparte;
-- **N ≥ 5 repeticiones** por tarea y brazo. Se reportan medianas y rango, no
-  medias sueltas. Con 3 tareas × 3 brazos × 5 repeticiones salen 45 runs más
-  el control. El coste se estima antes con `turnbench` y un run piloto.
+- ámbitos de proveedor nuevos, exclusivos por repetición y rol, sólo cuando
+  los gates de [3d-auth-design-v3.md](3d-auth-design-v3.md) demuestren que el
+  ámbito es una partición real; los cooldowns no son un control de aislamiento;
+- **N se fija una sola vez, con N ≥ 5 por tarea y brazo**, antes del lote. Para
+  OFF/ASSISTED y el mínimo N=5 son 4 × 2 × 5 = **40 muestras**. `preferred` no
+  forma parte de este lote. Ningún resultado, fallo o sanción permite reducir
+  o aumentar N.
 
 **Condiciones de host:** según la memoria operativa del proyecto, no se
 ejecuta junto a un AO vivo cargado y se usa un data dir aislado
@@ -122,17 +145,64 @@ ejecuta junto a un AO vivo cargado y se usa un data dir aislado
 
 ---
 
-## 5. Criterio de decisión
+## 5. Única función de decisión ejecutable
 
-| Resultado | Condición |
-|---|---|
-| **GO** (se recomienda `assisted` o `preferred` por proyecto) | En A, B y C: mediana de M1u **−15 %** o mejor **y** M2 o M3 **−20 %** o mejor frente a OFF. Q1-Q4 **sin degradación**: pass-rate ≥ OFF y ciclos de fix ≤ OFF + 0,5 de mediana. D ≈ 0 (±10 %) |
-| **ITERATE** | Mejora en M3 sin mejora en M1u; o mejora en un rol y regresión en otro; o calidad dentro de ±1 fallo con varianza alta. Se ajustan presupuestos y framing y se repite |
-| **NO-GO** | M1u sin mejora o peor en ≥ 2 de 3 tareas; o cualquier degradación de Q1/Q4; o las trampas del fixture inducen errores con memoria que no ocurren sin ella |
+### 5.1 Entradas congeladas
 
-Los umbrales (−15 %, −20 %) son **propuesta a validar con el usuario antes de
-correr**. Fijarlos antes evita elegir el criterio a la vista de los
-resultados.
+La función recibe el plan preregistrado (`N ≥ 5`), las 40 o más posiciones en
+su orden sorteado, el estado del instrumento, y para cada posición: tarea,
+brazo, estado terminal, M1u, M2, M3, Q1, Q4 y Q6/`NA`. M1u y M2 son el total de
+todos los roles de la muestra; M3 usa el rol focal definido en §3. Q2, Q3, M1
+y Q5 se reportan, pero no cambian el veredicto. La ausencia de una muestra
+planificada no se ignora: sólo puede ser `NOT_RUN_INSTRUMENT` tras terminar el
+experimento por fallo del instrumento.
+
+Mediana significa el estadístico usual (promedio de los dos valores centrales
+si el número es par). Para una métrica `X`, `ratio(t, X) =
+median(ASSISTED_t.X) / median(OFF_t.X)`. Si la mediana OFF es cero, el ratio
+cumple sólo cuando la mediana ASSISTED también es cero; en A/B/C un par cero
+no cuenta como mejora. Los límites son inclusivos: exactamente `0.85`, `0.80`,
+`0.90` o `1.10` cumple. Cualquier otro empate en A/B/C no es mejora.
+
+### 5.2 Algoritmo
+
+```text
+decide(plan, samples, instrument):
+  if instrument.failed_after_start
+     or any planned sample == NOT_RUN_INSTRUMENT:
+       return INSTRUMENT_NO_GO
+
+  if samples do not equal exactly the preregistered task × arm × N positions:
+       return INSTRUMENT_NO_GO
+
+  normalize every post-start failure as:
+       Q1=0; Q4=0; Q6=0 when task C;
+       M1u=TOKEN_CAP; M2=CALL_CAP; M3=1
+
+  quality = for every task t:
+       pass_count(ASSISTED, Q1, t) >= pass_count(OFF, Q1, t)
+       and pass_count(ASSISTED, Q4, t) >= pass_count(OFF, Q4, t)
+       and, only for C,
+           pass_count(ASSISTED, Q6, C) >= pass_count(OFF, Q6, C)
+
+  efficiency = for each t in {A,B,C}:
+       ratio(t, M1u) <= 0.85
+       and (ratio(t, M2) <= 0.80 or ratio(t, M3) <= 0.80)
+
+  negative_control = for each X in {M1u,M2,M3}:
+       if median(OFF_D.X) == 0:
+           median(ASSISTED_D.X) == 0
+       else 0.90 <= ratio(D, X) <= 1.10
+
+  if quality and efficiency and negative_control: return GO
+  return NO_GO
+```
+
+No existe `ITERATE`, análisis por subconjunto, sustitución, relote ni regla
+secundaria capaz de cambiar el resultado. Los intervalos, rangos, M1, Q2, Q3,
+Q5, costes y análisis de sensibilidad se publican como diagnóstico. Un fallo
+del instrumento produce `INSTRUMENT_NO_GO`, no un resultado de eficacia, y no
+autoriza otro lote bajo el mismo preregistro.
 
 ---
 

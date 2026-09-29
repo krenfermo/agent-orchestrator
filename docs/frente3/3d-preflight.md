@@ -2,6 +2,13 @@
 
 Fecha: 2026-09-25. Rama: `feat/frente3-3d-prerequisites`, creada desde ECC `e2e9c741d`, donde 3C ya está CLOSED.
 
+> **Estado normativo desde V3 (2026-09-28).** Este documento conserva el
+> historial de ciclos y evidencia preflight. Sus reglas antiguas de muestra,
+> capacidad, retries, cegamiento, autenticación y STOP **no son normativas**.
+> La única especificación vigente es
+> [3d-auth-design-v3.md](3d-auth-design-v3.md), y la única función de decisión
+> está en [06-benchmark-plan.md](06-benchmark-plan.md) §§3–5.
+
 **Alcance.** Neutralizar los cuatro bloqueantes que salieron en los E2E de 3C antes de ejecutar ningún A/B. **El experimento de 3D no se ha ejecutado.**
 
 Regla: nada de esto cambia el comportamiento para favorecer a Memory. Cada corrección aplica igual a los dos brazos.
@@ -1106,3 +1113,41 @@ No se implementó nada ni se tocaron credenciales, cuentas, harness ni corridas.
 - tarea C sin puerta de calidad.
 
 **PRECONDITION_3D_AUTH_DESIGN_V2 = NEEDS_CHANGES** (sin P0/P1 conocidos; las correcciones no han pasado un segundo ataque; hace falta la revisión de Codex de v2). **PRECONDITION_3D = NO-GO.** 3D no se ejecuta.
+
+## Segunda revisión REAL de Codex y diseño V3 (2026-09-28): sólo documentación
+
+La revisión real de V2 dio
+`PRECONDITION_3D_AUTH_DESIGN_V2 = NO-GO`: P1 6 / P2 4 / P3 1. Encontró
+selección por relotes tras sanciones/fallos, exposición de cuotas y estado
+organizacional, contaminación worker→reviewer, Q6 vulnerable a shotgun, dos
+reglas de decisión y un contraste que no correspondía a
+`Provisioned.Render()`.
+
+[3d-auth-design-v3.md](3d-auth-design-v3.md) sustituye íntegramente V2 y, junto
+con [06-benchmark-plan.md](06-benchmark-plan.md) §§3–5, es la única norma:
+
+- toda muestra iniciada cuenta; no hay replacement ni relote; pérdida de
+  integridad termina `INSTRUMENT_NO_GO` y deja el resto `NOT_RUN_INSTRUMENT`;
+- respuestas normalizadas y G6 obligatorio; si workspace/project no particiona
+  realmente, sólo organizaciones independientes o NO-GO;
+- worker y reviewer usan UIDs, listeners, capabilities, scopes y epochs
+  separados; reviewer se habilita después de revocar y apagar worker;
+- Q6 exige JSON acotado, K=3, rank, rango ≤20, clase/cause/impact y cero falsos
+  positivos;
+- una función ejecutable única cubre A–D, Q1/Q4/Q6, M1u/M2/M3, ties, missing,
+  fallos, N≥5 y fallo del instrumento;
+- el tratamiento es el attachment real de `Provisioned.Render()`, capturado en
+  AO con spans tipados antes de serialización; sólo el primer worker prompt
+  puede detener por contraste;
+- red estática preferida, imagen declarativa sin estado vivo de proveedor,
+  extracción hostil separada de secrets e inventario explícito de persistencia;
+- G4 tiene n, controles, intervalos y umbral falsificables.
+
+Se hizo revisión estática interna y se corrigieron las contradicciones
+encontradas. El nuevo prompt adversarial está en
+[3d-auth-design-v3-codex-review-prompt.md](3d-auth-design-v3-codex-review-prompt.md),
+pero no se ejecutó.
+
+**PRECONDITION_3D_AUTH_DESIGN_V3 = READY_FOR_CODEX_REVIEW.** No hay P0/P1 de
+diseño conocidos; P1-2 sigue `REQUIRES_GATE` por G6 y no se presenta como
+cerrado. **PRECONDITION_3D = NO-GO.** No se implementó ni ejecutó nada.
