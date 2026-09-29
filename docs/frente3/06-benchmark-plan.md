@@ -1,322 +1,275 @@
-# Frente 3 / 3A — Plan de medición y piloto
+# Frente 3 / 3D — Plan de medición y función de decisión
 
-Fecha: 2026-09-28 · Estado: **norma V4; no ejecutado.**
+Fecha: 2026-09-29 · Estado: **norma 3D-PRACTICAL; pendiente revisión REAL; no ejecutado.**
 
-Regla heredada de `docs/project-memory-baseline.md`: **un número que AO no pudo
-medir nunca se presenta como medido.** Un `0` medido y un `null` no disponible
-son hallazgos distintos.
+Este documento contiene la única función normativa, total y ejecutable para
+3D-PRACTICAL. [3d-practical.md](3d-practical.md) define el protocolo y debe
+interpretarse junto con estas reglas. V1–V4 auth designs, prompts y preflight
+son historial; no aportan reglas de muestreo, aislamiento o decisión.
 
----
+Regla de medición: un número que AO no pudo medir nunca se presenta como
+medido. Cero observado y dato no disponible son distintos.
 
-## 1. Telemetría disponible (ETAPA 3)
+## 1. Inventario de telemetría y límites
 
-| Métrica | Estado | Dónde | Proveedor | Limitación relevante para el A/B |
-|---|---|---|---|---|
-| Input tokens por llamada | **AVAILABLE** | `model_usage_events.input_tokens` / `uncached_input_tokens` | Claude y Codex | Codex: deltas de acumulados; los no monótonos se descartan como anomalía |
-| Output tokens | **AVAILABLE** | `output_tokens`, `reasoning_tokens` | ambos | el resumen de compactación no se registra |
-| Cache read | **AVAILABLE** | `cache_read_tokens` | ambos | — |
-| Cache write | **PARTIAL** | `cache_write_tokens` | sólo Claude | — |
-| TTL 5m/1h | **PARTIAL** | 0170 | sólo Claude | no está en los DTOs |
-| Nº de llamadas | **AVAILABLE** | conteo de eventos por binding, rol, step y ciclo | ambos | las compactaciones no cuentan |
-| Trayectoria del contexto (inicial, pico, crecimiento por llamada) | **AVAILABLE** | `service/usage/dynamics.go` | ambos | es tamaño, no composición |
-| Coste USD | **PARTIAL** | `pricing.go` (calculado) | sólo Claude | Codex `unknown` |
-| Payload enviado por AO | **PARTIAL** | evidencia `AO_PROJECT_MEMORY_BASELINE` | — | opt-in; **no funciona en worker** (bypass); 0 registros en producción |
-| Pack (items, bytes, tokens estimados) | **AVAILABLE** | `project_memory_context_manifests` | — | sólo cuando hay modo activo |
-| Harness vs AO | **MISSING** | — | — | abierto (Frente 4) |
-| **Ficheros leídos por el agente** | **MISSING** | — | — | el parser sólo decodifica `type` + `name` de `tool_use` (`observe/usage/parser.go:424`) |
-| Tool calls | **PARTIAL** | `turn_class` (0169) | sólo Claude | una clase por mensaje; 111 filas en producción, 0 `read` |
-| Duración | **PARTIAL** | attempts y runs; `elapsedSeconds` | ambos | sin latencia por llamada |
-| Reintentos / failover | **PARTIAL** | `workflow_attempts`, `provider_attempts` | ambos | hay que derivarlo |
-| Verify, veredicto de review, ciclos de fix | **AVAILABLE** | attempts, `review_run.verdict`, ventanas `cycle` | ambos | pass/fail sin conteo de tests |
-| Modo de memoria del run | **MISSING** | — | — | no está en `policy_snapshot` |
-| Tokens de Skills | **MISSING** | — | — | `skill_runs` sin binding |
-
----
-
-## 2. Qué hay que instrumentar antes del piloto (3C)
-
-Mínimo imprescindible. Sin esto, el piloto no puede demostrar reducción de la
-exploración:
-
-| # | Instrumento | Diseño | Privacidad |
-|---|---|---|---|
-| I1 | **Lecturas del agente** | Extender el parser para extraer de cada `tool_use` de Read/Grep/Glob/Bash (`cat`, `rg`, `sed -n`…) **sólo el path o patrón objetivo**, normalizado a relativo al worktree. Por llamada se registran los ficheros distintos y las relecturas. Claude primero; Codex (`function_call` en rollout) después | Sólo paths, nunca contenido. Paths fuera del worktree → `<outside>` |
-| I2 | **Clase de turno completa** | Usar `turn_class` también para Codex y contar tool calls por mensaje (no sólo la clase) | — |
-| I3 | **Congelar modo y pack en el run** | `policy_snapshot` con `memory_mode`, `pack_digest` e `indexed_commit` por dispatch | — |
-| I4 | **Split harness/AO de la 1.ª llamada** | `input_tokens(1.ª llamada) − contextSentTokens(AO, est.)`, etiquetado `estimated` | — |
-| I5 | Llamador de `Span.ObserveProviderUsage` | unir tokens reales a la evidencia | — |
-| I6 | **Índice de la primera edición** | nº de llamada en que aparece la primera `Edit`/`Write` en el worktree. Es un proxy directo de "tiempo explorando antes de actuar" | — |
-
----
-
-## 3. Métricas del piloto (norma V4)
-
-Esta sección y las §§4–5 contienen la **única regla normativa** del piloto.
-`3d-auth-design.md`, V2 y V3 son historia y no pueden aportar
-umbrales, excepciones ni reglas alternativas. Los umbrales se congelan sin
-cambios en el preregistro; observar resultados nunca autoriza cambiar `N`, una
-imputación ni una frontera.
-
-**Métricas de consumo:**
-
-- **M1 — Input acumulado de la sesión** (Σ `input_tokens`) por rol y por run.
-  Incluye caché y se reporta como diagnóstico; no decide el GO.
-- **M1u — Input acumulado sin caché.** Es la señal decisiva de coste.
-- **M2 — Nº de llamadas al modelo** por rol.
-- **M3 — carga normalizada de exploración.** Para A, B y D se mide en el worker
-  antes de la primera edición; para C, en el reviewer antes del primer
-  veredicto estructurado. Si `c` es el número de llamadas de exploración y `f`
-  el de ficheros distintos, `M3 = max(c/C_cap, f/F_cap)`, acotado a `[0,1]`.
-  `C_cap` y `F_cap` son límites del harness fijados en el preregistro. Si no hay
-  primera edición/veredicto, el rol falla o falta cualquiera de los dos datos,
-  `M3 = 1`. Así un fallo barato no puede parecer eficiente.
-
-**Secundarias:** duración de pared, coste USD (sólo Claude), pico de contexto,
-bytes del pack y relecturas.
-
-**Calidad (gates, no métricas de ahorro):**
-
-- **Q1** — verify pasa;
-- **Q2** — veredicto final del reviewer `approved` (**descriptivo; no decide**);
-- **Q3** — nº de ciclos de fix (**descriptivo; no decide**);
-- **Q4** — oráculo de tareas: tests ocultos que el agente no ve, ejecutados por
-  el supervisor en la VM de oráculo al final;
-- **Q5** — revisión humana ciega de una muestra de diffs (descriptiva; no
-  decide este experimento);
-- **Q6** — localización estructurada de la tarea C, definida en
-  [3d-auth-design-v4.md](3d-auth-design-v4.md) §6. Q6 sólo es aplicable a C;
-  `NA` en A, B y D no es un dato faltante.
-
-La normalización total de estados, nulls y valores inválidos está en §5.2. No
-se reintenta una muestra. Los retries HTTP internos del cliente cuentan como
-llamadas y consumo de esa misma muestra.
-
----
-
-## 4. Diseño del piloto
-
-**Repositorio fixture controlado.** Es necesario porque el ahorro depende del
-repo. El fixture será un repo propio, versionado bajo el data dir de AO. **No**
-se usará el repo de AO, porque sus `.claude/worktrees` y su tamaño contaminan la
-medida. Criterios que debe cumplir:
-
-- ~150-400 ficheros en al menos 2 lenguajes soportados (Go + TS);
-- rutas HTTP, tablas SQL y tests;
-- un CLAUDE.md corto;
-- trampas deliberadas: un símbolo con el mismo nombre en dos módulos y un
-  README que describe mal un módulo, para medir si la memoria induce errores.
-
-**Tareas** (definidas antes de ver resultados, con tests ocultos):
-
-| Tarea | Tipo | Rol que más debería beneficiarse |
+| Señal | Disponibilidad conocida | Nota para el piloto |
 |---|---|---|
-| A | Bugfix localizado ("corrige X en el login"), 1-3 ficheros | Worker |
-| B | Cambio transversal (endpoint + tabla + test) | Worker + Planner |
-| C | Review de un diff dado con un defecto sembrado | Reviewer |
-| D (control) | Tarea que no requiere explorar (editar un fichero nombrado) | ninguno. **Se espera diferencia ≈ 0**, y sirve para detectar sesgo |
+| Input tokens | AVAILABLE | `model_usage_events.input_tokens`; deltas Codex requieren validar monotonicidad |
+| Uncached input tokens | AVAILABLE/PARTIAL por cliente | Métrica M1u; sin valor medido no se imputa como cero |
+| Cache read/write | AVAILABLE/PARTIAL | Reportar sólo lo expuesto por provider; no inferir aislamiento |
+| Llamadas | AVAILABLE | Contar todos los attempts/retries de la posición |
+| Exploración/ficheros leídos | AVAILABLE tras 3C | Sólo paths/patrones y conteos; no contenido de archivos |
+| Coste | PARTIAL | Diagnóstico cuando precio y tokens están disponibles |
+| Duración | PARTIAL | Diagnóstico de pared, no criterio primario |
+| Verify/review | AVAILABLE | Q1 y calidad descriptiva del reviewer |
+| Treatment attachment | Requiere evidencia por posición/request | Digests, arm, rol y origen como especifica `3d-practical.md` |
 
-**Brazos:**
+Una señal no disponible se registra `UNAVAILABLE`; no se sustituye con cero ni
+con una estimación rotulada como observación.
 
-- **OFF:** `AO_MEMORY_MODE=off`.
-- **ASSISTED:** `AO_MEMORY_MODE=assisted`.
+## 2. Pregunta, métricas y tareas
 
-`PREFERRED` queda fuera de este experimento. Sólo podría evaluarse en otro
-plan y preregistro posteriores, nunca como reinterpretación del lote V4.
+Estimand: diferencia práctica entre Project Memory `OFF` y `ASSISTED`, bajo el
+fixture y la configuración congelados, en input fresco/no-cacheado, llamadas y
+carga de exploración, sujeta a no degradar calidad.
 
-**Controles:**
+| Métrica | Definición | Uso |
+|---|---|---|
+| M1u | Suma de `uncached_input_tokens` de todos los roles/requests/retries de una posición | Primaria |
+| M2 | Número total de provider requests, incluidos retries y requests fallidas | Primaria |
+| M3 | Exploración normalizada previa a primera edición (A/B/D, worker) o veredicto estructurado (C, reviewer): `max(c/C_cap, f/F_cap)` truncado a [0,1] | Primaria |
+| M1 | Suma de input tokens incluidos cacheados | Diagnóstico y sensibilidad |
+| Cached tokens | Suma reportada por provider | Diagnóstico/covariable |
+| Q1 | Verify pasa | Calidad |
+| Q4 | Tests ocultos pasan en oráculo fuera del alcance del agente | Calidad |
+| Q6 | Localización Practical del seeded defect, sólo C; `NA` en A/B/D | Calidad |
 
-- mismo modelo y harness fijados (`claude-opus-5` / `sonnet` explícito);
-- mismo `HOME` aislado para todos los brazos (runtime-home `strict`), para que
-  la varianza de `~/.claude` (217 K vs 45 K) no domine;
-- mismo commit;
-- ámbitos de proveedor nuevos, exclusivos por repetición y rol, sólo cuando
-  los gates de [3d-auth-design-v4.md](3d-auth-design-v4.md) demuestren que el
-  ámbito es una partición real; los cooldowns no son un control de aislamiento;
-- **N se fija una sola vez, con N ≥ 5 por tarea y brazo**, antes del lote. Para
-  OFF/ASSISTED y el mínimo N=5 son 4 × 2 × 5 = **40 muestras**. `preferred` no
-  forma parte de este lote. Ningún resultado, fallo o sanción permite reducir
-  o aumentar N.
+`c` cuenta llamadas de exploración y `f` archivos distintos leídos/buscados
+antes del hito. `C_cap`, `F_cap` y reglas del parser se congelan en el manifest.
+Si falta el hito, el rol falla o falta un dato requerido, M3=1 y la posición se
+clasifica según la tabla de estados/normalización. M1, duración, coste, cache,
+errores del provider, turnos de fix y veredicto final del reviewer son
+diagnósticos; no cambian GO.
 
-**Condiciones de host:** según la memoria operativa del proyecto, no se
-ejecuta junto a un AO vivo cargado y se usa un data dir aislado
-(`AO_DATA_DIR`). El piloto **no toca la DB de producción**.
+Tareas congeladas en el manifest:
 
----
+| Task | Tipo | Calidad adicional |
+|---|---|---|
+| A | Bugfix localizado, 1–3 archivos | Q1, Q4 |
+| B | Cambio transversal endpoint/datos/tests | Q1, Q4 |
+| C | Review de diff con defecto sembrado | Q1, Q4, Q6 |
+| D | Control: editar archivo nombrado, sin exploración necesaria | Q1, Q4; neutralidad de eficiencia |
 
-## 5. Única función de decisión total y ejecutable
+Q6 es `NA` (no faltante) fuera de C. Su definición primaria está en
+[3d-practical.md](3d-practical.md) §5.
 
-### 5.1 Dominio, caps y registros
+## 3. Diseño congelado
 
-El plan fija `N ≥ 5`, tareas `{A,B,C,D}`, brazos `{OFF,ASSISTED}`, orden, roles
-posibles y, para cada tarea `t` y rol `r`, dos enteros positivos:
+El manifest debe congelar antes del lote: AO commit; fixture commit; tasks y
+oracles/digests; arms; provider/model/version/config; worker/reviewer flow;
+caps por task/role; thresholds; version de esta función; seed; schedule;
+`N=5`; Router OFF; política de contexto externo; métricas y reglas de parsing.
+El `experiment_id` es el digest canónico del conjunto, como define
+[3d-practical.md](3d-practical.md) §1. Un label humano es metadata.
 
-```text
-TOKEN_CAP_ROLE[t,r] = máximo input no cacheado permitido al rol
-CALL_CAP_ROLE[t,r]  = máximo de requests al provider, incluidos retries
-TOKEN_CAP[t]        = Σ_r TOKEN_CAP_ROLE[t,r]
-CALL_CAP[t]         = Σ_r CALL_CAP_ROLE[t,r]
-```
+El schedule tiene exactamente 40 posiciones (`A–D × OFF/ASSISTED × 5`). Se
+randomiza e intercala dentro de bloques por tarea. Cada bloque contiene ambos
+arms con orden aleatorio y seed congelada. Nunca se procesa un arm completo
+antes del otro.
 
-Un rol no utilizado tiene ambos caps `0`. Los caps, el máximo de retries por
-clase y los roles se congelan en el preregistro raíz; no se estiman a partir de
-la muestra observada. M1u y M2 válidos son totales de todos los roles y deben
-ser enteros en `[0,TOKEN_CAP[t]]` y `[0,CALL_CAP[t]]`. M3 debe ser finito en
-`[0,1]`. Q1 y Q4 deben ser `0|1`; Q6 debe ser `0|1` sólo en C y el literal
-`NA` en A/B/D. Todo otro tipo, `null`, NaN, infinito o valor fuera de dominio es
-`MALFORMED_SAMPLE`.
+Por posición: conversación/session ID nueva, working copy limpia del mismo
+fixture commit, AO data dir nuevo y runtime/provider local home nuevo cuando
+aplique. No se comparte historial, transcript, resultado o memoria entre
+posiciones. Router OFF. OFF no envía attachment Project Memory; ASSISTED envía
+el attachment esperado con digest/version registrados. External context, MCP,
+apps/connectors, web, global memory y otras fuentes AO se deshabilitan o se
+igualan y verifican por posición. El tratamiento y la ausencia de fuentes
+adicionales se trazan por request. El provider cache/shared state no aislable
+se registra `RESIDUAL_CONFOUNDER`; no se atribuye a aislamiento.
 
-Estados terminales permitidos para posiciones de eficacia:
+## 4. Vocabulario único de estado y transición
+
+El siguiente enum es el único vocabulario terminal por posición usado por el
+diseño y este benchmark:
 
 ```text
 COMPLETED
-FAILED_WORKER | FAILED_REVIEWER | TIMEOUT | GATEWAY_DENIAL
-PROVIDER_RETRY_EXHAUSTED | PROVIDER_RATE_LIMITED | PROVIDER_POLICY_FAILURE
-PROVIDER_TERMINAL_FAILURE | PROVIDER_SANCTION | AGENT_INDUCED_FAILURE
-BLOCKED_BY_PRIOR_SAMPLE | MALFORMED_SAMPLE
+FAILED_WORKER
+FAILED_REVIEWER
+TIMEOUT
+PROVIDER_RETRY_EXHAUSTED
+PROVIDER_RATE_LIMITED
+PROVIDER_POLICY_FAILURE
+PROVIDER_TERMINAL_FAILURE
+PROVIDER_SANCTION
+MALFORMED_RESULT
+BLOCKED_BY_PRIOR_POSITION
 ```
 
-Todos requieren `SAMPLE_START` salvo `BLOCKED_BY_PRIOR_SAMPLE`, que el
-supervisor asigna a una posición todavía no iniciada cuando una muestra previa
-impide causalmente ejecutarla. Esa excepción cuenta como fallo y nunca como
-unrun.
+Transiciones de request y posición:
 
-`INSTRUMENT_NO_GO` y `NOT_RUN_INSTRUMENT` pertenecen al experimento/lineage,
-no son estados de eficacia de una muestra iniciada. La clasificación causal
-que puede producirlos está cerrada en [3d-auth-design-v4.md](3d-auth-design-v4.md)
-§2.
+| Evento/request | Retry | Resultado terminal de posición |
+|---|---|---|
+| Respuesta normal válida | Ninguno | continúa; posición acaba COMPLETED si flujo y oráculos concluyen |
+| Error transitorio retryable | Dentro del presupuesto fijo del cliente; cada request cuenta | `PROVIDER_RETRY_EXHAUSTED` al agotar |
+| Rate limit | Dentro del presupuesto fijo específico; cada request cuenta | `PROVIDER_RATE_LIMITED` al agotar |
+| Policy failure | Ninguno | `PROVIDER_POLICY_FAILURE` |
+| Error terminal provider/stream parcial no replayable | Ninguno | `PROVIDER_TERMINAL_FAILURE` |
+| Provider sanction | Ninguno | `PROVIDER_SANCTION`; posiciones siguientes bloqueadas si no pueden continuar |
+| Falla de worker/reviewer | Ninguno de muestra | `FAILED_WORKER` / `FAILED_REVIEWER` |
+| Deadline congelado excedido | Ninguno | `TIMEOUT` |
+| Campos, trace o estado ausente/malformado/contradictorio | Ninguno | `MALFORMED_RESULT` |
+| Una posición previa impide ejecutar la posición no iniciada | No aplica | `BLOCKED_BY_PRIOR_POSITION` |
 
-### 5.2 Normalización total por muestra
+Cada fila de request conserva su `request_outcome` (`SUCCESS`, `RETRYABLE`,
+`RATE_LIMITED`, `POLICY_FAILURE`, `TERMINAL_PROVIDER_FAILURE` o
+`PROVIDER_SANCTION`). Esos outcomes alimentan la tabla de transición; no son
+estados terminales adicionales de posición. La posición final conserva un
+único valor del enum anterior.
 
-`normalize(sample)` siempre retorna un tuple completo
-`(M1u,M2,M3,Q1,Q4,Q6)`:
+Los errores retryable/rate sólo reintentan requests dentro de la misma
+posición, con presupuesto, backoff y límites congelados en el manifest. No
+existe retry de posición. Toda clase de failure y bloqueo recibe imputación
+completa de caps y calidad cero. Si el provider informa sanction, es terminal,
+no retryable y failure. No se infiere sanction a partir de un error ambiguo:
+ese caso es `PROVIDER_TERMINAL_FAILURE` o `MALFORMED_RESULT` según evidencia.
 
-1. La identidad de la posición siempre procede del plan/ledger host-only, no
-   del record producido por la muestra. Si, después de `SAMPLE_START`, el
-   record trae task/arm/sample_id ajenos, duplicados, corruptos o ausentes, la
-   posición host-only correspondiente se clasifica `MALFORMED_SAMPLE`; records
-   extra se conservan como evidencia pero nunca crean/eliminan posiciones.
-2. Si el estado es `COMPLETED` y **todos** los campos satisfacen §5.1, conserva
-   sus valores.
-3. Si el estado es cualquier fallo permitido, o es `COMPLETED` con al menos un
-   campo null/malformed/out-of-domain, reclasifica `MALFORMED_SAMPLE` cuando
-   corresponda y retorna:
+`SAMPLE_START` precede cualquier request. Antes de empezar el lote se valida
+construcción OFF/ASSISTED, external context y manifest. Un fallo pre-start
+impide iniciar y queda registrado `PRESTART_INVALID`; no es una posición ni
+resultado puntuable. Después de SAMPLE_START no existe `INSTRUMENT_NO_GO`.
+Toda posición iniciada termina COMPLETED o en failure. El schedule es fijo y
+todas sus posiciones aparecen en el ledger.
+
+## 5. Caps y normalización total
+
+Cada tarea/rol tiene enteros congelados positivos o ambos cero si el rol no
+aplica:
 
 ```text
-M1u = TOKEN_CAP[task]
-M2  = CALL_CAP[task]
+TOKEN_CAP_ROLE[task,role] = máximo uncached input tokens del rol
+CALL_CAP_ROLE[task,role]  = máximo requests del rol, incluidos retries
+```
+
+Para una posición COMPLETED, se valida individualmente, antes de agregar:
+
+```text
+M1u_role <= TOKEN_CAP_ROLE[task,role]
+M2_role  <= CALL_CAP_ROLE[task,role]
+M1u = Σ M1u_role
+M2  = Σ M2_role
+```
+
+Un exceso de cualquier cap hace `MALFORMED_RESULT` y aplica imputación de
+failure. No se permite compensar sobreconsumo de un rol con subconsumo de otro.
+Requests parciales y retries cuentan para los caps. Los registros extra se
+conservan como evidencia, pero no crean ni eliminan posiciones.
+
+Para cada posición `normalize` retorna exactamente
+`(M1u,M2,M3,Q1,Q4,Q6,state)`:
+
+- COMPLETED con todos los campos requeridos, tipos, dominios, trazas y caps
+  válidos conserva sus valores observados.
+- Cualquier otro estado, dato null/no disponible requerido, dato malformado,
+  trace incompleto, digest/arm incorrecto o cap excedido retorna:
+
+```text
+M1u = Σ TOKEN_CAP_ROLE[task, role]
+M2  = Σ CALL_CAP_ROLE[task, role]
 M3  = 1
 Q1  = 0
 Q4  = 0
 Q6  = 0 si task=C; NA si task∈{A,B,D}
 ```
 
-No se conservan parcialmente campos “buenos” de un registro inválido. Un
-timeout, provider error, sanction, fallo de parser/gateway alcanzable por la
-muestra y agotamiento de retries siguen la regla 3. Cada retry del cliente
-incrementa M2 y sus tokens incrementan M1u; si el sample termina en éxito y no
-excede caps, sus totales observados son válidos. Exceder un cap es
-`AGENT_INDUCED_FAILURE` y usa la imputación, aunque el cliente declare éxito.
+Las posiciones `BLOCKED_BY_PRIOR_POSITION` usan la misma imputación. Una
+posición iniciada con estado o evidencia ilegible es `MALFORMED_RESULT`, nunca
+desaparece. El ledger incluye siempre las 40 posiciones programadas.
 
-### 5.3 Validación total del experimento
+Dominio de campos válidos: M1u/M2 enteros no negativos dentro del total de
+caps, M3 finito en `[0,1]`, Q1/Q4 booleanos y Q6 booleano sólo en C o literal
+`NA` en A/B/D. Cualquier null, NaN, infinito, tipo inesperado o valor fuera de
+dominio invalida esa posición.
 
-`validate(plan, records, lineage)` retorna exactamente uno:
+## 6. Función de decisión única
 
-- `INVALID_EXPERIMENT_INPUT`: exclusivamente schema/plan/cap/lineage inválido
-  detectado **antes del primer SAMPLE_START**, o ledger WORM roto por una causa
-  demostrablemente no alcanzable por ninguna muestra;
-- `INSTRUMENT_NO_GO`: existe un evento independiente válido según V4 §2 y por
-  ello una o más posiciones son `NOT_RUN_INSTRUMENT`;
-- `SCOREABLE`: existen exactamente `4 × 2 × N` posiciones, cada una iniciada o
-  `BLOCKED_BY_PRIOR_SAMPLE`, y todas normalizan por §5.2.
-
-Después del primer `SAMPLE_START`, task/arm/ID corrupto, record duplicado,
-ausente o ilegible, parser failure y ledger-write failure alcanzable por una
-muestra se normalizan como fallo de esa posición, no como
-`INVALID_EXPERIMENT_INPUT`. Si la ejecución cesa sin un evento independiente
-válido, cada posición restante pasa determinísticamente a
-`BLOCKED_BY_PRIOR_SAMPLE`. Así siempre hay `4×2×N` posiciones y no existe un
-operator abort limpio. `INVALID_EXPERIMENT_INPUT` es un NO-GO del instrumento
-pre-start; una posición bloqueada nunca se marca unrun.
-
-### 5.4 Función de eficacia
-
-Mediana es el estadístico usual, promediando los dos centrales si son pares.
-Para una métrica X y tarea t:
+Mediana es el estadístico de cada task/arm, con promedio de centrales si N es
+par. Para `X` en M1u, M2 o M3:
 
 ```text
-off = median(OFF_t.X)
-assisted = median(ASSISTED_t.X)
+off = median(OFF[task].X)
+assisted = median(ASSISTED[task].X)
 
-improves(t,X,limit):
+improves(task,X,limit):
   if off == 0: false
-  else: assisted/off <= limit
+  else: assisted / off <= limit
 
 neutral_D(X):
   if off == 0: assisted == 0
-  else: 0.90 <= assisted/off <= 1.10
+  else: 0.90 <= assisted / off <= 1.10
 ```
 
-Los límites son inclusivos. Un empate ordinario en A/B/C no mejora; cero/cero
-en A/B/C tampoco. Entonces:
+Los límites son inclusivos. El empate no cuenta como mejora en A/B/C; cero
+frente a cero tampoco.
 
 ```text
-decide(plan, records, lineage):
-  v = validate(plan, records, lineage)
-  if v == INVALID_EXPERIMENT_INPUT: return INSTRUMENT_NO_GO
-  if v == INSTRUMENT_NO_GO: return INSTRUMENT_NO_GO
+decide(manifest, ledger):
+  if manifest invalid or not frozen before first SAMPLE_START:
+      return NO_GO(reason=PRESTART_INVALID)
+  if experiment_id != canonical_digest(manifest):
+      return NO_GO(reason=IDENTITY_MISMATCH)
+  if schedule is not exactly 40 frozen positions:
+      return NO_GO(reason=SCHEDULE_INVALID)
+  if any position absent, duplicated, replaced, relotted or selectively rerun:
+      return NO_GO(reason=LINEAGE_INVALID)
 
-  S = normalize(each preregistered position)
+  S = normalize(each of the 40 scheduled positions)
 
-  quality = for every t in {A,B,C,D}:
+  quality = for every task t in {A,B,C,D}:
       pass_count(ASSISTED,t,Q1) >= pass_count(OFF,t,Q1)
       and pass_count(ASSISTED,t,Q4) >= pass_count(OFF,t,Q4)
       and (t != C or
            pass_count(ASSISTED,C,Q6) >= pass_count(OFF,C,Q6))
 
-  efficiency = for every t in {A,B,C}:
+  efficiency = for every task t in {A,B,C}:
       improves(t,M1u,0.85)
       and (improves(t,M2,0.80) or improves(t,M3,0.80))
 
-  negative_control = for every X in {M1u,M2,M3}: neutral_D(X)
+  negative_control = for X in {M1u,M2,M3}: neutral_D(X)
 
-  if quality and efficiency and negative_control: return GO
+  if quality and efficiency and negative_control:
+      return GO
   return NO_GO
 ```
 
-### 5.5 Resultado de lineage
+Un prestart inválido impide el lote y no puede corregirse después de observar
+una posición. Tras el primer SAMPLE_START toda entrada de las 40 posiciones
+debe estar terminal; si la ejecución se detiene, las restantes se marcan
+`BLOCKED_BY_PRIOR_POSITION`. Se decide determinísticamente sobre la lineage
+completa. No hay excepción manual, revisión de casos para cambiar puntos,
+subconjunto favorable ni análisis secundario que convierta NO_GO en GO.
 
-La readiness nunca recibe sólo “el último batch”. Recibe la lineage append-only
-de V4 §3. Un root permite como máximo `MAX_SUCCESSORS=1`, fijado antes del
-primer `SAMPLE_START`. El successor sólo puede corregir el instrumento; no
-puede cambiar tareas, brazos, N, umbrales, caps, modelos ni estimando.
+## 7. Registro y salida
 
-```text
-lineage_decide(lineage):
-  if family registry/ledger invalid, missing, rewritten or has >1 successor:
-      return NO_GO(reason=LINEAGE_INVALID)
-  compute and retain decide(...) for every preregistration
-  if any predecessor ended for an event not independently admissible by V4 §2:
-      return NO_GO(reason=INVALID_PREDECESSOR)
-  if terminal preregistration result == GO:
-      return GO(with mandatory disclosed_lineage=true)
-  return NO_GO(reason=TERMINAL_NOT_GO)
-```
+El ledger append-only conserva experiment_id, manifest y digests, schedule,
+seed, cada SAMPLE_START/terminal, requests y retries, treatment digests,
+metrics, outputs/evidencias, provider errors, failures, bloqueos y decisión
+final. Un error al guardar después de SAMPLE_START se refleja como failure y
+no autoriza omitir una posición. La publicación incluye todas las posiciones,
+diagnósticos, disponibilidad de señales y el indicador
+`RESIDUAL_CONFOUNDER` con la distribución de cache observada.
 
-Todos los resultados intermedios, abortos y posiciones se publican. No existe
-`ITERATE`, selección por subconjunto, replacement, relot ni regla secundaria.
-M1, Q2, Q3, Q5, costes y análisis de sensibilidad son sólo diagnósticos.
+El claim permitido, límites de interpretación y efecto de GO están definidos
+en [3d-practical.md](3d-practical.md) §7. GO sólo permite considerar más
+adelante activar opt-in, reversible y con telemetría; no autoriza rollout
+global.
 
----
+## 8. Telemetría histórica de 3C
 
-## 6. Criterio de lenguaje (Java / Graphify)
+La tabla inicial de disponibilidad es un inventario observado durante 3C, no
+una garantía futura para todos los providers. Revalidar disponibilidad en el
+preflight del manifest; si una señal primaria requerida no puede medirse, no
+iniciar el lote. Las diferencias se documentan en el manifest como
+`UNAVAILABLE`, sin afirmar medición.
 
-Pregunta separada, que se resuelve con un mini-benchmark de **cobertura**, sin
-tokens:
-
-- Sobre `ws_sigeseguros_crm` (read-only, copia staged) comparar un prototipo
-  de extractor Java en Go (lexer + llaves) frente a lo que produciría un parser
-  AST. Métricas: símbolos declarados recuperados, endpoints (anotaciones
-  Spring) y relaciones de import.
-- Si el extractor propio alcanza ≥ 90 % de las declaraciones y endpoints, se
-  construye propio. Si no, y además hay demanda real de trabajo de agentes en
-  esos repos, se evalúa el adaptador Graphify read-only (doc 03 §6).
+**PRECONDITION_3D_PRACTICAL = READY_FOR_CODEX_REVIEW** (pendiente revisión REAL).

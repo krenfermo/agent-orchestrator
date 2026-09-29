@@ -2,12 +2,12 @@
 
 Fecha: 2026-09-25. Rama: `feat/frente3-3d-prerequisites`, creada desde ECC `e2e9c741d`, donde 3C ya está CLOSED.
 
-> **Estado normativo desde V4 (2026-09-28).** Este documento conserva el
+> **Estado normativo desde 3D-PRACTICAL (2026-09-29).** Este documento conserva el
 > historial de ciclos y evidencia preflight. Sus reglas antiguas de muestra,
 > capacidad, retries, cegamiento, autenticación y STOP **no son normativas**.
-> La única especificación vigente es
-> [3d-auth-design-v4.md](3d-auth-design-v4.md), y la única función de decisión
-> está en [06-benchmark-plan.md](06-benchmark-plan.md) §§3–5.
+> La especificación de protocolo vigente es [3d-practical.md](3d-practical.md),
+> y la única función de decisión está en [06-benchmark-plan.md](06-benchmark-plan.md).
+> V4 Research-Grade es histórico y no normativo para 3D-PRACTICAL.
 
 **Alcance.** Neutralizar los cuatro bloqueantes que salieron en los E2E de 3C antes de ejecutar ningún A/B. **El experimento de 3D no se ha ejecutado.**
 

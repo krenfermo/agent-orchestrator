@@ -1,13 +1,21 @@
 # Frente 3 / 3D — PRECONDITION_3D_AUTH_DESIGN_V4
 
+> **HISTÓRICO / NON-NORMATIVE para 3D-PRACTICAL (2026-09-29).** Esta propuesta
+> Research-Grade queda retirada del camino de ejecución de Frente 3. La
+> especificación práctica vigente es [3d-practical.md](3d-practical.md), con la
+> única función de decisión en [06-benchmark-plan.md](06-benchmark-plan.md).
+> Ningún gate, identidad ni infraestructura de V4 es prerequisito de Practical.
+
 Fecha: 2026-09-28. Rama: `feat/frente3-3d-prerequisites`.
 
-## 0. Autoridad, alcance y conservación de V3
+## 0. Alcance histórico de V4
 
-Este documento es la **única especificación normativa** de aislamiento,
-autenticación, causalidad y lineage para 3D. La única función estadística está
-en [06-benchmark-plan.md](06-benchmark-plan.md) §§3–5 y forma parte de V4. V1,
-V2 y V3 son historia no normativa.
+Al publicarse el 2026-09-28, este documento se presentó como especificación
+normativa Research-Grade para 3D. Esa autoridad quedó retirada el 2026-09-29:
+V4 es ahora sólo historial y **no aporta requisitos a 3D-PRACTICAL**. La norma
+actual es [3d-practical.md](3d-practical.md) y su función total vive en
+[06-benchmark-plan.md](06-benchmark-plan.md). El texto restante documenta la
+propuesta histórica; no se ejecutará como prerequisito de Practical.
 
 V4 es una corrección estricta de V3, no otro rediseño. Conserva:
 
@@ -24,7 +32,7 @@ V4 cierra literalmente los doce hallazgos de la revisión REAL de Codex de V3.
 No se ha implementado ni ejecutado VM, gateway, cuenta, credencial, gate,
 preregistro, mini-E2E ni muestra.
 
-`PRECONDITION_3D_AUTH_DESIGN_V4 = READY_FOR_CODEX_REVIEW`
+Veredicto histórico al redactarse: `PRECONDITION_3D_AUTH_DESIGN_V4 = READY_FOR_CODEX_REVIEW`.
 
 Esto no autoriza implementación. `PRECONDITION_3D = NO-GO`.
 
@@ -696,6 +704,6 @@ El único siguiente paso permitido es revisión estática real con el prompt V4.
 No implementar, crear infraestructura/cuentas, ejecutar gates, preregistrar,
 correr mini-E2E, 3D/3E/3F, desplegar, releasear ni mergear.
 
-**PRECONDITION_3D_AUTH_DESIGN_V4 = READY_FOR_CODEX_REVIEW.**
+**Veredicto histórico V4: `PRECONDITION_3D_AUTH_DESIGN_V4 = READY_FOR_CODEX_REVIEW`.**
 
 **PRECONDITION_3D = NO-GO.**

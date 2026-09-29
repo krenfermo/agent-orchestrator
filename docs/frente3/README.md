@@ -51,13 +51,21 @@ memoria y router OFF.
 **Siguiente: prerequisitos de 3D** (carrera de review, ruta de review, aislamiento de sesiones, contexto externo). Después, el piloto A/B. Project Memory sigue **desactivada** por defecto. No se ha
 demostrado ningún ahorro de tokens; eso le corresponde al piloto.
 
-## 3D — prerequisitos (en curso, NO-GO)
+## 3D — evaluación práctica (pendiente revisión REAL; NO-GO para ejecución)
+
+La norma vigente es [3d-practical.md](3d-practical.md), junto con la única
+función total de [06-benchmark-plan.md](06-benchmark-plan.md). El diseño
+Research-Grade V4 y el preflight previo se conservan como historial
+**NON-NORMATIVE**; sus gates no son prerequisitos de 3D-PRACTICAL.
 
 | Documento | Contenido |
 |---|---|
+| [3d-practical.md](3d-practical.md) | **Única especificación de protocolo vigente.** Comparación controlada OFF/ASSISTED, 40 posiciones, treatment trace, límites y claims |
+| [06-benchmark-plan.md](06-benchmark-plan.md) | **Única función total de decisión.** Estados, caps por rol, normalización, GO/NO-GO y lineage |
+| [3d-practical-codex-review-prompt.md](3d-practical-codex-review-prompt.md) | Prompt de revisión acotado a validez de la comparación interna; no ejecutado |
 | [3d-preflight.md](3d-preflight.md) | Bloqueantes, laboratorio de cegamiento, ciclos de preregistro, mini-E2E y revisiones de Codex |
-| [3d-auth-design-v4.md](3d-auth-design-v4.md) | **Única especificación vigente.** Causalidad conservadora, lineage WORM, G6 factorial, state machine de respuestas, broker por rol, Q6 v2, provenance model-facing. Veredicto: READY_FOR_CODEX_REVIEW |
-| [3d-auth-design-v4-codex-review-prompt.md](3d-auth-design-v4-codex-review-prompt.md) | Prompt adversarial V4, preparado pero no ejecutado |
+| [3d-auth-design-v4.md](3d-auth-design-v4.md) | Investigación Research-Grade histórica; **NON-NORMATIVE** para 3D-PRACTICAL |
+| [3d-auth-design-v4-codex-review-prompt.md](3d-auth-design-v4-codex-review-prompt.md) | Prompt Research-Grade histórico; no usar para revisión de Practical |
 | [3d-auth-design-v3.md](3d-auth-design-v3.md) | Historial sustituido. La revisión REAL de Codex dio **NEEDS_CHANGES** |
 | [3d-auth-design-v3-codex-review-prompt.md](3d-auth-design-v3-codex-review-prompt.md) | Prompt ejecutado para la revisión V3 |
 | [3d-auth-design-v2.md](3d-auth-design-v2.md) | Historial sustituido. La segunda revisión REAL de Codex dio **NO-GO** (P1 6 / P2 4 / P3 1) |

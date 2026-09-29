@@ -1,5 +1,8 @@
 # Prompt de revisión adversarial de Codex: PRECONDITION_3D_AUTH_DESIGN_V4
 
+> HISTÓRICO / NON-NORMATIVE. No ejecutar para 3D-PRACTICAL. Usar
+> [3d-practical-codex-review-prompt.md](3d-practical-codex-review-prompt.md).
+
 Uso futuro, sólo con autorización explícita. Esta entrega prepara el prompt y
 **no lo ejecuta**:
 
