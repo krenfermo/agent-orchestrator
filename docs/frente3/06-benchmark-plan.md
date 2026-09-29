@@ -65,27 +65,210 @@ Q6 es `NA` (no faltante) fuera de C. Su definición primaria está en
 
 ## 3. Diseño congelado
 
-El manifest debe congelar antes del lote: AO commit; fixture commit; tasks y
-oracles/digests; arms; provider/model/version/config; worker/reviewer flow;
-caps por task/role; thresholds; version de esta función; seed; schedule;
-`N=5`; Router OFF; política de contexto externo; métricas y reglas de parsing.
-El `experiment_id` es el digest canónico del conjunto, como define
-[3d-practical.md](3d-practical.md) §1. Un label humano es metadata.
+### 3.1 Schema normativo cerrado del manifest
 
-El schedule tiene exactamente 40 posiciones (`A–D × OFF/ASSISTED × 5`). Se
-randomiza e intercala dentro de bloques por tarea. Cada bloque contiene ambos
-arms con orden aleatorio y seed congelada. Nunca se procesa un arm completo
-antes del otro.
+El manifest es un objeto JSON `ao.3d-practical.manifest.v1`. El siguiente
+inventario es exhaustivo: todos los campos son obligatorios y no nullable salvo
+que se indique expresamente. En este objeto y en todos los objetos anidados se
+aplica `additionalProperties=false`; unknown field, campo requerido ausente,
+tipo/formato/dominio incorrecto, array con cardinalidad/orden inválido o null
+inesperado da `PRESTART_INVALID`. No se rellenan defaults del provider, SDK,
+cliente, AO, parser ni runner. Todo comportamiento efectivo debe tener valor
+explícito en el manifest. El schema normativo es este inventario exhaustivo
+bajo `ao.3d-practical.manifest.v1`; `manifest_schema_sha256` es SHA-256 del
+texto canonizado de §§3.1–3.7 (UTF-8 NFC, LF), excluyendo únicamente el valor
+serializado de ese campo. El validador recalcula y compara ese digest, y aplica
+estas reglas exactamente sin defaults adicionales.
 
-Por posición: conversación/session ID nueva, working copy limpia del mismo
-fixture commit, AO data dir nuevo y runtime/provider local home nuevo cuando
-aplique. No se comparte historial, transcript, resultado o memoria entre
-posiciones. Router OFF. OFF no envía attachment Project Memory; ASSISTED envía
-el attachment esperado con digest/version registrados. External context, MCP,
-apps/connectors, web, global memory y otras fuentes AO se deshabilitan o se
-igualan y verifican por posición. El tratamiento y la ausencia de fuentes
-adicionales se trazan por request. El provider cache/shared state no aislable
-se registra `RESIDUAL_CONFOUNDER`; no se atribuye a aislamiento.
+Tipos base: `string` UTF-8 NFC; `sha256` es 64 lowercase hex; `git_commit` es
+40 lowercase hex; `uint` entero JSON no negativo; `positive_uint` entero JSON
+mayor que cero; `bool` JSON booleano; enums son exactos y case-sensitive.
+Arrays no permiten duplicados salvo `schedule` y listas cuya repetición está
+definida abajo.
+
+| Campo raíz | Tipo y restricciones |
+|---|---|
+| `schema_version` | const `ao.3d-practical.manifest.v1` |
+| `manifest_schema_sha256` | digest del texto normativo §§3.1–3.7 en UTF-8 NFC/LF |
+| `estimand` | const `project_memory_assisted_vs_off_v1` |
+| `ao_commit`, `fixture_commit` | `git_commit` completos |
+| `tasks` | array exacto en orden A,B,C,D; cada item `{task_id: enum A-D, task_manifest_sha256: sha256, fixture_subtree_sha256: sha256, oracle_ref: sha256, treatment_target_roles: nonempty unique array<CLOSED_ROLE_SET>}`; cada target role debe tener al menos una celda ASSISTED con attachment presente |
+| `arms` | tuple exacto `[`"OFF"`, `"ASSISTED"`]` |
+| `treatment_mapping` | array cerrado que contiene una y sólo una celda por combinación alcanzable `task × role × call_class`; schema §3.2 |
+| `provider` | objeto cerrado según §3.3 |
+| `provider_access_boundary` | const `AO_OBSERVED_CLIENT_ONLY_V1`; roles sólo reciben el cliente instrumentado; SDK handle/credencial no es accesible desde role/helper code fuera de esa frontera |
+| `invocation_config_mapping` | array cerrado, exactamente una fila por celda alcanzable `task × role × call_class`; item `{task_id,role,call_class,model_id,model_version,effective_config_schema,effective_config_sha256,effective_config}` |
+| `CLOSED_ROLE_SET` | array no vacío, sin duplicados, ordenado según enum fijo: `planner`, `worker`, `reviewer`, `repair`, `summarizer`, `helper` |
+| `workflow` | objeto cerrado: `worker_flow_version: string`, `reviewer_flow_version: string`, `task_roles: array` exacto A-D; item `{task_id, role_flow: nonempty array<{role:CLOSED_ROLE_SET,flow_position:positive_uint,reachable_call_classes:nonempty array<enum §3.2>}>}`; flow_position contiguo desde 1 |
+| `TOKEN_CAP_ROLE`, `CALL_CAP_ROLE` | arrays completos en orden task A-D y `CLOSED_ROLE_SET`; item `{task_id, role, cap: uint}`; roles no usados deben cap=0 en ambas tablas |
+| `retry_policy` | objeto cerrado según §3.4; por role y request outcome, sin herencia ni defaults |
+| `deadlines` | objeto cerrado `{position_seconds: positive_uint, provider_attempt_seconds: positive_uint, role_seconds: array<{role,seconds}>}` completo por cada role |
+| `instrument` | `{schema_version: string, request_trace_version: string, usage_accounting_version: string, provider_request_schema_version: string, exploration_parser_version: string, verify_version: string, q4_runner_version: string, q6_scorer_version: string}`; versiones/digests exactos |
+| `M3_caps` | array completo task-role; item `{task_id,role,C_cap:uint,F_cap:uint}`; exactamente un rol medido por task (worker A/B/D, reviewer C) tiene ambos positivos, los demás ambos cero |
+| `thresholds` | objeto cerrado según §6 con los valores const allí definidos |
+| `decision_rule_version` | const `ao.3d-practical.decision.v1` |
+| `N` | const integer 5 |
+| `randomization` | objeto cerrado según §3.5, incluye PRNG, raíz/derivación de seed y schedule completo |
+| `Router` | const `OFF` |
+| `external_context` | objeto cerrado según §3.6 |
+| `context_source_inventory` | array completo, cerrado según §3.6 |
+| `Q1_oracle`, `Q4_oracle`, `Q6_oracle` | objetos cerrados según §3.7, metadata requerida para cada tarea |
+| `position_isolation` | consts/explicit values para `new_conversation=true`, `new_session_id=true`, `clean_working_copy=true`, `new_AO_DATA_DIR=true`, `new_runtime_provider_home_when_applicable=true`, `no_prior_transcript_memory_or_results=true`, `local_process_teardown=verified_before_next_position` |
+
+El envelope almacenado junto al manifest es `{experiment_id:sha256,
+manifest_sha256:sha256,manifest:object,metadata:{human_label:string|null,
+human_version:string|null}}`; no permite fields adicionales. `experiment_id` y
+`manifest_sha256` son ambos SHA-256 de `canonical_bytes(manifest)`; no se
+incluyen en el objeto hasheado. Labels quedan fuera del canonical manifest y
+de toda decisión. Canonización: JSON UTF-8 NFC, LF, claves ordenadas
+lexicográficamente por bytes UTF-8, sin whitespace irrelevante, números
+enteros decimales sin signo `+` ni ceros iniciales, strings JSON escapadas por
+RFC 8259; floats, NaN e Infinity no están permitidos. Arrays conservan el
+orden normado indicado.
+
+### 3.2 Treatment mapping cerrado
+
+`call_class` es exactamente uno de `initial`, `continuation`, `tool_result`,
+`review`, `repair`, `summary`, `helper`, `retry`. Cada entry es un objeto
+cerrado `{task_id, role, call_class, OFF, ASSISTED}`. La matriz debe coincidir
+exactamente con las celdas alcanzables del workflow; roles/clases desconocidos,
+faltantes o extra invalidan el manifest.
+
+`OFF` es exactamente `{attachment_present:false}`; attachment, digest, versión
+y provenance spans son campos prohibidos por el schema de esa variante.
+`ASSISTED` contiene la propiedad obligatoria `attachment_present:bool`. Si es
+false, el objeto sólo puede contener esa propiedad. Si es true, contiene
+`attachment_sha256`, `attachment_artifact_ref`, `attachment_version`,
+`provenance_schema_version`, `construction_version`, `render_version`,
+`indexed_commit`, `source_manifest_sha256`, `freshness_inputs_sha256` y
+`origin=PROJECT_MEMORY`. `attachment_artifact_ref` referencia bytes completos
+inmutables cuyo digest coincide con `attachment_sha256`; el blob es parte del
+contenido cubierto por el digest canónico (directamente embebido o mediante un
+manifest de blobs content-addressed incluido en el canonical bytes set).
+Freshness inputs y source manifest permiten reconstruir la construcción; los
+bytes exactos permiten verificarla. Toda request ASSISTED se coteja con la
+celda task/role/call_class y artifact congelados. OFF requiere ausencia literal
+en el snapshot final. Mismatch después de SAMPLE_START es `MALFORMED_RESULT`.
+
+### 3.3 Provider y configuración efectiva
+
+`provider` es `{provider_id, account_ref_sha256, client_id, client_version,
+provider_api_version}`. Para cada invocation config mapping, `effective_config_schema`
+identifica una definición
+versionada y cerrada de todos los parámetros que el provider/SDK/client puede
+tomar por default, incluyendo sampling, output/context limits, tools, streaming,
+reasoning, compaction, timeout y request headers con relevancia semántica.
+Cada `effective_config` debe aportar cada parámetro definido por esa versión,
+incluidos los no aplicables con su valor explícito `null` sólo si el schema lo
+declara nullable; su digest debe coincidir con la canonicalización de ese
+objeto. El mapping debe tener una fila por celda alcanzable, sin default ni
+fallback entre filas. Parámetro desconocido/no representado o default implícito
+produce `PRESTART_INVALID`. `account_ref_sha256` identifica de forma estable la
+misma cuenta existente en ambos arms; no contiene credenciales.
+
+### 3.4 Retry y backoff
+
+`retry_policy` es `{algorithm_version, backoff_algorithm, base_delay_ms,
+max_delay_ms, jitter_algorithm, retry_budgets}`. Backoff es const
+`exponential_capped_v1`: `min(base_delay_ms × 2^(attempt_index-1),
+max_delay_ms)`; jitter es const `none_v1` (delay exacto reproducible). El array
+`retry_budgets` tiene exactamente una fila por role y outcome retryable/rate;
+cada fila `{role,retryable_max_retries: uint,rate_limited_max_retries:uint}`.
+El presupuesto cuenta retries además del primer attempt. No hay gateway retries
+ni retries de posición; la política de retry transparente del SDK vale cero y
+se serializa explícitamente en `effective_config`. Un outcome provider distinto
+de retryable/rate no se retrya. Cada retry tiene `retry_chain_id` del logical
+call original y `retry_index` contiguo por outcome dentro de esa chain; el
+primer retry tiene índice 1 y éste es el exponente usado por backoff.
+
+### 3.5 PRNG, seed y schedule pareado
+
+`randomization` es `{prng_algorithm:"ChaCha20-IETF",prng_version:"RFC8439-v1",
+seed_hex:64-lowercase-hex,root_seed_generation:"OS_CSPRNG_32_bytes_before_manifest_v1",
+task_stream_derivation:"sha256-task-domain-v1",
+schedule_algorithm:"task-paired-off-assisted-v1",schedule_version:1,
+orientation_balance:"2_3_each_task",
+schedule:[40 entries]}`. Para cada task en orden A,B,C,D y pair index 1–5,
+derivar key-task = `SHA256(UTF8("AO-3D-PRACTICAL-TASK-v1") || seed_bytes ||
+UTF8(task_id))`. Inicializar ChaCha20-IETF con key-task, nonce de 12 cero
+bytes y counter=0; interpretar el keystream como palabras uint32 little-endian
+consecutivas consumidas una sola vez en orden. Consumir primero la palabra 0;
+su bit 0 elige cuántos pares usan OFF primero: 2 si es 0, 3 si es 1.
+Fisher-Yates permuta `[1,2,3,4,5]` desde i=4 hasta i=1 usando palabras
+siguientes y rejection sampling (`limit=floor(2^32/(i+1))*(i+1)`; rechazar
+x>=limit; j=x mod (i+1)); una palabra rechazada también se consume. Los
+primeros k índices de la permutación son OFF-first; los restantes son
+ASSISTED-first. Así cada task tiene ambos órdenes y una diferencia de a lo
+sumo uno. La schedule enumera task A-D, pair 1-5, orden
+derivado, con `position_index` 1–40 contiguo. Cada entry es
+`{position_index:uint, task_id, pair_index:uint 1..5, pair_order:[arm,arm],
+arm, sample_id:sha256}`; sample IDs son
+`SHA256(UTF8("AO-3D-PRACTICAL-SAMPLE-v1") || seed_bytes || UTF8(task_id) ||
+uint8(pair_index) || UTF8(arm))`. Cada par tiene dos entries consecutivos y
+exactamente OFF/ASSISTED. La semilla raíz son 32 bytes obtenidos una sola vez
+por OS CSPRNG antes de congelar el manifest; nunca se prueban seeds alternativas
+contra resultados de schedule. `decide()` regenera los 40 entries de la seed y
+compara igualdad estructural exacta con la schedule canónica. Existencia de 40
+filas sin igualdad exacta es `SCHEDULE_INVALID`.
+
+### 3.6 Router, external context y contexto
+
+`external_context` es `{policy, equalized_sources}`; policy es `DISABLED` o
+`EQUALIZED`. En DISABLED, `equalized_sources=[]`; en EQUALIZED, es una lista no
+vacía ordenada de `{source_id,representation_sha256}`. Inventory tiene
+exactamente los sources
+`project_memory`, `router`, `mcp`, `apps_connectors`, `web`, `global_memory`,
+`AO_external_evidence`, `provider_tools` y `other`. Cada item cerrado es
+`{source_id,state,verification_version}`; `other` añade `inventory_sha256`.
+State es `OFF` para router; Project Memory se rige sólo por treatment mapping;
+los demás sources son `DISABLED` o `EQUALIZED`. Si un source está `EQUALIZED`,
+su objeto requiere `representation_sha256` y debe aparecer con el mismo digest
+en `external_context.equalized_sources`; si no, ese campo está prohibido.
+`other` debe digerir las fuentes adicionales inspeccionadas. Una fuente AO no
+catalogada antes del lote da `PRESTART_INVALID`. La igualdad se comprueba en
+cada posición y por ambos arms. `externalContext` AO permanece literal `false`
+en todos los requests; EQUALIZED sólo describe fuentes de contexto adicionales
+que no son Project Memory.
+
+### 3.7 Metadata de oráculos
+
+`Q1_oracle` contiene `{version, verify_command_sha256,
+accepted_exit_codes:nonempty_unique_array<uint>}`;
+`Q4_oracle` contiene `{version, runner_image_or_binary_sha256, command_sha256,
+timeout_seconds, task_oracles:[{task_id,hidden_test_manifest_sha256}]}` con
+una fila por task A-D. `Q6_oracle`
+contiene `{version, review_target_sha256, file_manifest_sha256,
+mandatory_defects:[{file, file_sha256, causal_line:uint, defect_class,
+cause_code, impact_code}], K:3}`. `file` es path relativo UTF-8 NFC sin `..`,
+`file_sha256` coincide con el target y `causal_line` cae dentro del archivo.
+`defect_class` es `AUTHORIZATION_BYPASS`, `INPUT_VALIDATION`,
+`STATE_TRANSITION`, `DATA_INTEGRITY`, `CONCURRENCY`, `ERROR_HANDLING`,
+`RESOURCE_LIFECYCLE`, `API_CONTRACT` o `SECURITY_BOUNDARY`; `cause_code` es
+`MISSING_GUARD`, `WRONG_PREDICATE`, `WRONG_TARGET`, `STALE_STATE`,
+`UNSAFE_DEFAULT`, `MISSING_CLEANUP`, `NON_ATOMIC_UPDATE` o `ERROR_DROPPED`;
+`impact_code` es `UNAUTHORIZED_ACCESS`, `INCORRECT_RESULT`, `DATA_LOSS`,
+`STATE_CORRUPTION`, `RACE`, `RESOURCE_LEAK`, `CRASH` o
+`CONTRACT_VIOLATION`. Los enums/códigos Q6 están cerrados por la
+versión `ao.q6.practical.v1`, con al menos un mandatory defect y no más de K.
+Definición de líneas, archivos y códigos exactos queda dentro del digest del
+manifest Q6 y no puede modificarse post-start. No hay adjudicación posterior;
+cualquier finding extra no duplicado se reporta como alternativo descriptivo,
+cuenta como falso positivo para Q6 y no puede cambiarse luego. En A/B/D Q6 es
+NA pero se congela el mismo Q6 schema/version para evitar defaults divergentes.
+
+Schedule y provider config siempre se interpretan conforme a esta versión. No
+se permite que el proveedor, SDK o cliente seleccione un default no serializado.
+
+`validate_manifest(manifest)` es true si y sólo si: schema version es el const
+del schema y schema digest coincide exactamente con el digest recalculado
+según §3.1; existen todos y sólo los campos raíz/anidados
+de esta sección con tipos, cardinalidades, formatos y enums válidos; todos los
+cross-references, digests, blob bytes, treatment/config/workflow/cap/retry/
+deadline/context/oracle matrices son completos y coinciden; thresholds son los
+const de §6; `N=5`; el schedule es idéntico a la regeneración de §3.5; y no hay
+defaults implícitos. Todo otro input es false y recibe `PRESTART_INVALID` si se
+detecta antes del primer SAMPLE_START. La función no intenta completar o
+reparar campos inválidos.
 
 ## 4. Vocabulario único de estado y transición
 
@@ -127,6 +310,23 @@ Cada fila de request conserva su `request_outcome` (`SUCCESS`, `RETRYABLE`,
 estados terminales adicionales de posición. La posición final conserva un
 único valor del enum anterior.
 
+`ObservedProviderClient` es la única frontera autorizada para invocar el SDK;
+el boundary de dependencias/credenciales hace que role/helper code no tenga
+SDK handle ni credencial con los que eludirlo, y el preflight rechaza una
+composición distinta de `AO_OBSERVED_CLIENT_ONLY_V1`. No hay llamadas directas
+de helpers/roles ni retries automáticos internos del SDK. Cada dispatch crea
+antes de enviar el attempt, trace row y usage/accounting
+row con la misma clave `(sample_id, attempt_id, call_index)`. `attempt_id` es
+único por posición y `call_index` enumera contiguamente desde 1 en orden de
+dispatch para toda la posición, no por rol. La fila de accounting existe para
+cada attempt incluso si usage falta; un campo requerido faltante se marca
+`MISSING` y fuerza `MALFORMED_RESULT`. Las tres colecciones deben tener el mismo
+conjunto de claves exactamente una vez. Cualquier hueco, duplicado, índice no
+contiguo, rol/clase fuera del CLOSED_ROLE_SET/mapping, o attempt detectado por
+el observer sin registro correspondiente hace la posición
+`MALFORMED_RESULT`. Un mismatch detectado sólo después de SAMPLE_START nunca
+es `PRESTART_INVALID`.
+
 Los errores retryable/rate sólo reintentan requests dentro de la misma
 posición, con presupuesto, backoff y límites congelados en el manifest. No
 existe retry de posición. Toda clase de failure y bloqueo recibe imputación
@@ -159,6 +359,12 @@ M2_role  <= CALL_CAP_ROLE[task,role]
 M1u = Σ M1u_role
 M2  = Σ M2_role
 ```
+
+M2 suma exactamente uno por provider attempt observado, incluidos retries,
+requests terminales y streams parciales; no cuenta turnos conversacionales.
+M1u suma `uncached_input_tokens` de cada attempt y M1 suma `input_tokens` de
+cada attempt. Cada role se agrega por separado antes de validar y luego se suma
+al nivel de posición.
 
 Un exceso de cualquier cap hace `MALFORMED_RESULT` y aplica imputación de
 failure. No se permite compensar sobreconsumo de un rol con subconsumo de otro.
@@ -193,6 +399,12 @@ dominio invalida esa posición.
 
 ## 6. Función de decisión única
 
+`thresholds` es un objeto cerrado con estos valores const: `m1u_max_ratio=0.85`,
+`m2_or_m3_max_ratio=0.80`, `D_neutral_lower=0.90`,
+`D_neutral_upper=1.10`, `quality_rule="pass_count_non_decrease_per_task"`.
+Cualquier otro valor o field es `PRESTART_INVALID`; no se ajusta después de
+observar datos.
+
 Mediana es el estadístico de cada task/arm, con promedio de centrales si N es
 par. Para `X` en M1u, M2 o M3:
 
@@ -218,12 +430,12 @@ decide(manifest, ledger):
       return NO_GO(reason=PRESTART_INVALID)
   if experiment_id != canonical_digest(manifest):
       return NO_GO(reason=IDENTITY_MISMATCH)
-  if schedule is not exactly 40 frozen positions:
+  if schedule != regenerate_schedule(manifest.randomization):
       return NO_GO(reason=SCHEDULE_INVALID)
-  if any position absent, duplicated, replaced, relotted or selectively rerun:
-      return NO_GO(reason=LINEAGE_INVALID)
-
   S = normalize(each of the 40 scheduled positions)
+  lineage_valid = exactly one terminal record per scheduled position,
+                  no duplicate/extra/replaced/relotted/selectively rerun positions
+  all_completed = every scheduled position has terminal state COMPLETED
 
   quality = for every task t in {A,B,C,D}:
       pass_count(ASSISTED,t,Q1) >= pass_count(OFF,t,Q1)
@@ -237,10 +449,25 @@ decide(manifest, ledger):
 
   negative_control = for X in {M1u,M2,M3}: neutral_D(X)
 
-  if quality and efficiency and negative_control:
+  if lineage_valid and all_completed and quality and efficiency and negative_control:
       return GO
   return NO_GO
 ```
+
+La normalización recorre siempre las 40 posiciones congeladas, no sólo filas
+recibidas. Si falta el registro terminal de una posición, crea en la vista
+diagnóstica un `MALFORMED_RESULT` imputado a caps/calidad cero y marca
+`lineage_valid=false`. Una posición no iniciada se marca
+`BLOCKED_BY_PRIOR_POSITION` sólo si existe el evento de parada previo; de lo
+contrario es `MALFORMED_RESULT`. Un registro duplicado/extra se conserva como
+evidencia, marca inválida la lineage y nunca añade/quita posiciones.
+
+La condición `all_completed` es arm-blind y determinista. Si cualquiera de las
+40 posiciones termina en `FAILED_*`, `TIMEOUT`, cualquier `PROVIDER_*`,
+`MALFORMED_RESULT` o `BLOCKED_BY_PRIOR_POSITION`, el resultado necesariamente
+es `NO_GO`, aunque las métricas normalizadas satisfagan el resto de la función.
+Se calculan y publican métricas imputadas para diagnóstico, pero nunca pueden
+producir GO ni favorecer el arm con más fallos.
 
 Un prestart inválido impide el lote y no puede corregirse después de observar
 una posición. Tras el primer SAMPLE_START toda entrada de las 40 posiciones

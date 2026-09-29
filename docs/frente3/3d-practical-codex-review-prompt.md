@@ -34,6 +34,24 @@ Busca contraejemplos concretos que impidan responder la pregunta comparativa:
 - decisión que requiera juicio manual después de ver resultados;
 - claims por encima de fixture, cuenta, proveedor, modelo y ventana observados.
 
+Verifica explícitamente que sean imposibles estos seis ataques de la revisión
+REAL previa:
+
+A. Sustituir el attachment ASSISTED y conservar el mismo `experiment_id`.
+B. Introducir un solo failure y aun así obtener GO.
+C. El adapter elimina/cambia el attachment después de que la trace lo midió.
+D. Un helper hace un provider call sin contabilizarlo.
+E. El schedule correlaciona arm con orden temporal/warm-up.
+F. El mismo manifest permite comportamientos distintos por defaults
+   implícitos del provider, SDK o cliente.
+
+Para cada ataque, indica el campo/regla exactos que lo bloquean. En particular,
+comprueba que `decide()` compara el schedule completo regenerado desde PRNG,
+versión y seed congelados; que las 40 posiciones deben estar `COMPLETED` para
+GO; y que toda invocación SDK tiene una correspondencia 1:1 por
+`(sample_id, attempt_id, call_index)` entre attempt, trace row y
+usage/accounting row.
+
 No ejecutes nada ni edites archivos. No propongas gates o experimentos externos.
 
 No exijas aislamiento universal del proveedor, G4/G6 Research-Grade, VMs,
@@ -49,16 +67,19 @@ aceptada como `RESIDUAL_CONFOUNDER`.
 Resume primero el alcance y evidencia inspeccionada. Luego lista hallazgos
 ordenados por severidad; cada hallazgo debe incluir ubicación, escenario
 reproducible, efecto sobre la pregunta de ingeniería y corrección mínima.
-Separa defectos estáticos de limitaciones aceptadas. Si no hay hallazgos,
+Separa defectos estáticos de limitaciones aceptadas. No reabras V4 ni agregues
+G0–G9, VMs, gateway/broker experimental, organizaciones experimentales o
+aislamiento Research-Grade del provider, salvo que demuestres un camino causal
+concreto que invalide una de las comparaciones especificadas. Si no hay hallazgos,
 explícalo brevemente. No conviertas limitaciones ya declaradas en defectos sin
 demostrar cómo sesgan o invalidan la comparación.
 
 Termina con exactamente una línea:
 
 ```text
-PRECONDITION_3D_PRACTICAL = READY_FOR_IMPLEMENTATION | NEEDS_CHANGES | NO-GO
+PRECONDITION_3D_PRACTICAL = READY_FOR_CODEX_REVIEW | NEEDS_CHANGES | NO-GO
 ```
 
-`READY_FOR_IMPLEMENTATION` sólo significa que el diseño puede pasar a una
-decisión separada de implementación; no autoriza ejecutar el lote, activar
-Project Memory ni hacer rollout.
+`READY_FOR_CODEX_REVIEW` sólo significa que esta revisión estática no encontró
+defectos que invaliden la comparación especificada; no autoriza implementar,
+ejecutar el lote, activar Project Memory ni hacer rollout.

@@ -28,18 +28,10 @@ de Codex y una autorización posterior para la fase que corresponda.
 
 Antes de la primera posición se publica un manifest canónico, hasheado y
 append-only. `experiment_id` es el SHA-256 de su representación canónica,
-incluidos todos estos campos:
-
-- estimand y arms;
-- manifests/digests de tareas y oráculos;
-- commit del fixture;
-- commit AO;
-- provider, modelo, versión y configuración;
-- flujo worker/reviewer;
-- caps por tarea y rol;
-- thresholds y versión de la función de decisión;
-- `N=5`, seed y schedule completo;
-- Router OFF y reglas de contexto externo.
+incluidos **todos** los campos del schema cerrado de
+[06-benchmark-plan.md](06-benchmark-plan.md) §3. El envelope del ledger lleva
+`{experiment_id, manifest}`; el manifest no contiene `experiment_id` y no hay
+hash recursivo.
 
 La canonización fija UTF-8, NFC, LF, orden de claves, representación de
 números y digest del manifest. Labels, nombres de lote y versiones humanas son
@@ -49,10 +41,11 @@ experimento anterior. El registro contiene todos los experiment IDs y sus
 resultados; no existe “último batch bueno”.
 
 El schedule contiene exactamente `4 × 2 × 5 = 40` posiciones: tareas A–D,
-brazos OFF/ASSISTED, cinco posiciones por task/arm. Se genera con la seed
-congelada, randomizado e interleaved dentro de bloques por tarea. Cada bloque
-incluye ambos arms en orden aleatorio; nunca se ejecuta OFF completo seguido
-por ASSISTED completo. El schedule se hashea antes de SAMPLE_START.
+brazos OFF/ASSISTED, cinco posiciones por task/arm. Se genera con la seed,
+PRNG, derivación y algoritmo de pares definidos en 06 §3. Cada tarea contiene
+cinco pares; cada par tiene exactamente una posición OFF y una ASSISTED, con
+orden derivado de la seed. El schedule completo se hashea antes de SAMPLE_START
+y `decide()` regenera y compara el schedule entero.
 
 ## 2. Condiciones por posición
 
@@ -77,14 +70,35 @@ working copy de otra posición. El launcher comprueba los IDs/rutas antes de
 start; teardown verifica que procesos locales de esa posición hayan terminado
 antes de iniciar la siguiente. Una violación post-start es failure contado.
 
+El manifest fija un `CLOSED_ROLE_SET` y, para cada combinación alcanzable
+`task × role × call_class`, contiene exactamente una entrada por arm. Los roles
+se limitan al enum `planner`, `worker`, `reviewer`, `repair`, `summarizer`,
+`helper`; las call classes al enum `initial`, `continuation`, `tool_result`,
+`review`, `repair`, `summary`, `helper`, `retry`. El flow define cuáles son
+alcanzables. Una celda ausente, extra o ambigua hace `PRESTART_INVALID`.
+
+OFF exige `attachment_present=false`, sin attachment bytes ni spans de origen
+Project Memory. Cada celda ASSISTED congela explícitamente si el attachment
+está presente. Cuando está presente, la celda incluye SHA-256 y bytes exactos,
+attachment version, provenance schema/version, construction/render version,
+indexed commit, source manifest digest, freshness inputs y los demás parámetros
+necesarios para reconstruir los mismos bytes. Cuando está ausente, el objeto es
+exactamente `{attachment_present:false}`. Los bytes se guardan como artefacto
+inmutable identificado por su digest y cubierto por el canonical manifest. Cada
+request ASSISTED debe coincidir con su celda exacta; un OFF con cualquier
+byte/span del attachment o un mismatch post-start es `MALFORMED_RESULT`. Toda
+request role/call class fuera del mapping falla igual. El preflight valida todas
+las celdas/artefactos congelados antes del primer SAMPLE_START.
+
 ## 3. Frontera de inicio y fallos
 
 Antes de SAMPLE_START, el validador comprueba AO/fixture/model/config/schedule,
-la configuración común y la construcción representativa de los primeros
-requests OFF y ASSISTED. Verifica que OFF contiene cero attachment y ASSISTED
-contiene exactamente el attachment provisionado esperado, su digest y origen;
-`externalContext=false`. Si falla cualquier contraste, el lote entero no
-comienza y se registra `PRESTART_INVALID` con evidencia. No se inicia ninguna
+la configuración común, todos los blobs del treatment mapping y las
+representaciones finales construidas para las celdas iniciales OFF/ASSISTED.
+Verifica que OFF contiene cero attachment y ASSISTED coincide exactamente con
+su celda provisionada, digest y origen; `externalContext=false`. Si falla
+cualquier contraste, el lote entero no comienza y se registra
+`PRESTART_INVALID` con evidencia. No se inicia ninguna
 posición ni se intenta reparar y continuar el mismo lote.
 
 SAMPLE_START es el append durable inmediatamente anterior a habilitar la
@@ -103,32 +117,59 @@ y enlazado, no sustitución.
 
 ## 4. Métricas, treatment trace y provider cache
 
-M1u, M2 y M3 se recogen por posición y rol según 06. Se traza cada request
-relevante, incluyendo retries. Cada registro incluye:
+Todo provider attempt posterior a SAMPLE_START se traza, sin excepción, para
+cualquier rol, incluidos retries, partial streams, worker, reviewer, repair,
+fix, summarizer, helper y otros roles enumerados en el `CLOSED_ROLE_SET`. M1u y
+M2 incluyen absolutamente todos esos attempts. Para cada posición, cada
+attempt tiene correspondencia 1:1 con una trace row, una usage/accounting row y
+un `call_index` único y contiguo por posición, asignado en orden de dispatch;
+partial stream es un attempt, no un motivo para omitirlo. Hueco, duplicado,
+índice repetido, usage row faltante o
+role/call class desconocido produce `MALFORMED_RESULT`.
+
+Todos los roles reciben el mismo AO-owned `ObservedProviderClient`; sólo esa
+frontera instrumentada puede invocar el provider SDK. Helpers no pueden
+construir clientes alternos ni llamar directamente al SDK. Cada invocación
+asigna el call_index antes del dispatch y escribe una trace row y usage/accounting
+row asociadas por `(sample_id, attempt_id, call_index)`; telemetría del intento
+sin una de las otras dos filas, o viceversa, hace `MALFORMED_RESULT`.
+
+La frontera de trace es el objeto final ya adaptado inmediatamente antes de
+entregarlo al transport/provider SDK. Toda adaptación ocurre antes de esta
+frontera. Se serializa el objeto final según el schema provider/request
+congelado y se registra `SHA256(canonical_request_bytes)`; la traza extrae
+attachment y contexto desde esos mismos bytes. Esos bytes/campos forman un
+snapshot inmutable y ese mismo objeto se entrega al transport/SDK sin mutación
+intermedia. Cada trace row incluye:
 
 ```text
-experiment_id, sample_id, task, arm, role, call_index,
+experiment_id, sample_id, task, arm, role, attempt_id, call_index,
 provider/model/version/config,
-pre_adapter_representation_digest,
+final_post_adapter_representation_sha256,
 project_memory_attachment_present, attachment_digest, attachment_version,
 origin (PROJECT_MEMORY when present; NONE when absent),
-externalContext=false, other_AO_context_sources=absent_or_equalized,
+externalContext=false, context_source_inventory_sha256, context_source_states,
 input_tokens, cached_input_tokens, uncached_input_tokens,
-retry_index, retry_cause, request_outcome, position_terminal_state
+retry_chain_id, retry_index, retry_cause, request_outcome, position_terminal_state
 ```
 
-`position_terminal_state` usa el enum de 06 al terminar la posición; requests
-anteriores llevan `null`. Cada request lleva además `request_outcome` según la
-transición de 06: success, retryable, rate-limited, policy failure, terminal
+`attempt_id` identifica una invocación de forma única y aparece en sus tres
+filas emparejadas. `call_index` es un entero desde 1 sin huecos por posición,
+asignado justo antes de dispatch. `position_terminal_state` usa el enum de 06
+al terminar la posición; requests anteriores llevan `null`. Cada request lleva
+además `request_outcome` según la transición de 06: success, retryable,
+rate-limited, policy failure, terminal
 provider failure o sanction.
 
-El registro identifica la **representación enviada por AO/provider client**.
-No afirma conocer los bytes que el proveedor decodificó internamente ni los
-bytes vistos definitivamente por el modelo. Si el proveedor no expone cached y
-uncached tokens por request, el valor se marca `UNAVAILABLE`, nunca cero ni
-una estimación presentada como medida. M1u debe ser medible para poder puntuar
-la función de 06; de lo contrario la posición falla o el preflight del lote no
-permite iniciar, según el momento de detección.
+Attachment present/absent, digest/version, origin, external-context y otras
+fuentes AO se leen desde ese mismo snapshot final. El registro identifica la
+**representación final entregada por AO al transport/provider SDK**; no afirma
+conocer los bytes que el proveedor decodificó internamente ni los bytes vistos
+definitivamente por el modelo. Cada attempt tiene usage/accounting row incluso
+si el provider no devuelve usage: ese row indica explícitamente `MISSING` y la
+posición será `MALFORMED_RESULT`, nunca se omite ni se registra como cero. M1u
+debe ser medible; la disponibilidad del mecanismo se valida antes de
+SAMPLE_START.
 
 Provider cache/shared state que no pueda aislarse se registra como
 `RESIDUAL_CONFOUNDER`. Se reporta cached/uncached por request (si se expone),
@@ -150,12 +191,13 @@ del oracle. `K=3` findings como máximo, fijado en el manifest. Duplicados por
 archivo/línea/clase/códigos cuentan como falsos positivos y Q6=0. Todo finding
 debe referirse al digest exacto del target y a líneas válidas.
 
-Q6=1 si y sólo si el primary seeded defect es rank 1 con causal_line y códigos
-exactos, todos los defectos obligatorios congelados están reportados, no se
-excede K y hay cero duplicados o findings extra no preaceptados. No se usa IoU
-como criterio primario. No hay adjudicación post-hoc que pueda cambiar Q6.
-Hallazgos alternativos pueden registrarse aparte como observación descriptiva;
-no cambian el oracle, Q6 ni la decisión.
+Q6=1 si y sólo si el primary seeded defect es rank 1 en su `causal_line` exacta
+con códigos exactos, todos los defectos obligatorios congelados aparecen una
+vez en sus causal lines y con códigos exactos, el total de findings no excede
+K y no hay duplicados ni findings extra. No se usa IoU. No hay adjudicación
+post-hoc: cualquier finding extra es falso positivo para Q6. Los hallazgos
+alternativos se conservan en la salida para descripción; nunca modifican el
+oracle ni el score después de observar resultados.
 
 ## 6. Recursos deliberadamente fuera del diseño
 
