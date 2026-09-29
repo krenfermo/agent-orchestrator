@@ -1,6 +1,6 @@
 # Frente 3 / 3D — PRECONDITION_3D_PRACTICAL
 
-Fecha: 2026-09-29 · Estado: **norma práctica; pendiente revisión estática REAL; no ejecutado.**
+Fecha: 2026-09-29 · Estado: **norma práctica corregida; pendiente nueva revisión estática REAL; no ejecutado.**
 
 ## 0. Autoridad y alcance
 
@@ -51,8 +51,10 @@ y `decide()` regenera y compara el schedule entero.
 
 La única diferencia intencional entre arms es el modo Project Memory.
 
-- AO commit, fixture commit, tarea, modelo/config, flujo, caps, host y oráculos
-  son iguales.
+- AO commit, fixture commit, tarea, modelo/config, flujo, caps, configuración
+  local relevante y oráculos son iguales. Esa igualdad se representa mediante
+  el `EXECUTION_ENVIRONMENT_DIGEST` cerrado de 06 §3.6; OFF y ASSISTED usan
+  exactamente el mismo expected digest.
 - Router está siempre OFF.
 - OFF requiere cero bytes de attachment Project Memory.
 - ASSISTED requiere el attachment esperado; se registra su digest y versión.
@@ -95,6 +97,9 @@ las celdas/artefactos congelados antes del primer SAMPLE_START.
 Antes de SAMPLE_START, el validador comprueba AO/fixture/model/config/schedule,
 la configuración común, todos los blobs del treatment mapping y las
 representaciones finales construidas para las celdas iniciales OFF/ASSISTED.
+También recalcula el `EXECUTION_ENVIRONMENT_DIGEST` sin secretos y lo compara
+con el expected digest común. Cada posición anexa su observed digest antes de
+su SAMPLE_START y lo revalida cuando pueda cambiar una entrada allowlisted.
 Verifica que OFF contiene cero attachment y ASSISTED coincide exactamente con
 su celda provisionada, digest y origen; `externalContext=false`. Si falla
 cualquier contraste, el lote entero no comienza y se registra
@@ -120,19 +125,23 @@ y enlazado, no sustitución.
 Todo provider attempt posterior a SAMPLE_START se traza, sin excepción, para
 cualquier rol, incluidos retries, partial streams, worker, reviewer, repair,
 fix, summarizer, helper y otros roles enumerados en el `CLOSED_ROLE_SET`. M1u y
-M2 incluyen absolutamente todos esos attempts. Para cada posición, cada
-attempt tiene correspondencia 1:1 con una trace row, una usage/accounting row y
-un `call_index` único y contiguo por posición, asignado en orden de dispatch;
-partial stream es un attempt, no un motivo para omitirlo. Hueco, duplicado,
-índice repetido, usage row faltante o
+M2 incluyen absolutamente todos esos attempts materializados válidamente. El
+ledger físico es append-only: cada attempt se representa con exactamente un
+evento `ATTEMPT_DISPATCHED` previo al envío y exactamente un evento
+`ATTEMPT_FINALIZED` posterior, ambos con la misma identidad
+`(sample_id, attempt_id, call_index)`. `call_index` es único y contiguo por
+posición, asignado en orden de dispatch; partial stream es un attempt. Hueco,
+duplicado, finalization ausente, identity mismatch, accounting ausente o
 role/call class desconocido produce `MALFORMED_RESULT`.
 
 Todos los roles reciben el mismo AO-owned `ObservedProviderClient`; sólo esa
 frontera instrumentada puede invocar el provider SDK. Helpers no pueden
 construir clientes alternos ni llamar directamente al SDK. Cada invocación
-asigna el call_index antes del dispatch y escribe una trace row y usage/accounting
-row asociadas por `(sample_id, attempt_id, call_index)`; telemetría del intento
-sin una de las otras dos filas, o viceversa, hace `MALFORMED_RESULT`.
+asigna el call_index y anexa `ATTEMPT_DISPATCHED` antes del dispatch. Después
+anexa `ATTEMPT_FINALIZED`; nunca actualiza ni reemplaza el evento previo. La
+materialización normativa une ambos tipos sólo cuando hay exactamente uno de
+cada tipo con identidad coincidente. Cualquier otra cardinalidad o combinación
+hace `MALFORMED_RESULT`.
 
 La frontera de trace es el objeto final ya adaptado inmediatamente antes de
 entregarlo al transport/provider SDK. Toda adaptación ocurre antes de esta
@@ -140,36 +149,35 @@ frontera. Se serializa el objeto final según el schema provider/request
 congelado y se registra `SHA256(canonical_request_bytes)`; la traza extrae
 attachment y contexto desde esos mismos bytes. Esos bytes/campos forman un
 snapshot inmutable y ese mismo objeto se entrega al transport/SDK sin mutación
-intermedia. Cada trace row incluye:
+intermedia. `ATTEMPT_DISPATCHED` incluye:
 
 ```text
-experiment_id, sample_id, task, arm, role, attempt_id, call_index,
+experiment_id, sample_id, task, arm, role, attempt_id, call_index, call_class,
 provider/model/version/config,
 final_post_adapter_representation_sha256,
 project_memory_attachment_present, attachment_digest, attachment_version,
 origin (PROJECT_MEMORY when present; NONE when absent),
 externalContext=false, context_source_inventory_sha256, context_source_states,
-input_tokens, cached_input_tokens, uncached_input_tokens,
-retry_chain_id, retry_index, retry_cause, request_outcome, position_terminal_state
+retry_chain_id, retry_index, dispatch_timestamp
 ```
 
-`attempt_id` identifica una invocación de forma única y aparece en sus tres
-filas emparejadas. `call_index` es un entero desde 1 sin huecos por posición,
-asignado justo antes de dispatch. `position_terminal_state` usa el enum de 06
-al terminar la posición; requests anteriores llevan `null`. Cada request lleva
-además `request_outcome` según la transición de 06: success, retryable,
-rate-limited, policy failure, terminal
-provider failure o sanction.
+`ATTEMPT_FINALIZED` repite exactamente `experiment_id`, `sample_id`, `task`,
+`arm`, `role`, `attempt_id`, `call_index` y `call_class`, y añade
+`request_outcome`, `input_tokens`, `cached_input_tokens`,
+`uncached_input_tokens`, retry metadata, terminal/provider metadata y
+`finalized_timestamp`. `attempt_id` identifica una invocación de forma única.
+`call_index` es un entero desde 1 sin huecos por posición, asignado justo antes
+de dispatch. Un valor de accounting requerido ausente se registra `MISSING` y
+fuerza `MALFORMED_RESULT`; no se interpreta como cero.
 
 Attachment present/absent, digest/version, origin, external-context y otras
 fuentes AO se leen desde ese mismo snapshot final. El registro identifica la
 **representación final entregada por AO al transport/provider SDK**; no afirma
 conocer los bytes que el proveedor decodificó internamente ni los bytes vistos
-definitivamente por el modelo. Cada attempt tiene usage/accounting row incluso
-si el provider no devuelve usage: ese row indica explícitamente `MISSING` y la
-posición será `MALFORMED_RESULT`, nunca se omite ni se registra como cero. M1u
-debe ser medible; la disponibilidad del mecanismo se valida antes de
-SAMPLE_START.
+definitivamente por el modelo. Si el provider no devuelve usage, la
+finalization indica explícitamente `MISSING` y la posición será
+`MALFORMED_RESULT`, nunca se omite ni se registra como cero. M1u debe ser
+medible; la disponibilidad del mecanismo se valida antes de SAMPLE_START.
 
 Provider cache/shared state que no pueda aislarse se registra como
 `RESIDUAL_CONFOUNDER`. Se reporta cached/uncached por request (si se expone),
@@ -184,10 +192,13 @@ filtran por brazo ni por resultado.
 ## 5. Q6 Practical
 
 Q6 sólo aplica a task C; en A/B/D es literalmente `NA`. Antes de randomizar se
-congelan `REVIEW_TARGET_SHA256`, digest por archivo, defectos obligatorios,
-`causal_line` exacta y códigos válidos. El primary seeded defect debe ser rank
-1 y señalar exactamente su `causal_line`; sus códigos deben coincidir con los
-del oracle. `K=3` findings como máximo, fijado en el manifest. Duplicados por
+congelan `REVIEW_TARGET_SHA256`, digest por archivo, defectos obligatorios con
+`defect_id` único, `causal_line` exacta y códigos válidos. El campo obligatorio
+`primary_defect_id` referencia exactamente uno de esos defectos. Campo missing,
+`defect_id` duplicado o referencia inexistente hace `PRESTART_INVALID`. El finding rank 1
+debe corresponder exactamente a `primary_defect_id`, incluida su línea, target
+y códigos; no puede elegirse el primary después de ejecutar el lote. `K=3`
+findings como máximo, fijado en el manifest. Duplicados por
 archivo/línea/clase/códigos cuentan como falsos positivos y Q6=0. Todo finding
 debe referirse al digest exacto del target y a líneas válidas.
 
@@ -231,5 +242,5 @@ proveedor es una limitación/covariable residual.
 GO sólo autoriza considerar después una activación opt-in, reversible y con
 telemetría. No autoriza rollout global.
 
-**PRECONDITION_3D_PRACTICAL = READY_FOR_CODEX_REVIEW** (pendiente revisión REAL).
+**PRECONDITION_3D_PRACTICAL = READY_FOR_CODEX_REVIEW** (correcciones pendientes de nueva revisión REAL).
 **PRECONDITION_3D = NO-GO.**

@@ -35,22 +35,26 @@ Busca contraejemplos concretos que impidan responder la pregunta comparativa:
 - claims por encima de fixture, cuenta, proveedor, modelo y ventana observados.
 
 Verifica explícitamente que sean imposibles estos seis ataques de la revisión
-REAL previa:
+REAL final:
 
-A. Sustituir el attachment ASSISTED y conservar el mismo `experiment_id`.
-B. Introducir un solo failure y aun así obtener GO.
-C. El adapter elimina/cambia el attachment después de que la trace lo midió.
-D. Un helper hace un provider call sin contabilizarlo.
-E. El schedule correlaciona arm con orden temporal/warm-up.
-F. El mismo manifest permite comportamientos distintos por defaults
-   implícitos del provider, SDK o cliente.
+A. Dos `mandatory_defects` intercambian cuál es primary después de observar el
+   lote o permiten que rank 1 no corresponda al `primary_defect_id` congelado.
+B. Existe `ATTEMPT_DISPATCHED` pero nunca llega su `ATTEMPT_FINALIZED`.
+C. Se anexan dos `ATTEMPT_FINALIZED` para la misma identity.
+D. Existen dos filas ambiguas de `retry_budgets` para el mismo role, o falta
+   una fila para un role del `CLOSED_ROLE_SET`.
+E. OFF y ASSISTED usan distinta versión de una herramienta allowlisted en el
+   `EXECUTION_ENVIRONMENT_DIGEST`.
+F. Cualquiera de los cambios anteriores intenta conservar el mismo
+   `experiment_id`.
 
 Para cada ataque, indica el campo/regla exactos que lo bloquean. En particular,
-comprueba que `decide()` compara el schedule completo regenerado desde PRNG,
-versión y seed congelados; que las 40 posiciones deben estar `COMPLETED` para
-GO; y que toda invocación SDK tiene una correspondencia 1:1 por
-`(sample_id, attempt_id, call_index)` entre attempt, trace row y
-usage/accounting row.
+comprueba que `primary_defect_id` es inequívoco; que la materialización requiere
+exactamente un dispatch y una finalization con identity coincidente por
+`(sample_id, attempt_id, call_index)`; que M1u/M2 sólo usan attempts válidamente
+materializados; que retry budgets son una función total de role; que el digest
+de entorno común se observa por posición; y que toda modificación del manifest
+canónico cambia `experiment_id`.
 
 No ejecutes nada ni edites archivos. No propongas gates o experimentos externos.
 

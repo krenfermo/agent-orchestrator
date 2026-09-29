@@ -26,3 +26,16 @@ La propuesta revisada intenta cerrar esos seis puntos en
 veredicto y los hallazgos originales; **no es normativa** y no sustituye una
 nueva revisión REAL de Codex. Ninguna recomendación Research-Grade se incorpora
 por esta evidencia.
+
+## Revisión REAL final y corrección acotada
+
+La revisión final preservada en
+`~/.ao/scratch/frente3/reviews/3d-practical-final/codex/review.md` tuvo SHA-256
+`7876c5fc97f24e87470c99e9fd691f4d82907b897c6fc9415ec8124d6e6b86eb` y
+resultado `PRECONDITION_3D_PRACTICAL = NEEDS_CHANGES`.
+
+Registró cuatro defectos: primary Q6 no identificada, lifecycle de attempts
+incompatible con append-only, cardinalidad ambigua de `retry_budgets` y falta
+de un digest reproducible del entorno local relevante. La corrección normativa
+está en `3d-practical.md` y `06-benchmark-plan.md`; esta nota sigue siendo sólo
+evidencia histórica y no declara aprobada la nueva revisión.

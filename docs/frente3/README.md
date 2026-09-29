@@ -51,7 +51,7 @@ memoria y router OFF.
 **Siguiente: prerequisitos de 3D** (carrera de review, ruta de review, aislamiento de sesiones, contexto externo). Después, el piloto A/B. Project Memory sigue **desactivada** por defecto. No se ha
 demostrado ningún ahorro de tokens; eso le corresponde al piloto.
 
-## 3D — evaluación práctica (pendiente revisión REAL; NO-GO para ejecución)
+## 3D — evaluación práctica (corregida; pendiente nueva revisión REAL; NO-GO para ejecución)
 
 La norma vigente es [3d-practical.md](3d-practical.md), junto con la única
 función total de [06-benchmark-plan.md](06-benchmark-plan.md). El diseño
@@ -62,8 +62,8 @@ Research-Grade V4 y el preflight previo se conservan como historial
 |---|---|
 | [3d-practical.md](3d-practical.md) | **Única especificación de protocolo vigente.** Comparación controlada OFF/ASSISTED, 40 posiciones, treatment trace, límites y claims |
 | [06-benchmark-plan.md](06-benchmark-plan.md) | **Única función total de decisión.** Estados, caps por rol, normalización, GO/NO-GO y lineage |
-| [3d-practical-codex-review-prompt.md](3d-practical-codex-review-prompt.md) | Prompt de revisión acotado a validez de la comparación interna; no ejecutado |
-| [3d-practical-codex-review.md](3d-practical-codex-review.md) | Evidencia histórica de la revisión REAL: NEEDS_CHANGES (seis hallazgos), no normativa |
+| [3d-practical-codex-review-prompt.md](3d-practical-codex-review-prompt.md) | Prompt actualizado para revalidar los cuatro hallazgos finales y ataques A–F; no ejecutado |
+| [3d-practical-codex-review.md](3d-practical-codex-review.md) | Evidencia histórica de las revisiones REAL: NEEDS_CHANGES (seis hallazgos iniciales y cuatro finales), no normativa |
 | [3d-preflight.md](3d-preflight.md) | Bloqueantes, laboratorio de cegamiento, ciclos de preregistro, mini-E2E y revisiones de Codex |
 | [3d-auth-design-v4.md](3d-auth-design-v4.md) | Investigación Research-Grade histórica; **NON-NORMATIVE** para 3D-PRACTICAL |
 | [3d-auth-design-v4-codex-review-prompt.md](3d-auth-design-v4-codex-review-prompt.md) | Prompt Research-Grade histórico; no usar para revisión de Practical |
