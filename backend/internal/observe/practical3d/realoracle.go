@@ -187,3 +187,32 @@ func finalWorkerCommit(ctx context.Context, w PositionWorkspace) (string, error)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// CheckFixtureHistory fails if any hidden oracle test exists anywhere in the
+// fixture repository's object database: agents read the working copy's full
+// Git history (a deleted-but-committed hidden test would be a Q4 leak that
+// hashing the frozen commit's tree cannot see).
+func CheckFixtureHistory(ctx context.Context, repo, hiddenDir string) error {
+	tasks, err := os.ReadDir(hiddenDir)
+	if err != nil {
+		return err
+	}
+	for _, t := range tasks {
+		files, err := os.ReadDir(filepath.Join(hiddenDir, t.Name()))
+		if err != nil {
+			return err
+		}
+		for _, f := range files {
+			p := filepath.Join(hiddenDir, t.Name(), f.Name())
+			out, err := exec.CommandContext(ctx, "git", "-C", repo, "hash-object", "--", p).Output()
+			if err != nil {
+				return fmt.Errorf("hash hidden test %s: %w", p, err)
+			}
+			blob := strings.TrimSpace(string(out))
+			if exec.CommandContext(ctx, "git", "-C", repo, "cat-file", "-e", blob).Run() == nil {
+				return fmt.Errorf("hidden test %s/%s is present in the fixture repository's history", t.Name(), f.Name())
+			}
+		}
+	}
+	return nil
+}

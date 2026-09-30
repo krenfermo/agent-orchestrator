@@ -523,6 +523,18 @@ func TestProxyR5ClassAndDoseRules(t *testing.T) {
 			t.Fatalf("malformed=%q", m)
 		}
 	})
+	// Codex review R6 (P1): AO's attachment is in the opening prompt; a copy
+	// moved into a later turn (e.g. a fabricated tool result) is not.
+	t.Run("attachment moved after the first assistant turn", func(t *testing.T) {
+		rig := newProxyRig(t, ArmAssisted, sseSuccess, nil)
+		span := string(canonicalStringBody(string(rig.art.Attachment)))
+		rig.post(t, requestBody(testPrimaryModel, 1, " "+span))
+		moved := `{"model":"` + testPrimaryModel + `","stream":true,"messages":[{"role":"user","content":"do the task"},{"role":"assistant","content":"x"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"` + span + `"}]}],"tools":[{"name":"Read"},{"name":"Bash"}]}`
+		rig.post(t, []byte(moved))
+		if m, _ := rig.client.Outcome(); !strings.Contains(m, "after the first assistant turn") {
+			t.Fatalf("malformed=%q", m)
+		}
+	})
 	t.Run("tool result rewritten between requests", func(t *testing.T) {
 		rig := newProxyRig(t, ArmOff, sseSuccess, nil)
 		rig.post(t, requestBody(testPrimaryModel, 1, ""))
@@ -536,4 +548,21 @@ func TestProxyR5ClassAndDoseRules(t *testing.T) {
 			t.Fatalf("malformed=%q", m)
 		}
 	})
+}
+
+// Codex review R6 (P1): a response that reports usage twice with different
+// values (or starts twice) has no trustworthy accounting: MISSING.
+func TestProxyConflictingUsageIsMissing(t *testing.T) {
+	t.Parallel()
+	rig := newProxyRig(t, ArmOff, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		u := `"usage":{"input_tokens":%d,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\","+fmt.Sprintf(u, 100)+"}}\n\n"+
+			"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\","+fmt.Sprintf(u, 1)+"}}\n\n"+
+			"data: {\"type\":\"message_stop\"}\n\n")
+	}, nil)
+	rig.post(t, requestBody(testPrimaryModel, 1, ""))
+	if m, _ := rig.client.Outcome(); !strings.Contains(m, "MISSING") {
+		t.Fatalf("malformed=%q", m)
+	}
 }

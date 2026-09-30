@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -275,6 +276,12 @@ func traceHTTPRequest(m Manifest, spans map[string][][]byte, task string, arm Ar
 		if n := bytes.Count(req.Body, body[0]); n != 1 {
 			return treatmentTrace{}, fmt.Errorf("ASSISTED request carries the frozen attachment %d times", n)
 		}
+		// ...in the conversation's opening (AO's initial prompt), before any
+		// assistant turn: a copy moved into a later message or tool result
+		// is agent-authored, not AO's attachment.
+		if first := assistantTurn.FindIndex(req.Body); first != nil && bytes.Index(req.Body, body[0]) > first[0] {
+			return treatmentTrace{}, errors.New("ASSISTED attachment appears after the first assistant turn")
+		}
 		// Every Project Memory marker must belong to a copy of the frozen
 		// attachment: a second, altered memory block (for example returned
 		// by a tool) is untracked memory-labelled content.
@@ -294,6 +301,11 @@ func traceHTTPRequest(m Manifest, spans map[string][][]byte, task string, arm Ar
 	}
 	return trace, nil
 }
+
+// assistantTurn finds the first assistant turn of a Messages or Responses
+// request body (an escaped occurrence inside a string never matches: its
+// quotes are preceded by backslashes).
+var assistantTurn = regexp.MustCompile(`"role"\s*:\s*"assistant"`)
 
 // markersOnlyWithin fails if any Project Memory marker in body lies outside
 // every occurrence of attachment (nil: no marker may occur at all).

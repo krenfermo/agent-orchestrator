@@ -173,6 +173,7 @@ type responsesAccumulator struct {
 	completed       bool
 	status, errType string
 	tools           []ProxyToolUse
+	conflict        bool
 	// errEnvelope: the body is the backend's own error object (OpenAI
 	// `error`, or the ChatGPT backend's `detail`).
 	errEnvelope bool
@@ -213,10 +214,16 @@ func (a *responsesAccumulator) setResponse(resp *struct {
 	if u := resp.Usage; u != nil && u.InputTokens != nil {
 		// Cached tokens are taken only as reported: absent details stay
 		// MISSING (3d-practical: never imputed as zero).
-		a.input, a.cached = u.InputTokens, nil
-		if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens != nil {
-			a.cached = u.InputTokensDetails.CachedTokens
+		var cached *int64
+		if u.InputTokensDetails != nil {
+			cached = u.InputTokensDetails.CachedTokens
 		}
+		// A second, different usage report is a conflict: MISSING, never
+		// the last value seen.
+		if a.input != nil && (*a.input != *u.InputTokens || (a.cached == nil) != (cached == nil) || (cached != nil && *a.cached != *cached)) {
+			a.conflict = true
+		}
+		a.input, a.cached = u.InputTokens, cached
 	}
 }
 
@@ -339,7 +346,7 @@ func (a *responsesAccumulator) result(status int, _ bool, readErr error) HTTPAtt
 	// 3d-practical §accounting: a provider response without usage is
 	// MISSING (the position becomes MALFORMED_RESULT), never zero -- error
 	// responses included.
-	if a.input == nil || a.cached == nil || *a.cached > *a.input {
+	if a.input == nil || a.cached == nil || *a.cached > *a.input || a.conflict {
 		return res
 	}
 	uncached := *a.input - *a.cached

@@ -124,3 +124,34 @@ func TestOracleSandboxRunsTheRealFixture(t *testing.T) {
 		t.Fatalf("Q4 under the oracle sandbox:\n%s", out)
 	}
 }
+
+// Codex review R6 (P0 claim): hidden tests must not exist anywhere in the
+// fixture's Git history the agent can read.
+func TestCheckFixtureHistoryDetectsCommittedHiddenTests(t *testing.T) {
+	t.Parallel()
+	repo, hidden := t.TempDir(), t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+	run("init", "-q")
+	_ = os.MkdirAll(filepath.Join(hidden, "A"), 0o700)
+	_ = os.WriteFile(filepath.Join(hidden, "A", "h_test.go"), []byte("package x // hidden\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(repo, "main.go"), []byte("package x\n"), 0o600)
+	run("add", ".")
+	run("commit", "-q", "-m", "clean")
+	if err := CheckFixtureHistory(context.Background(), repo, hidden); err != nil {
+		t.Fatalf("clean history rejected: %v", err)
+	}
+	// Committed, then deleted: still in the object database.
+	_ = os.WriteFile(filepath.Join(repo, "h_test.go"), []byte("package x // hidden\n"), 0o600)
+	run("add", ".")
+	run("commit", "-q", "-m", "leak")
+	run("rm", "-q", "h_test.go")
+	run("commit", "-q", "-m", "delete")
+	if err := CheckFixtureHistory(context.Background(), repo, hidden); err == nil {
+		t.Fatal("hidden test in history not detected")
+	}
+}

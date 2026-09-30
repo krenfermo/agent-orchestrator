@@ -169,6 +169,9 @@ func miniRealCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := practical3d.CheckFixtureHistory(ctx, *fixture, filepath.Join(*oracleDir, "hidden")); err != nil {
+		return err
+	}
 	hidden := map[string][]byte{}
 	for _, t := range []string{"A", "B", "C", "D"} {
 		if hidden[t], err = practical3d.BuildHiddenManifest(filepath.Join(*oracleDir, "hidden"), t); err != nil {

@@ -175,6 +175,21 @@ The driver never declares M3.
   - Bash rows carry no path in 3C, so rewriting a Bash command in the
     transcript cannot change M3's file count (R5 claim checked and not
     reproducible).
+- **R6.**
+  - A response that reports usage twice with different values, or starts
+    twice, is `MISSING`. Real streams restate identical usage in
+    `message_delta`, which is accepted.
+  - The ASSISTED attachment's single copy must lie before the first
+    assistant turn, i.e. in AO's opening prompt. Checked against the real
+    ASSISTED bodies from run 7.
+  - Preflight fails if any hidden test's blob exists anywhere in the
+    fixture's Git object database. The frozen fixture's 8 commits hold none.
+  - An agent cannot mint a token for another AO subject. The launch shim is
+    in the denied private directory (not executable from the sandbox), and
+    the token control socket is unreachable; both are tested.
+  - M3's file count comes from file tools only, because 3C gives Bash rows
+    no path. That is 3C's frozen M3 definition, identical in both arms,
+    not a falsification path.
 - **Oracle.** The Q4 oracle directory is denied to agents wherever the
   operator keeps it.
 - **Daemon gateway.** AO's API also serves Project Memory (items,

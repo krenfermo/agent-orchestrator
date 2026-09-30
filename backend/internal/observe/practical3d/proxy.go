@@ -534,6 +534,11 @@ type responseAccumulator struct {
 	stopReason, errType          string
 	tools                        map[int]*toolAcc
 	order                        []int
+	// conflict: the response reported two different values for one usage
+	// field, or started twice; its accounting is then MISSING (never the
+	// last value seen).
+	conflict bool
+	starts   int
 }
 
 type toolAcc struct {
@@ -555,15 +560,18 @@ func (a *responseAccumulator) setUsage(u *usageBlock) {
 	if u == nil {
 		return
 	}
-	if u.InputTokens != nil {
-		a.input = u.InputTokens
+	set := func(dst **int64, v *int64) {
+		if v == nil {
+			return
+		}
+		if *dst != nil && **dst != *v {
+			a.conflict = true
+		}
+		*dst = v
 	}
-	if u.CacheCreationInputTokens != nil {
-		a.cacheWrite = u.CacheCreationInputTokens
-	}
-	if u.CacheReadInputTokens != nil {
-		a.cacheRead = u.CacheReadInputTokens
-	}
+	set(&a.input, u.InputTokens)
+	set(&a.cacheWrite, u.CacheCreationInputTokens)
+	set(&a.cacheRead, u.CacheReadInputTokens)
 }
 
 func (a *responseAccumulator) sseLine(line []byte) {
@@ -598,6 +606,9 @@ func (a *responseAccumulator) sseLine(line []byte) {
 	}
 	switch ev.Type {
 	case "message_start":
+		if a.starts++; a.starts > 1 {
+			a.conflict = true
+		}
 		if ev.Message != nil {
 			a.messageID = ev.Message.ID
 			a.setUsage(ev.Message.Usage)
@@ -714,7 +725,7 @@ func (a *responseAccumulator) result(status int, stream bool, readErr error) HTT
 	// 3d-practical §accounting: a provider response without usage (error
 	// responses included) is MISSING -- the position becomes
 	// MALFORMED_RESULT -- and absent cache fields are never imputed as zero.
-	if a.input == nil || a.cacheRead == nil || a.cacheWrite == nil {
+	if a.input == nil || a.cacheRead == nil || a.cacheWrite == nil || a.conflict {
 		return res
 	}
 	read, write := *a.cacheRead, *a.cacheWrite

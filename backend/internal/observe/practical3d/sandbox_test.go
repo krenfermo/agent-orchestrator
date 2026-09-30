@@ -233,3 +233,24 @@ func TestSandboxSeparatesHarnessState(t *testing.T) {
 		}
 	}
 }
+
+// Codex review R6 (P1 claim): an agent cannot mint a provider token for
+// another AO subject. The launch shim (which reads AO_USAGE_SUBJECT) lives in
+// the private control directory and cannot be executed from inside the
+// sandbox; token issuance needs the control socket, which is unreachable
+// (TestSandboxNetworkOnlyReachesProxyAndDaemon, "control socket").
+func TestSandboxAgentCannotRunTheLaunchShim(t *testing.T) {
+	r := newSandboxRig(t)
+	bin := filepath.Join(r.p.PrivateCtl, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(bin, "claude")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\necho SHIM_RAN\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.sh(t, "AO_USAGE_SUBJECT=session:worker-1 "+shellQuote(shim)+" -p hi")
+	if err == nil || strings.Contains(out, "SHIM_RAN") {
+		t.Fatalf("agent ran the launch shim: %v %q", err, out)
+	}
+}
