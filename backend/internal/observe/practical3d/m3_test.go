@@ -282,6 +282,34 @@ func TestM3RejectsForgedOrMissingObservations(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+	// Codex review R3 (P1): same IDs, transcript order swapped so the Edit
+	// precedes the Read of the same provider message.
+	t.Run("in-message order comes from the provider", func(t *testing.T) {
+		f := newM3Fixture(t, "worker")
+		f.message(t, 1, RoleWorker, read("a.go"), edit("a.go"))
+		if _, err := f.db.Exec(`UPDATE agent_tool_observations SET ordinal = 1000 - ordinal`); err != nil {
+			t.Fatal(err)
+		}
+		ev, err := f.derive(RoleWorker)
+		if err != nil || ev.Calls != 1 || ev.Files != 1 {
+			t.Fatalf("ev=%+v err=%v", ev, err)
+		}
+	})
+	// Codex review R3 (P1): a bound Read rewritten so 3C places it outside
+	// the project (dropping it from file coverage).
+	t.Run("project target rewritten to outside", func(t *testing.T) {
+		f := newM3Fixture(t, "worker")
+		abs := m3Tool{name: "Read", op: "read", scope: "project", path: "/work/a.go"}
+		f.message(t, 1, RoleWorker, abs)
+		if _, err := f.db.Exec(`UPDATE agent_tool_observations SET path_scope = 'outside', path = NULL`); err != nil {
+			t.Fatal(err)
+		}
+		f.message(t, 2, RoleWorker, edit("a.go"))
+		_, err := DeriveM3(context.Background(), M3Input{DataDir: f.dir, RunID: f.runID, MeasuredRole: RoleWorker, Proxy: f.proxy, ProjectRoots: []string{"/work"}})
+		if err == nil || !strings.Contains(err.Error(), "not the provider's target") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 	t.Run("genuine tool_use with a rewritten op", func(t *testing.T) {
 		f := newM3Fixture(t, "worker")
 		f.message(t, 1, RoleWorker, read("a.go"))

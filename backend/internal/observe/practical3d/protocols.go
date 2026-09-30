@@ -208,9 +208,9 @@ func (a *responsesAccumulator) setResponse(resp *struct {
 		a.status = resp.Status
 	}
 	if u := resp.Usage; u != nil && u.InputTokens != nil {
-		a.input = u.InputTokens
-		zero := int64(0)
-		a.cached = &zero
+		// Cached tokens are taken only as reported: absent details stay
+		// MISSING (3d-practical: never imputed as zero).
+		a.input, a.cached = u.InputTokens, nil
 		if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens != nil {
 			a.cached = u.InputTokensDetails.CachedTokens
 		}
@@ -317,7 +317,6 @@ func (a *responsesAccumulator) jsonBody(b []byte) {
 
 func (a *responsesAccumulator) result(status int, _ bool, readErr error) HTTPAttemptResult {
 	var res HTTPAttemptResult
-	zero := int64(0)
 	switch {
 	case status == http.StatusOK && a.completed && a.errType == "" && readErr == nil:
 		res.Outcome = OutcomeSuccess
@@ -334,17 +333,11 @@ func (a *responsesAccumulator) result(status int, _ bool, readErr error) HTTPAtt
 	default:
 		res.Outcome = OutcomeTerminalFailure
 	}
-	if status != http.StatusOK {
-		// As for Anthropic: explicit zeros only on the provider's own error
-		// envelope; any other non-200 body is MISSING accounting.
-		if !a.errEnvelope {
-			return res
-		}
-		res.InputTokens, res.CachedInputTokens, res.UncachedInputTokens = &zero, &zero, &zero
-		return res
-	}
+	// 3d-practical §accounting: a provider response without usage is
+	// MISSING (the position becomes MALFORMED_RESULT), never zero -- error
+	// responses included.
 	if a.input == nil || a.cached == nil || *a.cached > *a.input {
-		return res // MISSING: a 2xx response must report usage
+		return res
 	}
 	uncached := *a.input - *a.cached
 	res.InputTokens, res.CachedInputTokens, res.UncachedInputTokens = a.input, a.cached, &uncached

@@ -226,8 +226,10 @@ func TestProxyRecordsEveryAttemptWithAccountingAndToolUses(t *testing.T) {
 func TestProxyRetryChainAndBudget(t *testing.T) {
 	t.Parallel()
 	rig := newProxyRig(t, ArmOff, func(w http.ResponseWriter, _ *http.Request) {
+		// The retry machinery is exercised with error bodies that report
+		// usage; one without usage is MISSING (TestProxyErrorWithoutUsageIsMissing).
 		w.WriteHeader(529)
-		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error"}}`)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error"},"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`)
 	}, nil)
 	body := requestBody(testPrimaryModel, 2, "")
 	for i := 0; i < 2; i++ {
@@ -261,7 +263,7 @@ func TestProxyPartialStreamIsTerminalAndCounted(t *testing.T) {
 	t.Parallel()
 	rig := newProxyRig(t, ArmOff, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_p\",\"usage\":{\"input_tokens\":40}}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_p\",\"usage\":{\"input_tokens\":40,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}\n\n")
 		// connection ends before message_stop
 	}, nil)
 	rig.post(t, requestBody(testPrimaryModel, 1, ""))
@@ -291,8 +293,20 @@ func TestProxyMissingUsageIsMalformed(t *testing.T) {
 	}
 }
 
-// Codex review R1 (P1): a non-200 that is not the provider's own error
-// envelope has unknown accounting and must not be finalized as zero.
+// 3d-practical §accounting (Codex reviews R1/R3): a provider response without
+// usage is MISSING -> MALFORMED_RESULT, never zero, error envelopes included.
+func TestProxyErrorWithoutUsageIsMissing(t *testing.T) {
+	t.Parallel()
+	rig := newProxyRig(t, ArmOff, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
+	}, nil)
+	rig.post(t, requestBody(testPrimaryModel, 1, ""))
+	if m, _ := rig.client.Outcome(); !strings.Contains(m, "MISSING") {
+		t.Fatalf("malformed=%q", m)
+	}
+}
+
 func TestProxyNonEnvelopeErrorIsMissingAccounting(t *testing.T) {
 	t.Parallel()
 	rig := newProxyRig(t, ArmOff, func(w http.ResponseWriter, _ *http.Request) {

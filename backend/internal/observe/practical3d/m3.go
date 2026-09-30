@@ -36,6 +36,9 @@ type M3Input struct {
 	RunID        string
 	MeasuredRole Role
 	Proxy        []ProxyObservation
+	// ProjectRoots are the position's working copy and worktrees: a
+	// provider target inside them must be a project row in 3C.
+	ProjectRoots []string
 }
 
 // M3Evidence is the derived exploration before the milestone.
@@ -64,6 +67,7 @@ type m3Obs struct {
 	path     string
 	obsKey   string
 	call     int
+	toolIdx  int // position of the tool_use in the provider's message
 }
 
 var observedToolNames = map[string]bool{"Read": true, "NotebookRead": true, "Grep": true, "Glob": true, "LS": true, "Bash": true, "Edit": true, "MultiEdit": true, "Write": true, "NotebookEdit": true}
@@ -131,17 +135,18 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 	// from the provider's input and the path the provider named. Rows the
 	// agent adds or rewrites in its (agent-writable) transcript match none.
 	type wireTool struct {
-		p  ProxyObservation
-		tu ProxyToolUse
+		p   ProxyObservation
+		tu  ProxyToolUse
+		idx int
 	}
 	wire := map[string]wireTool{}
 	for _, p := range in.Proxy {
 		if p.Subject != ev.Subject {
 			continue
 		}
-		for _, tu := range p.ToolUses {
+		for idx, tu := range p.ToolUses {
 			for _, s := range sources {
-				wire[usage.ClaudeToolObservationKey(s.root, domain.UsageSourceKind(s.kind), s.subagent, s.nativeSession, tu.ID)] = wireTool{p, tu}
+				wire[usage.ClaudeToolObservationKey(s.root, domain.UsageSourceKind(s.kind), s.subagent, s.nativeSession, tu.ID)] = wireTool{p, tu, idx}
 			}
 		}
 	}
@@ -162,10 +167,10 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 		if want := usage.ClaudeToolOp(w.tu.Name, w.tu.Command); obs[i].op != want || (observedToolNames[w.tu.Name] && obs[i].tool != w.tu.Name) {
 			return ev, fmt.Errorf("tool observation %d of %s: 3C %s/%s differs from the provider's %s/%s", i, ev.Subject, obs[i].tool, obs[i].op, w.tu.Name, want)
 		}
-		if !targetMatches(w.tu.Target, obs[i].scope, obs[i].path) {
+		if !targetMatches(w.tu.Target, obs[i].scope, obs[i].path, in.ProjectRoots) {
 			return ev, fmt.Errorf("tool observation %d of %s: 3C path %q is not the provider's target %q", i, ev.Subject, obs[i].path, w.tu.Target)
 		}
-		obs[i].call = p.CallIndex
+		obs[i].call, obs[i].toolIdx = p.CallIndex, w.idx
 	}
 	// Every tool_use the proxy saw for the measured role must be observed.
 	for key, w := range wire {
@@ -188,10 +193,9 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 		if obs[i].call != obs[j].call {
 			return obs[i].call < obs[j].call
 		}
-		if obs[i].source != obs[j].source {
-			return obs[i].source < obs[j].source
-		}
-		return obs[i].ordinal < obs[j].ordinal
+		// Within one message, the provider's own tool_use order: the
+		// transcript's ordinal is agent-writable.
+		return obs[i].toolIdx < obs[j].toolIdx
 	})
 	var before []m3Obs
 	switch in.MeasuredRole {
@@ -275,15 +279,40 @@ func verdictCall(proxy []ProxyObservation, subject string) (first, submits int) 
 // targetMatches reports whether a 3C project path is the provider's raw
 // target: the same relative path, or an absolute path ending in it. Paths
 // outside the project carry none in 3C and are not compared.
-func targetMatches(target string, scope domain.ToolPathScope, path string) bool {
-	if scope != domain.ToolPathProject || path == "" {
+func targetMatches(target string, scope domain.ToolPathScope, path string, roots []string) bool {
+	raw := strings.TrimSpace(target)
+	t := filepath.ToSlash(filepath.Clean(raw))
+	if scope == domain.ToolPathProject && path != "" {
+		if path == "." {
+			return raw == "" || filepath.IsAbs(raw) || t == "."
+		}
+		return t == path || strings.HasSuffix(t, "/"+path)
+	}
+	if raw == "" {
 		return true
 	}
-	t := filepath.ToSlash(filepath.Clean(strings.TrimSpace(target)))
-	if path == "." {
-		return strings.TrimSpace(target) == "" || filepath.IsAbs(target) || t == "."
+	// A target the provider placed inside the project must not appear in 3C
+	// as outside/unresolved (a rewritten row would drop it from coverage);
+	// secret and excluded project paths are counted but never named.
+	inProject := !filepath.IsAbs(raw) && t != ".." && !strings.HasPrefix(t, "../")
+	for _, root := range roots {
+		for _, r := range []string{root, resolvedPath(root)} {
+			if rel, err := filepath.Rel(r, filepath.Clean(raw)); err == nil && filepath.IsAbs(raw) && rel != ".." && !strings.HasPrefix(rel, "../") {
+				inProject = true
+			}
+		}
 	}
-	return t == path || strings.HasSuffix(t, "/"+path)
+	if inProject {
+		return scope == domain.ToolPathSecret || scope == domain.ToolPathExcluded
+	}
+	return true
+}
+
+func resolvedPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
 }
 
 func isReviewSubmit(command string) bool {

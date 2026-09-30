@@ -36,14 +36,16 @@ func TestResponsesAccumulatorFailuresAndMissingUsage(t *testing.T) {
 		zero   bool
 		body   string
 	}{
-		"rate limited":   {429, nil, OutcomeRateLimited, true, `{"error":{"type":"rate_limit_exceeded","code":"rate_limit_exceeded"}}`},
-		"chatgpt detail": {429, nil, OutcomeRateLimited, true, `{"detail":{"code":"usage_limit_reached"}}`},
-		"server error":   {502, nil, OutcomeRetryable, true, `{"error":{"type":"server_error"}}`},
-		// Codex review R1 (P1): a non-200 without the backend's own error
-		// envelope has unknown accounting: MISSING, never assumed zero.
-		"gateway page":       {502, nil, OutcomeRetryable, false, `<html>bad gateway</html>`},
-		"stream cut":         {200, []string{`data: {"type":"response.created","response":{"id":"r"}}`}, OutcomeTerminalFailure, false, ""},
-		"completed no usage": {200, []string{`data: {"type":"response.completed","response":{"id":"r","status":"completed"}}`}, OutcomeSuccess, false, ""},
+		// 3d-practical §accounting (Codex reviews R1/R3): a response without
+		// usage is MISSING, never zero, error envelopes included; the outcome
+		// is still classified.
+		"rate limited":        {429, nil, OutcomeRateLimited, false, `{"error":{"type":"rate_limit_exceeded","code":"rate_limit_exceeded"}}`},
+		"chatgpt detail":      {429, nil, OutcomeRateLimited, false, `{"detail":{"code":"usage_limit_reached"}}`},
+		"server error":        {502, nil, OutcomeRetryable, false, `{"error":{"type":"server_error"}}`},
+		"completed no cached": {200, []string{`data: {"type":"response.completed","response":{"id":"r","status":"completed","usage":{"input_tokens":100}}}`}, OutcomeSuccess, false, ""},
+		"gateway page":        {502, nil, OutcomeRetryable, false, `<html>bad gateway</html>`},
+		"stream cut":          {200, []string{`data: {"type":"response.created","response":{"id":"r"}}`}, OutcomeTerminalFailure, false, ""},
+		"completed no usage":  {200, []string{`data: {"type":"response.completed","response":{"id":"r","status":"completed"}}`}, OutcomeSuccess, false, ""},
 	} {
 		a := &responsesAccumulator{}
 		for _, l := range tc.lines {

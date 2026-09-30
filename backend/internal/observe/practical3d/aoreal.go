@@ -127,16 +127,21 @@ type positionRig struct {
 	e          *AORealExecutor
 	ctlDir     string
 	daemonPort int
-	proxyPort  int
-	socket     string
-	home       string
-	tmp        string
-	dataDir    string
-	runFile    string
-	work       string
-	daemon     *exec.Cmd
-	project    string
-	runID      string
+	// gateway is the agents' only route to the daemon (gatewayPort), found
+	// through gwRunFile (AO_RUN_FILE).
+	gateway     *DaemonGateway
+	gatewayPort int
+	gwRunFile   string
+	proxyPort   int
+	socket      string
+	home        string
+	tmp         string
+	dataDir     string
+	runFile     string
+	work        string
+	daemon      *exec.Cmd
+	project     string
+	runID       string
 }
 
 func freePort() (int, error) {
@@ -194,10 +199,18 @@ func (e *AORealExecutor) newRig(w PositionWorkspace) (*positionRig, error) {
 	if r.daemonPort, err = freePort(); err != nil {
 		return nil, err
 	}
+	r.gateway = &DaemonGateway{DaemonPort: r.daemonPort}
+	if r.gatewayPort, err = r.gateway.Start(); err != nil {
+		return nil, err
+	}
+	r.gwRunFile = filepath.Join(r.home, "ao-running.json")
 	return r, nil
 }
 
 func (r *positionRig) cleanup() {
+	if r.gateway != nil {
+		r.gateway.Close()
+	}
 	_ = exec.Command("tmux", "-L", r.socket, "kill-server").Run()
 	_ = os.RemoveAll(r.ctlDir)
 }
@@ -226,6 +239,8 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 	for k, v := range r.e.Cfg.ModelEnv {
 		env[k] = v
 	}
+	// Agents (and their hooks) find the daemon only through the gateway.
+	env["AO_RUN_FILE"] = r.gwRunFile
 	codexArgs := []string{"-c", `model_provider="p3d"`, "-c", `model_providers.p3d.name="p3d"`, "-c", `model_providers.p3d.base_url="{BASE}"`,
 		"-c", `model_providers.p3d.wire_api="responses"`, "-c", "model_providers.p3d.requires_openai_auth=true", "-c", "model_providers.p3d.supports_websockets=false"}
 	if r.e.Cfg.CodexModel != "" {
@@ -236,7 +251,7 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 		LaunchLog:  filepath.Join(r.ctlDir, "launches.jsonl"),
 		Sandbox: SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: r.e.Cfg.AOSrc, PrivateCtl: r.ctlDir, ToolsRO: r.e.Cfg.ToolsRO, OracleDir: r.e.Cfg.OracleDir,
 			PosWork: r.work, PosWorktrees: filepath.Join(r.dataDir, "worktrees"), PosHome: r.home, PosTmp: r.tmp, PosRunFile: r.runFile, PosPrompts: filepath.Join(r.dataDir, "prompts"), PosHookBin: filepath.Join(r.dataDir, "hook-bin"),
-			ProxyPort: r.proxyPort, DaemonPort: r.daemonPort}}
+			ProxyPort: r.proxyPort, DaemonPort: r.gatewayPort}}
 	if capture {
 		cfg.Capture = filepath.Join(r.ctlDir, "captures")
 	}
@@ -284,7 +299,9 @@ func (r *positionRig) startDaemon(ctx context.Context, arm Arm, task string) err
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				return nil
+				if err := WriteGatewayRunFile(r.runFile, r.gwRunFile, r.gatewayPort); err == nil {
+					return nil
+				}
 			}
 		}
 		time.Sleep(time.Second)
@@ -512,6 +529,11 @@ func (e *AORealExecutor) Execute(ctx context.Context, pc PositionContext, c *Obs
 	if rej := proxy.Rejected(); len(rej) > 0 {
 		return res, fmt.Errorf("provider proxy refused %d request(s): %s", len(rej), rej[0])
 	}
+	// Refused daemon requests reached nothing; they are kept as evidence.
+	if refused := r.gateway.Refused(); len(refused) > 0 {
+		raw, _ := json.Marshal(refused)
+		_ = writeExclusive(filepath.Join(pc.Workspace.Root, "daemon-gateway-refused.json"), raw)
+	}
 	obs := proxy.Observations()
 	if err := checkNoUnobservedProviderCalls(ctx, r.dataDir, r.runID, obs); err != nil {
 		return res, err
@@ -523,7 +545,7 @@ func (e *AORealExecutor) Execute(ctx context.Context, pc PositionContext, c *Obs
 	if m3, ok := m3Cap(c.m, pc.Position.TaskID); ok {
 		measured = m3.Role
 	}
-	ev, err := DeriveM3(ctx, M3Input{DataDir: r.dataDir, RunID: r.runID, MeasuredRole: measured, Proxy: obs})
+	ev, err := DeriveM3(ctx, M3Input{DataDir: r.dataDir, RunID: r.runID, MeasuredRole: measured, Proxy: obs, ProjectRoots: []string{r.work, filepath.Join(r.dataDir, "worktrees")}})
 	evRaw, _ := json.Marshal(map[string]any{"m3": ev, "error": errString(err), "proxy_observations": obs, "run_state": state})
 	_ = writeExclusive(filepath.Join(pc.Workspace.Root, "m3-evidence.json"), evRaw)
 	if err != nil {

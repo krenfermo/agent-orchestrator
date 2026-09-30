@@ -113,6 +113,45 @@ The driver never declares M3.
   The manifest's `account_ref_sha256` is the digest of the canonical
   per-provider map. Each finalized attempt carries its own reference.
 
+## Hardening from the Codex adversarial reviews (R1-R3)
+
+- **Accounting.** The norm is applied literally (3d-practical §accounting):
+  a provider response without usage is `MISSING` and the position becomes
+  `MALFORMED_RESULT`. Zero is never imputed: not for error responses (429,
+  5xx, error envelopes), not for absent cache fields (Anthropic
+  `cache_read`/`cache_creation`, OpenAI `cached_tokens`). The consequence is
+  that any provider error without usage malforms its position.
+- **M3.**
+  - Every 3C tool row is bound to a `tool_use` id the provider returned in
+    that message (`usage.ClaudeToolObservationKey`).
+  - Its op is recomputed from the provider's input with 3C's own classifier
+    (`usage.ClaudeToolOp`). Its path must be the provider's target, and a
+    target inside the project may not appear as outside/unresolved.
+  - Order within a message is the provider's.
+  - Every provider tool use must have a row.
+  - The worker milestone is the first edit of a project file.
+  - The reviewer milestone is an actual `ao review submit` invocation, and
+    the number of submissions must equal the verdicts AO recorded.
+- **Oracle.** The Q4 oracle directory is denied to agents wherever the
+  operator keeps it.
+- **Daemon gateway.** AO's API also serves Project Memory (items,
+  knowledge, graph, manifests) and session views carrying the worker's
+  prompt. Agents reach the daemon only through a harness gateway, which
+  they find through a forced `AO_RUN_FILE`; the sandbox allows only the
+  gateway port.
+  - The gateway forwards only what AO's agent-side CLI uses: health/ready
+    probes, the usage subject hook, session/review activity hooks, review
+    submit/list.
+  - Everything else is refused and recorded
+    (`daemon-gateway-refused.json`).
+- **Provenance.**
+  - Every Project Memory render marker in a request must lie inside a copy
+    of the frozen attachment, and a request without an attachment may carry
+    none.
+  - With the gateway and the sandbox, the frozen attachment is the only way
+    memory content enters a conversation. Paraphrased memory is therefore
+    the treatment's downstream effect, not a second input.
+
 ## External anchor assessment
 
 The ledger is append-only and hash-chained inside the supervisor's private

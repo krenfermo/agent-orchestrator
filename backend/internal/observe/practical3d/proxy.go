@@ -574,6 +574,7 @@ func (a *responseAccumulator) jsonBody(b []byte) {
 	}
 	if body.Type == "error" && body.Error != nil {
 		a.errType = body.Error.Type
+		a.setUsage(body.Usage) // taken only if the provider reports it
 		return
 	}
 	a.messageID, a.stopReason = body.ID, body.StopReason
@@ -624,7 +625,6 @@ func (a *responseAccumulator) toolUses() []ProxyToolUse {
 // partial, non-replayable TERMINAL_PROVIDER_FAILURE that still counts.
 func (a *responseAccumulator) result(status int, stream bool, readErr error) HTTPAttemptResult {
 	var res HTTPAttemptResult
-	zero := int64(0)
 	switch {
 	case status == http.StatusOK && a.stopped && a.errType == "" && readErr == nil:
 		res.Outcome = OutcomeSuccess
@@ -639,28 +639,13 @@ func (a *responseAccumulator) result(status int, stream bool, readErr error) HTT
 	default:
 		res.Outcome = OutcomeTerminalFailure
 	}
-	if status != http.StatusOK {
-		// Zero input is the provider's own statement, not an assumption:
-		// only a provider error envelope (the request was rejected before
-		// generation) is finalized with explicit zeros. Any other non-200
-		// body (a gateway page, a truncated body) has unknown accounting:
-		// MISSING, so the position is malformed.
-		if a.errType == "" {
-			return res
-		}
-		res.InputTokens, res.CachedInputTokens, res.UncachedInputTokens = &zero, &zero, &zero
+	// 3d-practical §accounting: a provider response without usage (error
+	// responses included) is MISSING -- the position becomes
+	// MALFORMED_RESULT -- and absent cache fields are never imputed as zero.
+	if a.input == nil || a.cacheRead == nil || a.cacheWrite == nil {
 		return res
 	}
-	if a.input == nil {
-		return res // MISSING: a 2xx response must report usage
-	}
-	read, write := int64(0), int64(0)
-	if a.cacheRead != nil {
-		read = *a.cacheRead
-	}
-	if a.cacheWrite != nil {
-		write = *a.cacheWrite
-	}
+	read, write := *a.cacheRead, *a.cacheWrite
 	total, uncached := *a.input+read+write, *a.input+write
 	res.InputTokens, res.CachedInputTokens, res.UncachedInputTokens = &total, &read, &uncached
 	return res
