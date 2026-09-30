@@ -220,20 +220,18 @@ func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
 // runCommand executes the official frozen schedule. It is the only command
-// that can start official positions.
+// that can start official positions, and it runs them through the same real
+// AO executor, oracle and workspaces as mini-e2e-real (realRunnerOptions):
+// there is no second implementation. --plan prints what it would execute and
+// stops before any position starts.
 func runCommand(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(out)
 	envelopePath := fs.String("envelope", "", "frozen envelope path")
 	root := fs.String("run-root", "", "new run directory below ~/.ao/scratch/frente3")
 	artifacts := fs.String("artifact-root", "", "root of content-addressed artifacts (<root>/sha256/<digest>) and treatment refs")
-	aoBinary := fs.String("ao-binary", "", "frozen AO binary whose digest/commit are in the manifest")
-	fixtureRepo := fs.String("fixture-repo", "", "git repository containing the frozen fixture commit")
-	positionDriver := fs.String("position-driver", "", "credential-free position driver (JSONL protocol)")
-	providerDriver := fs.String("provider-driver", "", "AO-owned one-request provider transport")
-	oracleDriver := fs.String("oracle-driver", "", "trusted Q1/Q4 oracle driver outside the agent's reach")
-	var providerEnv stringList
-	fs.Var(&providerEnv, "provider-env", "environment variable exposed only to the provider driver (repeatable)")
+	plan := fs.Bool("plan", false, "print the frozen schedule and the executor that would run it; start nothing")
+	rf := addRealFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -241,58 +239,50 @@ func runCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if *positionDriver == "" || *providerDriver == "" || *oracleDriver == "" || *artifacts == "" || *aoBinary == "" || *fixtureRepo == "" || *root == "" {
-		return errors.New("--run-root, --artifact-root, --ao-binary, --fixture-repo, --position-driver, --provider-driver and --oracle-driver are required")
+	if *artifacts == "" || *root == "" {
+		return errors.New("--run-root and --artifact-root are required")
 	}
-	attested := map[string]bool{}
-	for _, name := range allowlistedEnv(m) {
-		attested[name] = true
-	}
-	if !attested["PATH"] {
-		return errors.New("PATH is passed to every driver, so it must be in the frozen environment allowlist")
-	}
-	// Every driver receives exactly the allowlisted environment the frozen
-	// digest measures. Provider credentials (--provider-env) must stay OUT of
-	// that allowlist, so they reach only the provider driver; the account
-	// they select is bound by the manifest's account_ref_sha256, which each
-	// finalization must attest.
-	for _, name := range providerEnv {
-		if attested[name] {
-			return fmt.Errorf("--provider-env %s is in the environment allowlist and would reach the position driver", name)
-		}
-	}
-	positionNames := allowlistedEnv(m)
-	if err := verifyListedBinary(*positionDriver, append(append([]practical3d.VersionInput{}, m.ExecutionEnvironment.Inputs.TaskToolVersions...), m.ExecutionEnvironment.Inputs.RunnerInstrumentVersions...)); err != nil {
-		return err
-	}
-	if err := verifyListedBinary(*providerDriver, m.ExecutionEnvironment.Inputs.ProviderClientCLIVersions); err != nil {
-		return err
-	}
-	oracleBytes, err := os.ReadFile(*oracleDriver)
+	primary, helper, codex, err := practical3d.ManifestModels(m)
 	if err != nil {
 		return err
 	}
-	if sha256Hex(oracleBytes) != m.Q4Oracle.RunnerImageOrBinarySHA256 {
-		return errors.New("oracle driver digest differs from the frozen Q4 runner")
+	cfg, creds, err := rf.executorConfig(realModels{primary: primary, helper: helper, codex: codex}, out)
+	if err != nil {
+		return err
+	}
+	executor := &practical3d.AORealExecutor{Cfg: cfg}
+	observer := practical3d.LiveEnvironmentObserver{Expected: m.ExecutionEnvironment.Inputs, AOBinaryPath: cfg.AOBinary}
+	opts := realRunnerOptions(m, rf, executor, observer, practical3d.DirArtifactResolver{Root: *artifacts}, *root, env.Metadata)
+	if *plan {
+		return printPlan(out, m, opts)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	res, err := practical3d.Run(ctx, m, practical3d.RunnerOptions{
-		Root: *root,
-		// Every allowlisted value is observed by LiveEnvironmentObserver and
-		// covered by the expected environment digest.
-		Metadata:    env.Metadata,
-		Environment: practical3d.LiveEnvironmentObserver{Expected: m.ExecutionEnvironment.Inputs, AOBinaryPath: *aoBinary},
-		Artifacts:   practical3d.DirArtifactResolver{Root: *artifacts},
-		Transport:   commandTransport{path: *providerDriver, envNames: append(allowlistedEnv(m), providerEnv...)},
-		Executor:    commandExecutor{path: *positionDriver, envNames: positionNames},
-		Oracle:      commandOracle{path: *oracleDriver, manifest: m, envNames: allowlistedEnv(m)},
-		Workspaces:  practical3d.GitWorkspaceManager{FixtureRepo: *fixtureRepo},
-	})
+	// The accounts the injected credentials select must be the frozen ones.
+	accounts, err := liveAccountRefs(ctx, rf, creds, helper, *root+".account")
+	if err != nil {
+		return err
+	}
+	if ref, err := practical3d.AccountRefSet(accounts); err != nil || ref != m.Provider.AccountRefSHA256 {
+		return errors.New("the operator's provider accounts differ from the frozen account reference")
+	}
+	executor.Cfg.AccountRefs = accounts
+	res, err := practical3d.Run(ctx, m, opts)
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "%s %s %s\nreport: %s\n", res.Report.Verdict, res.Report.ReasonCode, res.Report.Reason, filepath.Join(res.Root, "report.json"))
+	return nil
+}
+
+// printPlan shows the frozen schedule and the concrete executor, oracle and
+// workspace types the official run would use, without starting anything.
+func printPlan(out io.Writer, m practical3d.Manifest, opts practical3d.RunnerOptions) error {
+	_, _ = fmt.Fprintf(out, "executor=%T oracle=%T workspaces=%T transport=%T\n", opts.Executor, opts.Oracle, opts.Workspaces, opts.Transport)
+	for _, p := range m.Randomization.Schedule {
+		_, _ = fmt.Fprintf(out, "position %d task=%s arm=%s sample=%s\n", p.PositionIndex, p.TaskID, p.Arm, p.SampleID)
+	}
+	_, _ = fmt.Fprintf(out, "positions=%d (plan only: nothing started)\n", len(m.Randomization.Schedule))
 	return nil
 }
 

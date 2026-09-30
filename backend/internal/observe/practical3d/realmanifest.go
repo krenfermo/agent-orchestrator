@@ -231,3 +231,26 @@ func measuredRoleFor(task string) Role {
 	}
 	return RoleWorker
 }
+
+// RealVerifyCommand is the Q1 verification the real oracle runs; its digest
+// is Q1_oracle.verify_command_sha256.
+var RealVerifyCommand = []string{"/bin/sh", "-c", "go build ./... && go test -count=1 ./..."}
+
+// ManifestModels returns the frozen models a real run pins: the worker's
+// primary and helper (Claude Code) and the reviewer's (Codex).
+func ManifestModels(m Manifest) (primary, helper, codex string, err error) {
+	for _, c := range m.InvocationConfigs {
+		switch {
+		case c.Role == RoleWorker && c.CallClass == CallInitial && primary == "":
+			primary = c.ModelID
+		case c.Role == RoleWorker && c.CallClass == CallHelper && helper == "":
+			helper = c.ModelID
+		case c.Role == RoleReviewer && c.CallClass == CallInitial && codex == "":
+			codex = c.ModelID
+		}
+	}
+	if primary == "" || helper == "" || codex == "" {
+		return "", "", "", errors.New("manifest does not freeze the worker primary/helper and reviewer models")
+	}
+	return primary, helper, codex, nil
+}

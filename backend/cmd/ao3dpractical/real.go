@@ -79,24 +79,15 @@ func (noTransport) Do(context.Context, practical3d.TransportRequest) (practical3
 func miniRealCommand(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("mini-e2e-real", flag.ContinueOnError)
 	fs.SetOutput(out)
-	tools := fs.String("tools", "", "dir with ao and ao3dpractical built from a clean clone, webroot/ and task-specs/{A,B,C,D}.json")
-	fixture := fs.String("fixture-repo", "", "fixture repository")
+	rf := addRealFlags(fs)
 	commit := fs.String("fixture-commit", "", "fixture commit")
-	oracleDir := fs.String("oracle-dir", "", "dir with oracle.sh and hidden/")
-	realClaude := fs.String("real-claude", "", "real Claude Code executable")
 	primary := fs.String("primary-model", "", "frozen primary model")
 	helper := fs.String("helper-model", "", "frozen helper (small fast) model")
-	upstream := fs.String("upstream", "https://api.anthropic.com", "provider origin")
-	aoSrc := fs.String("ao-src", "", "directory holding every AO checkout (denied to agents)")
-	realCodex := fs.String("real-codex", "", "real Codex CLI executable (reviewer)")
 	codexModel := fs.String("codex-model", "", "frozen Codex model")
-	openaiUpstream := fs.String("openai-upstream", "https://chatgpt.com", "ChatGPT backend origin for Codex")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *aoSrc == "" {
-		return errors.New("--ao-src is required")
-	}
+	tools, fixture, oracleDir := rf.tools, rf.fixture, rf.oracleDir
 	ctx := context.Background()
 	scratch, err := practical3d.ScratchRoot()
 	if err != nil {
@@ -109,18 +100,11 @@ func miniRealCommand(args []string, out io.Writer) error {
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return err
 	}
-	aoBin := filepath.Join(*tools, "ao")
-	self, err := os.Executable()
+	cfg, creds, err := rf.executorConfig(realModels{primary: *primary, helper: *helper, codex: *codexModel}, out)
 	if err != nil {
 		return err
 	}
-	src, err := filepath.Abs(*aoSrc)
-	if err != nil {
-		return err
-	}
-	modelEnv := map[string]string{"ANTHROPIC_MODEL": *primary, "ANTHROPIC_DEFAULT_OPUS_MODEL": *primary, "ANTHROPIC_DEFAULT_SONNET_MODEL": *primary, "ANTHROPIC_DEFAULT_HAIKU_MODEL": *helper, "ANTHROPIC_SMALL_FAST_MODEL": *helper}
-	cfg := practical3d.AORealConfig{AOBinary: aoBin, RealClaude: *realClaude, RealCodex: *realCodex, CodexModel: *codexModel, OpenAIUpstream: *openaiUpstream, ShimExecutable: self, AOSrc: src, OracleDir: *oracleDir, ToolsRO: *tools, Upstream: *upstream, FixtureRepo: *fixture, WebRoot: filepath.Join(*tools, "webroot"),
-		ModelEnv: modelEnv, DaemonTimeout: 120 * time.Second, SettleTimeout: 8 * time.Minute, Log: out}
+	aoBin := cfg.AOBinary
 	envTemplate := practical3d.EnvironmentInputs{
 		RuntimeVersions:                     []practical3d.VersionInput{{Component: "go"}},
 		ProviderClientCLIVersions:           []practical3d.VersionInput{{Component: "claude"}, {Component: "codex"}},
@@ -148,25 +132,12 @@ func miniRealCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintln(out, "[mini-real] capturing the account reference (one minimal request)")
-	account, err := practical3d.CaptureAccountRef(ctx, *realClaude, *upstream, *helper, base)
+	_, _ = fmt.Fprintln(out, "[mini-real] attesting the provider accounts the injected credentials select")
+	accounts, err := liveAccountRefs(ctx, rf, creds, *helper, base)
 	if err != nil {
 		return err
 	}
-	// The operator's credentials stay in this (supervisor) process; the
-	// proxy injects them into outgoing requests. Codex's account is
-	// attested from the credential itself.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	creds := &practical3d.OperatorCredentials{CodexAuthFile: filepath.Join(home, ".codex", "auth.json")}
-	cfg.Credentials = creds
-	codexAccount, err := creds.AccountRef("openai")
-	if err != nil {
-		return err
-	}
-	accounts := map[string]string{"anthropic": account, "openai": codexAccount}
+	account := accounts["anthropic"]
 	cfg.AccountRefs = accounts
 	executor := &practical3d.AORealExecutor{Cfg: cfg}
 	_, _ = fmt.Fprintln(out, "[mini-real] freezing the ASSISTED attachment by provider-free calibration")
@@ -210,7 +181,7 @@ func miniRealCommand(args []string, out io.Writer) error {
 			break
 		}
 	}
-	verify := []string{"/bin/sh", "-c", "go build ./... && go test -count=1 ./..."}
+	verify := practical3d.RealVerifyCommand
 	claudeVersion, codexVersion := "", ""
 	for _, v := range env.ProviderClientCLIVersions {
 		f := strings.Fields(v.Version)
@@ -241,16 +212,12 @@ func miniRealCommand(args []string, out io.Writer) error {
 		return err
 	}
 	resolver := practical3d.DirArtifactResolver{Root: artifacts}
-	executor.Artifacts = resolver
 	label := "TECHNICAL-MINI-E2E-REAL (not official evidence)"
 	_, _ = fmt.Fprintln(out, "[mini-real] running the first A/OFF + A/ASSISTED pair for real")
-	res, err := practical3d.Run(ctx, m, practical3d.RunnerOptions{
-		Root: filepath.Join(base, "run"), Metadata: practical3d.EnvelopeMetadata{HumanLabel: &label},
-		Environment: observer, Artifacts: resolver, Transport: noTransport{}, Executor: executor,
-		Oracle:     practical3d.RealOracle{Script: filepath.Join(*oracleDir, "oracle.sh"), HiddenDir: filepath.Join(*oracleDir, "hidden"), Verify: verify, Manifest: m, Exec: executor},
-		Workspaces: practical3d.GitWorkspaceManager{FixtureRepo: *fixture},
-		MiniE2E:    true, MiniPositions: 2,
-	})
+	// The official `run` wiring (realRunnerOptions), limited to 2 positions.
+	opts := realRunnerOptions(m, rf, executor, observer, resolver, filepath.Join(base, "run"), practical3d.EnvelopeMetadata{HumanLabel: &label})
+	opts.MiniE2E, opts.MiniPositions = true, 2
+	res, err := practical3d.Run(ctx, m, opts)
 	if err != nil && res.Root == "" {
 		return err
 	}
@@ -268,4 +235,82 @@ func miniRealCommand(args []string, out io.Writer) error {
 
 func osexec(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).Output()
+}
+
+// realFlags are the inputs of the one real-AO execution path, shared by the
+// official `run` and `mini-e2e-real`: there is no second implementation.
+type realFlags struct {
+	tools, fixture, oracleDir, realClaude, realCodex, upstream, openaiUpstream, aoSrc *string
+}
+
+func addRealFlags(fs *flag.FlagSet) realFlags {
+	return realFlags{
+		tools:          fs.String("tools", "", "dir with ao and ao3dpractical built from a clean clone, and webroot/"),
+		fixture:        fs.String("fixture-repo", "", "fixture repository"),
+		oracleDir:      fs.String("oracle-dir", "", "dir with oracle.sh and hidden/ (denied to agents)"),
+		realClaude:     fs.String("real-claude", "", "real Claude Code executable"),
+		realCodex:      fs.String("real-codex", "", "real Codex CLI executable (reviewer)"),
+		upstream:       fs.String("upstream", "https://api.anthropic.com", "Anthropic origin"),
+		openaiUpstream: fs.String("openai-upstream", "https://chatgpt.com", "ChatGPT backend origin for Codex"),
+		aoSrc:          fs.String("ao-src", "", "directory holding every AO checkout (denied to agents)"),
+	}
+}
+
+// realModels are the frozen models the launch shim pins.
+type realModels struct{ primary, helper, codex string }
+
+// executorConfig builds the real executor's configuration: the AO binary and
+// shim from the clean-built tools directory, the sandbox inputs, and the
+// supervisor-side credential injector.
+func (f realFlags) executorConfig(models realModels, out io.Writer) (practical3d.AORealConfig, *practical3d.OperatorCredentials, error) {
+	for name, v := range map[string]string{"--tools": *f.tools, "--fixture-repo": *f.fixture, "--oracle-dir": *f.oracleDir, "--real-claude": *f.realClaude, "--real-codex": *f.realCodex, "--ao-src": *f.aoSrc} {
+		if v == "" {
+			return practical3d.AORealConfig{}, nil, fmt.Errorf("%s is required", name)
+		}
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return practical3d.AORealConfig{}, nil, err
+	}
+	src, err := filepath.Abs(*f.aoSrc)
+	if err != nil {
+		return practical3d.AORealConfig{}, nil, err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return practical3d.AORealConfig{}, nil, err
+	}
+	creds := &practical3d.OperatorCredentials{CodexAuthFile: filepath.Join(home, ".codex", "auth.json")}
+	modelEnv := map[string]string{"ANTHROPIC_MODEL": models.primary, "ANTHROPIC_DEFAULT_OPUS_MODEL": models.primary, "ANTHROPIC_DEFAULT_SONNET_MODEL": models.primary, "ANTHROPIC_DEFAULT_HAIKU_MODEL": models.helper, "ANTHROPIC_SMALL_FAST_MODEL": models.helper}
+	return practical3d.AORealConfig{AOBinary: filepath.Join(*f.tools, "ao"), RealClaude: *f.realClaude, RealCodex: *f.realCodex, CodexModel: models.codex, OpenAIUpstream: *f.openaiUpstream,
+		ShimExecutable: self, AOSrc: src, OracleDir: *f.oracleDir, ToolsRO: *f.tools, Upstream: *f.upstream, FixtureRepo: *f.fixture, WebRoot: filepath.Join(*f.tools, "webroot"),
+		ModelEnv: modelEnv, DaemonTimeout: 120 * time.Second, SettleTimeout: 8 * time.Minute, Log: out, Credentials: creds}, creds, nil
+}
+
+// realRunnerOptions wires a frozen manifest to the real AO executor, the
+// real oracle and the fixture workspaces: the same wiring for the 2 mini
+// positions and for the official schedule.
+func realRunnerOptions(m practical3d.Manifest, f realFlags, executor *practical3d.AORealExecutor, observer practical3d.LiveEnvironmentObserver, resolver practical3d.DirArtifactResolver, root string, meta practical3d.EnvelopeMetadata) practical3d.RunnerOptions {
+	verify := practical3d.RealVerifyCommand
+	executor.Artifacts = resolver
+	return practical3d.RunnerOptions{
+		Root: root, Metadata: meta,
+		Environment: observer, Artifacts: resolver, Transport: noTransport{}, Executor: executor,
+		Oracle:     practical3d.RealOracle{Script: filepath.Join(*f.oracleDir, "oracle.sh"), HiddenDir: filepath.Join(*f.oracleDir, "hidden"), Verify: verify, Manifest: m, Exec: executor},
+		Workspaces: practical3d.GitWorkspaceManager{FixtureRepo: *f.fixture},
+	}
+}
+
+// liveAccountRefs attests the accounts the injected credentials select: the
+// Anthropic organization (one minimal request) and the ChatGPT account.
+func liveAccountRefs(ctx context.Context, f realFlags, creds *practical3d.OperatorCredentials, helper, dir string) (map[string]string, error) {
+	anthropic, err := practical3d.CaptureAccountRef(ctx, *f.realClaude, *f.upstream, helper, dir)
+	if err != nil {
+		return nil, err
+	}
+	openai, err := creds.AccountRef("openai")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{"anthropic": anthropic, "openai": openai}, nil
 }

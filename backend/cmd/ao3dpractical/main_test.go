@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,5 +88,66 @@ func TestCLIRefusesProductionAODataDir(t *testing.T) {
 		if err := run([]string{cmd}, &strings.Builder{}); err == nil || !strings.Contains(err.Error(), "production") {
 			t.Fatalf("%s did not refuse production AO_DATA_DIR: %v", cmd, err)
 		}
+	}
+}
+
+// The official `run` executes the frozen schedule through the same real AO
+// executor as mini-e2e-real; --plan proves it without starting anything.
+func TestOfficialRunUsesTheRealAOExecutor(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := practical3d.LiveEnvironmentObserver{Expected: practical3d.EnvironmentInputs{RuntimeVersions: []practical3d.VersionInput{{Component: "go"}}, ProviderClientCLIVersions: []practical3d.VersionInput{}, TaskToolVersions: []practical3d.VersionInput{{Component: "git"}}, RunnerInstrumentVersions: []practical3d.VersionInput{{Component: "ao3dpractical"}}, EffectiveEnvironmentConfigAllowlist: []practical3d.ConfigInput{}, AdditionalLocalConfiguration: []practical3d.ConfigInput{}}, AOBinaryPath: self}.Observe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.AOCommit = strings.Repeat("a", 40)
+	specs, hidden := map[string][]byte{}, map[string][]byte{}
+	for _, task := range []string{"A", "B", "C", "D"} {
+		b, _ := json.Marshal(practical3d.TaskSpec{Schema: practical3d.TaskSpecSchema, TaskID: task, Objective: "do " + task, ReviewDepth: "none", WriteIntent: "mutating", Verification: json.RawMessage(`{"commands":[]}`), OracleTask: task})
+		specs[task], hidden[task] = b, []byte(`{"task":"`+task+`"}`)
+	}
+	m, _, err := practical3d.BuildRealMiniManifest(practical3d.RealMiniInputs{AOCommit: env.AOCommit, FixtureCommit: strings.Repeat("b", 40), ClaudeVersion: "2.1.285",
+		PrimaryModel: "claude-sonnet-5-5", HelperModel: "claude-haiku-4-5", CodexModel: "gpt-5.6-sol", CodexVersion: "0.157.1", AccountRefs: map[string]string{"anthropic": strings.Repeat("1", 64), "openai": strings.Repeat("2", 64)}, Env: env, TaskSpecs: specs,
+		Attachment: []byte("MEMORY FRESHNESS: CURRENT\n\n## pack\n"), AttachmentRef: "attachment-A.bin", OracleScript: []byte("#!/bin/bash\n"), HiddenManifests: hidden, VerifyCommand: strings.Join(practical3d.RealVerifyCommand, " "),
+		FixtureSubtree: strings.Repeat("c", 64), ReviewTarget: []byte("diff"), ReviewFile: []byte("package orders\n\nfunc Quote() { code.Amount(total) }\n"), ReviewFilePath: "internal/orders/pricing.go", ReviewCausalLine: 3, IndexedCommit: strings.Repeat("b", 40), PackDigest: strings.Repeat("d", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	m.Randomization.SeedHex, m.Randomization.Schedule = "", nil
+	draft, _ := json.Marshal(m)
+	draftPath, envPath := filepath.Join(dir, "draft.json"), filepath.Join(dir, "envelope.json")
+	if err := os.WriteFile(draftPath, draft, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"freeze", "--draft", draftPath, "--out", envPath}, &strings.Builder{}); err != nil {
+		t.Fatal(err)
+	}
+	_, frozen, err := practical3d.ReadEnvelope(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runRoot := filepath.Join(dir, "run")
+	var out strings.Builder
+	if err := run([]string{"run", "--plan", "--envelope", envPath, "--run-root", runRoot, "--artifact-root", dir,
+		"--tools", dir, "--fixture-repo", dir, "--oracle-dir", dir, "--real-claude", "/bin/echo", "--real-codex", "/bin/echo", "--ao-src", dir}, &out); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if lines[0] != "executor=*practical3d.AORealExecutor oracle=practical3d.RealOracle workspaces=practical3d.GitWorkspaceManager transport=main.noTransport" {
+		t.Fatalf("official run wiring: %s", lines[0])
+	}
+	if len(lines) != 42 {
+		t.Fatalf("plan lines=%d", len(lines))
+	}
+	for i, p := range frozen.Randomization.Schedule {
+		if want := fmt.Sprintf("position %d task=%s arm=%s sample=%s", p.PositionIndex, p.TaskID, p.Arm, p.SampleID); lines[i+1] != want {
+			t.Fatalf("plan line %d = %q, want %q", i+1, lines[i+1], want)
+		}
+	}
+	if _, err := os.Stat(runRoot); !os.IsNotExist(err) {
+		t.Fatal("--plan created the run root")
 	}
 }
