@@ -265,9 +265,17 @@ func traceRepresentation(m Manifest, spans map[string][][]byte, task string, arm
 // minSpan is the shortest attachment span searched for in OFF requests.
 const minSpan = 32
 
-// attachmentSpans returns the byte patterns whose presence in a no-attachment
-// request proves Project Memory leakage: the attachment's base64, its JSON
-// string escaping, and each non-trivial line of it.
+// projectMemoryMarkers identify text only AO's Project Memory renderer emits
+// (its untrusted-context frame, freshness notice and provenance footer).
+var projectMemoryMarkers = []string{"AO-UNTRUSTED-REPOSITORY-CONTEXT", "MEMORY FRESHNESS:", "AO project memory"}
+
+// attachmentSpans returns the byte patterns whose presence in a request
+// without attachment proves Project Memory leakage: the whole attachment
+// (base64 and canonical JSON-string form) and every line carrying an AO
+// Project Memory marker (frame with its content nonce, freshness notice,
+// provenance footer). Plain repository lines the pack quotes are NOT spans:
+// the same CLAUDE.md or README lines legitimately reach OFF agents from the
+// repository itself, so they carry no Project Memory provenance.
 func attachmentSpans(b []byte) [][]byte {
 	var out [][]byte
 	add := func(x []byte) {
@@ -278,7 +286,13 @@ func attachmentSpans(b []byte) [][]byte {
 	add([]byte(base64.StdEncoding.EncodeToString(b)))
 	add(canonicalStringBody(string(b)))
 	for _, line := range bytes.Split(b, []byte{'\n'}) {
-		add(canonicalStringBody(string(bytes.TrimSpace(line))))
+		line = bytes.TrimSpace(line)
+		for _, marker := range projectMemoryMarkers {
+			if bytes.Contains(line, []byte(marker)) {
+				add(canonicalStringBody(string(line)))
+				break
+			}
+		}
 	}
 	return out
 }

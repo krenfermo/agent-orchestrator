@@ -40,9 +40,9 @@ func TestTokenOverflowCannotBypassCapsOrProduceGO(t *testing.T) {
 func TestOffSpanDetectionHandlesHTMLCharactersAndOtherTasks(t *testing.T) {
 	t.Parallel()
 	m, _, _ := testManifest(t)
-	attachment := []byte("header line that is long enough to be searched\nfunc Allowed(role string) bool { return a < b && c > d }\n")
+	attachment := []byte("MEMORY FRESHNESS: CURRENT -- a < b && c > d at commit 6c33d0d\n<<<BEGIN AO-UNTRUSTED-REPOSITORY-CONTEXT 9a433bc7cc5b>>>\nfunc Allowed(role string) bool { return a < b && c > d }\n")
 	spans := map[string][][]byte{allTasksSpans: attachmentSpans(attachment)}
-	for _, line := range []string{"func Allowed(role string) bool { return a < b && c > d }", "header line that is long enough to be searched"} {
+	for _, line := range []string{"MEMORY FRESHNESS: CURRENT -- a < b && c > d at commit 6c33d0d", "<<<BEGIN AO-UNTRUSTED-REPOSITORY-CONTEXT 9a433bc7cc5b>>>"} {
 		payload, _ := json.Marshal(map[string]string{"prompt": "context:\n" + line})
 		rep := Representation{Payload: payload, ContextSourceStates: m.ContextSourceInventory}
 		// Task B OFF must also reject spans of any task's frozen attachment.
@@ -50,7 +50,9 @@ func TestOffSpanDetectionHandlesHTMLCharactersAndOtherTasks(t *testing.T) {
 			t.Fatalf("OFF request carrying attachment line %q accepted", line)
 		}
 	}
-	clean, _ := json.Marshal(map[string]string{"prompt": "unrelated"})
+	// Repository lines the pack quotes (here the code line) are not Project
+	// Memory provenance: OFF agents read the same repository.
+	clean, _ := json.Marshal(map[string]string{"prompt": "func Allowed(role string) bool { return a < b && c > d }"})
 	if _, _, err := traceRepresentation(m, spans, "B", ArmOff, RoleWorker, CallInitial, Representation{Payload: clean, ContextSourceStates: m.ContextSourceInventory}); err != nil {
 		t.Fatalf("clean OFF request rejected: %v", err)
 	}

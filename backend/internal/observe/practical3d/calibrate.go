@@ -1,7 +1,6 @@
 package practical3d
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -217,9 +216,12 @@ func (e *AORealExecutor) CalibrateInitial(ctx context.Context, m Manifest, tasks
 				if err != nil {
 					return err
 				}
-				for _, line := range bytes.Split(frozen, []byte{'\n'}) {
-					if len(bytes.TrimSpace(line)) >= minSpan && strings.Contains(res.Prompt, string(bytes.TrimSpace(line))) {
-						return fmt.Errorf("calibration %s/%s: OFF prompt contains a Project Memory span", task, arm)
+				if strings.Contains(res.Prompt, string(frozen)) {
+					return fmt.Errorf("calibration %s/%s: OFF prompt contains the Project Memory attachment", task, arm)
+				}
+				for _, marker := range projectMemoryMarkers {
+					if strings.Contains(res.Prompt, marker) {
+						return fmt.Errorf("calibration %s/%s: OFF prompt carries a Project Memory marker", task, arm)
 					}
 				}
 			}
