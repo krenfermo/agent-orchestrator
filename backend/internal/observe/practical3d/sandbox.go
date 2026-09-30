@@ -314,11 +314,31 @@ func RunShim(name string, args []string, stderr io.Writer, execFn func(string, [
 		_, _ = fmt.Fprintf(stderr, "3d-practical shim: %v\n", err)
 		return 1
 	}
+	// AO probes the CLI from its own working directory (its data dir, which
+	// the sandbox denies); a confined process must start somewhere it may read.
+	if cwd, err := os.Getwd(); err != nil || !cwdAllowed(cfg.Sandbox, cwd) {
+		if err := os.Chdir(cfg.Sandbox.PosTmp); err != nil {
+			_, _ = fmt.Fprintf(stderr, "3d-practical shim: chdir: %v\n", err)
+			return 1
+		}
+	}
 	if err := execFn(argv[0], argv, env); err != nil {
 		_, _ = fmt.Fprintf(stderr, "3d-practical shim: exec: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// cwdAllowed reports whether a working directory lies in a position area the
+// sandbox lets an agent read.
+func cwdAllowed(p SandboxParams, cwd string) bool {
+	c := resolveOrSelf(cwd)
+	for _, base := range []string{p.PosWork, p.PosWorktrees, p.PosHome, p.PosTmp} {
+		if within(c, resolveOrSelf(base)) {
+			return true
+		}
+	}
+	return false
 }
 
 func appendLaunch(path, subject string, args []string) {
