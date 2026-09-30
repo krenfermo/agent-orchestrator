@@ -378,10 +378,12 @@ func (a *responsesAccumulator) jsonBody(b []byte) {
 	}
 }
 
-func (a *responsesAccumulator) result(status int, _ bool, readErr error) HTTPAttemptResult {
+func (a *responsesAccumulator) result(status int, _ bool, _ error) HTTPAttemptResult {
 	var res HTTPAttemptResult
 	switch {
-	case status == http.StatusOK && a.completed && a.errType == "" && readErr == nil:
+	// Once response.completed arrived the response is whole: a later read or
+	// write error (the client closing its side) does not change it.
+	case status == http.StatusOK && a.completed && a.errType == "":
 		res.Outcome = OutcomeSuccess
 	case status == http.StatusOK && (a.errType == "server_error" || a.errType == "server_is_overloaded"):
 		res.Outcome = OutcomeRetryable

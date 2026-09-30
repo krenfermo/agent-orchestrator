@@ -172,3 +172,40 @@ func gitOutput(ctx context.Context, repo string, args ...string) ([]byte, error)
 	}
 	return raw, nil
 }
+
+// positionProcesses lists the processes whose argv names the position root
+// or whose working directory lies in it (darwin: ps + lsof), excluding self.
+func positionProcesses(ctx context.Context, rootPath string) []int {
+	root := resolveOrSelf(rootPath)
+	self := os.Getpid()
+	seen := map[int]bool{}
+	if raw, err := exec.CommandContext(ctx, "ps", "-axww", "-o", "pid=,command=").Output(); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			if pid, err := strconv.Atoi(fields[0]); err == nil && pid != self && (strings.Contains(line, rootPath) || strings.Contains(line, root)) {
+				seen[pid] = true
+			}
+		}
+	}
+	if out, _ := exec.CommandContext(ctx, "/usr/sbin/lsof", "-w", "-a", "-d", "cwd", "-F", "pn").Output(); len(out) > 0 {
+		pid := 0
+		for _, line := range strings.Split(string(out), "\n") {
+			switch {
+			case strings.HasPrefix(line, "p"):
+				pid, _ = strconv.Atoi(line[1:])
+			case strings.HasPrefix(line, "n") && pid != 0 && pid != self:
+				if cwd := line[1:]; within(cwd, root) || within(cwd, rootPath) {
+					seen[pid] = true
+				}
+			}
+		}
+	}
+	out := make([]int, 0, len(seen))
+	for pid := range seen {
+		out = append(out, pid)
+	}
+	return out
+}

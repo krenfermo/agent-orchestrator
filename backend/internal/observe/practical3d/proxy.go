@@ -549,6 +549,11 @@ func (p *ProviderProxy) forward(ctx context.Context, w http.ResponseWriter, r *h
 	if len(p.AccountRefs) > 0 {
 		meta["account_refs"] = p.AccountRefs
 	}
+	if readErr != nil {
+		// Diagnostic only: a stream that already ended with its terminal
+		// event stays whole; one that did not is a terminal failure anyway.
+		meta["stream_error"] = readErr.Error()
+	}
 	res.ProviderMetadata, _ = json.Marshal(meta)
 	res.TerminalMetadata, _ = json.Marshal(acc.terminal())
 	return res, ProxyObservation{MessageID: acc.id(), ToolUses: acc.toolUses()}
@@ -864,10 +869,11 @@ func (a *responseAccumulator) toolUses() []ProxyToolUse {
 // status processed no input (explicit zero); a 2xx response must report
 // usage or it is MISSING; a 2xx stream that ends before message_stop is a
 // partial, non-replayable TERMINAL_PROVIDER_FAILURE that still counts.
-func (a *responseAccumulator) result(status int, stream bool, readErr error) HTTPAttemptResult {
+func (a *responseAccumulator) result(status int, stream bool, _ error) HTTPAttemptResult {
 	var res HTTPAttemptResult
 	switch {
-	case status == http.StatusOK && a.stopped && a.errType == "" && readErr == nil:
+	// Once message_stop arrived the response is whole (see Responses).
+	case status == http.StatusOK && a.stopped && a.errType == "":
 		res.Outcome = OutcomeSuccess
 	case status == http.StatusOK && (a.errType == "overloaded_error" || a.errType == "api_error"):
 		res.Outcome = OutcomeRetryable

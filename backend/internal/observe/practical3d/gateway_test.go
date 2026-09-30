@@ -1,17 +1,20 @@
 package practical3d
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Codex review R3 (P1): the daemon API serves Project Memory and session
@@ -97,5 +100,28 @@ func TestGatewayRunFilePointsAgentsAtTheGateway(t *testing.T) {
 	}
 	if info["port"] != float64(6000) || info["pid"] != float64(42) || info["instanceId"] != "aod-1" {
 		t.Fatalf("gateway run file %s", raw)
+	}
+}
+
+// Teardown ends agent processes still inside the position root (Codex leaves
+// helpers behind) so the runner's verification sees none.
+func TestRigReapsLingeringPositionProcesses(t *testing.T) {
+	root := t.TempDir()
+	cmd := exec.Command("/bin/sleep", "300")
+	cmd.Dir = root
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	(&positionRig{root: root}).reap()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("lingering position process survived teardown")
+	}
+	if err := VerifyNoPositionProcesses(context.Background(), PositionWorkspace{Root: root}); err != nil {
+		t.Fatal(err)
 	}
 }

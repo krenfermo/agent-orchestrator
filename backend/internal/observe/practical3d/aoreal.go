@@ -128,6 +128,7 @@ func (e *AORealExecutor) spec(m Manifest, task string) (TaskSpec, error) {
 // positionRig is everything one real position (or calibration) runs with.
 type positionRig struct {
 	e          *AORealExecutor
+	root       string // the position root (teardown scope)
 	ctlDir     string
 	daemonPort int
 	// gateway is the agents' only route to the daemon (gatewayPort), found
@@ -171,7 +172,7 @@ func (e *AORealExecutor) newRig(w PositionWorkspace) (*positionRig, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &positionRig{e: e, ctlDir: ctl, home: w.RuntimeHome, tmp: filepath.Join(w.Root, "tmp"), dataDir: w.AODataDir, runFile: filepath.Join(w.AODataDir, "running.json"), work: w.WorkingCopy, socket: "ao3dp-" + randHex(6)}
+	r := &positionRig{e: e, root: w.Root, ctlDir: ctl, home: w.RuntimeHome, tmp: filepath.Join(w.Root, "tmp"), dataDir: w.AODataDir, runFile: filepath.Join(w.AODataDir, "running.json"), work: w.WorkingCopy, socket: "ao3dp-" + randHex(6)}
 	for _, d := range []string{r.tmp, filepath.Join(r.home, "Library"), filepath.Join(r.home, ".claude")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
@@ -333,6 +334,37 @@ func (r *positionRig) stopDaemon() {
 	}
 	_ = syscall.Kill(-r.daemon.Process.Pid, syscall.SIGKILL)
 	_ = exec.Command("tmux", "-L", r.socket, "kill-server").Run()
+	r.reap()
+}
+
+// reap ends every process still inside the position root after the daemon
+// and its tmux server are gone (agents exit asynchronously, and CLIs such as
+// Codex leave helpers behind): a grace period, then SIGTERM, then SIGKILL.
+// Only processes whose argv or working directory is in this position's
+// scratch root are touched; the runner's teardown verification then checks
+// that none remains.
+func (r *positionRig) reap() {
+	if r.root == "" {
+		return
+	}
+	ctx := context.Background()
+	for i := 0; i < 30; i++ {
+		pids := positionProcesses(ctx, r.root)
+		if len(pids) == 0 {
+			return
+		}
+		switch {
+		case i >= 20:
+			for _, pid := range pids {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		case i >= 5:
+			for _, pid := range pids {
+				_ = syscall.Kill(pid, syscall.SIGTERM)
+			}
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 func (r *positionRig) api(ctx context.Context, method, path string, body any, timeout time.Duration) (map[string]any, error) {
