@@ -32,6 +32,8 @@ type HTTPAttemptResult struct {
 	TransportError      string
 	ProviderMetadata    json.RawMessage
 	TerminalMetadata    json.RawMessage
+	// Expired reports that the frozen attempt deadline ended the attempt.
+	Expired bool
 }
 
 // HTTPAttempt is a dispatched attempt awaiting its finalization.
@@ -176,6 +178,8 @@ func (a *HTTPAttempt) Finish(res HTTPAttemptResult) error {
 		sc.inFlight, sc.outcome, sc.digest = false, res.Outcome, a.digest
 	}
 	switch {
+	case res.Expired:
+		return c.fail(StateTimeout)
 	case len(final.MissingAccounting) > 0:
 		return c.malform("provider accounting MISSING")
 	case res.TransportError != "":

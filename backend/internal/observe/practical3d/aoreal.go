@@ -241,7 +241,7 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 // tmux socket, own provider home (shared with its agents, so AO's workspace
 // trust record and transcript discovery see the same HOME), PATH resolving
 // `claude`/`codex` to the launch shim, and the arm switch.
-func (r *positionRig) startDaemon(ctx context.Context, arm Arm) error {
+func (r *positionRig) startDaemon(ctx context.Context, arm Arm, task string) error {
 	if err := RefuseProductionPath(r.dataDir); err != nil {
 		return err
 	}
@@ -249,7 +249,7 @@ func (r *positionRig) startDaemon(ctx context.Context, arm Arm) error {
 		"TMPDIR=" + r.tmp + "/",
 		"PATH=" + filepath.Join(r.ctlDir, "bin") + ":" + filepath.Dir(r.e.Cfg.AOBinary) + ":/opt/homebrew/bin:/usr/local/bin:/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin",
 		"AO_DATA_DIR=" + r.dataDir, "AO_RUN_FILE=" + r.runFile, "AO_TRUSTED_LOCAL_MODE=on", "AO_AUTH_MODE=trusted_local",
-		"AO_TMUX_SOCKET=" + r.socket, "AO_MEMORY_EXTERNAL=off", "AO_MEMORY_ROLES=worker", "CODEX_HOME=" + filepath.Join(r.home, "codex-home"), "AO_3DP_SHIM_CONFIG=" + filepath.Join(r.ctlDir, "shim.json"),
+		"AO_TMUX_SOCKET=" + r.socket, "AO_MEMORY_EXTERNAL=off", "AO_MEMORY_ROLES=" + memoryRolesFor(task), "CODEX_HOME=" + filepath.Join(r.home, "codex-home"), "AO_3DP_SHIM_CONFIG=" + filepath.Join(r.ctlDir, "shim.json"),
 		"DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "ENABLE_CLAUDEAI_MCP_SERVERS=0", "GOTOOLCHAIN=local"}
 	if arm == ArmAssisted {
 		env = append(env, "AO_MEMORY_MODE=assisted")
@@ -350,8 +350,8 @@ func (r *positionRig) startTaskRun(ctx context.Context, spec TaskSpec) error {
 	r.project = "practical-" + strings.ToLower(spec.TaskID)
 	// The frozen harness per role: Claude Code workers, a Codex reviewer
 	// (AO's cross-provider review independence), Claude decision resolvers.
-	policy := map[string]any{"policy": map[string]any{"autonomousMode": false, "plannerPriority": []string{}, "workerPriority": []string{"legacy-claude-code"},
-		"reviewerPriority": []string{"legacy-codex"}, "decisionResolverPriority": []string{"legacy-claude-code"}, "fallbackBehavior": "use_next_available", "reviewIndependence": "require_different_provider"}}
+	policy := map[string]any{"autonomousMode": false, "plannerPriority": []string{}, "workerPriority": []string{"legacy-claude-code"},
+		"reviewerPriority": []string{"legacy-codex"}, "decisionResolverPriority": []string{"legacy-claude-code"}, "fallbackBehavior": "use_next_available", "reviewIndependence": "require_different_provider"}
 	if _, err := r.api(ctx, http.MethodPut, "/execution-policy", policy, 30*time.Second); err != nil {
 		return err
 	}
@@ -488,7 +488,7 @@ func (e *AORealExecutor) Execute(ctx context.Context, pc PositionContext, c *Obs
 	if err := r.writeShim(r.shimConfig(profile, false)); err != nil {
 		return res, err
 	}
-	if err := r.startDaemon(ctx, pc.Position.Arm); err != nil {
+	if err := r.startDaemon(ctx, pc.Position.Arm, pc.Position.TaskID); err != nil {
 		return res, err
 	}
 	defer r.stopDaemon()

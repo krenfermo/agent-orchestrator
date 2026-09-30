@@ -178,11 +178,13 @@ func BuildRealMiniManifest(in RealMiniInputs) (Manifest, map[string][]byte, erro
 				}
 				raw, sum := cfgFor(model)
 				schema := EffectiveConfigSchemaClaudeCodeV1
-				if f.Role == RoleReviewer {
-					// Project Memory is targeted at the worker only
-					// (AO_MEMORY_ROLES=worker): the reviewer gets none in
+				if !carriesMemory(task, f.Role) {
+					// Project Memory is targeted at the task's measured role
+					// only (AO_MEMORY_ROLES): every other role gets none in
 					// either arm, so its cells carry no attachment.
 					assisted = TreatmentArm{AttachmentPresent: &absent}
+				}
+				if f.Role == RoleReviewer {
 					model = in.CodexModel
 					raw = json.RawMessage(`{"codex_version":"` + in.CodexVersion + `","model":"` + model + `","sandbox_mode":"ao-reviewer","stream":true,"tool_policy":"no_mcp_no_web"}`)
 					c, _ := canonicalRaw(raw, noDecimals)
@@ -209,6 +211,19 @@ func BuildRealMiniManifest(in RealMiniInputs) (Manifest, map[string][]byte, erro
 }
 
 func netListenLoopback() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+
+// memoryRolesFor is the AO_MEMORY_ROLES value of a task's positions: the
+// task's measured role (06 M3_caps: worker A/B/D, reviewer C).
+func memoryRolesFor(task string) string { return string(measuredRoleFor(task)) }
+
+// carriesMemory reports whether a role's ASSISTED requests carry the
+// attachment: the measured role, plus repair when the worker is measured,
+// because AO runs the fix turn in the worker's own session (its history
+// holds the worker's initial prompt).
+func carriesMemory(task string, role Role) bool {
+	m := measuredRoleFor(task)
+	return role == m || (role == RoleRepair && m == RoleWorker)
+}
 
 func measuredRoleFor(task string) Role {
 	if task == "C" {

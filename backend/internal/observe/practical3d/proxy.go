@@ -263,7 +263,12 @@ func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
 		p.reject(w, nil, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	res, obs := p.forward(r.Context(), w, r, proto, path, body, parsed.stream)
+	// The frozen per-attempt deadline bounds every forwarded attempt; an
+	// attempt it ends is finalized as TIMEOUT (06 §4).
+	attemptCtx, cancel := context.WithTimeout(r.Context(), time.Duration(c.m.Deadlines.ProviderAttemptSeconds)*time.Second)
+	res, obs := p.forward(attemptCtx, w, r, proto, path, body, parsed.stream)
+	res.Expired = errors.Is(attemptCtx.Err(), context.DeadlineExceeded)
+	cancel()
 	_ = attempt.Finish(res) // failures/malformations are recorded by the client
 	obs.CallIndex, obs.Subject, obs.Role, obs.At = attempt.base.CallIndex, subject, attempt.base.Role, p.now()
 	if res.InputTokens != nil {

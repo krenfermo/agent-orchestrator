@@ -68,7 +68,7 @@ func (e *AORealExecutor) Calibrate(ctx context.Context, fx FixtureConfig, spec T
 	if err := r.writeShim(cfg); err != nil {
 		return out, err
 	}
-	if err := r.startDaemon(ctx, arm); err != nil {
+	if err := r.startDaemon(ctx, arm, spec.TaskID); err != nil {
 		return out, err
 	}
 	defer r.stopDaemon()
