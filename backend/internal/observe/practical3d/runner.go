@@ -562,23 +562,19 @@ func (r *runner) decide() (RunResult, error) {
 	if err != nil {
 		return RunResult{Root: r.root}, err
 	}
+	// Publish the report, then anchor it. The RESULT append is the single
+	// commit point: until it is durable nothing is re-decidable (DecideRun
+	// requires it), and any failure before it goes through failAfterStart.
+	final := filepath.Join(r.root, "report.json")
+	if _, statErr := os.Lstat(final); statErr == nil {
+		return RunResult{Root: r.root}, fmt.Errorf("report.json already exists")
+	}
+	if err := os.Rename(staged, final); err != nil {
+		return RunResult{Root: r.root}, err
+	}
 	kind := runKind(r.o)
 	if err := r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: kind, Timestamp: r.o.Now().UTC(), Verdict: report.Verdict, ReasonCode: report.ReasonCode, LedgerSHA256: digest}); err != nil {
 		return RunResult{Root: r.root}, err
-	}
-	final := filepath.Join(r.root, "report.json")
-	if _, statErr := os.Lstat(final); statErr == nil {
-		err = fmt.Errorf("report.json already exists")
-	} else {
-		err = os.Rename(staged, final)
-	}
-	if err != nil {
-		// Publication failed after anchoring: durably invalidate the result
-		// so it can never be re-decided as the experiment's outcome.
-		invErr := r.reg.Append(RegistryEntry{Type: "INVALIDATED", ExperimentID: r.id, RunRoot: r.root, Kind: kind, Timestamp: r.o.Now().UTC(), Verdict: "NO_GO", ReasonCode: ReasonLineageInvalid, LedgerSHA256: digest})
-		report.Verdict, report.ReasonCode = "NO_GO", ReasonLineageInvalid
-		report.Reason = "report publication failed after anchoring: " + err.Error()
-		return RunResult{Root: r.root, Report: report}, errors.Join(err, invErr)
 	}
 	return RunResult{Root: r.root, Report: report}, nil
 }
@@ -590,6 +586,7 @@ func (r *runner) decide() (RunResult, error) {
 func (r *runner) failAfterStart(cause error) (RunResult, error) {
 	_ = r.ledger.Close()
 	path := filepath.Join(r.root, "ledger.jsonl")
+	_ = os.Remove(filepath.Join(r.root, "report.json.staged"))
 	report := EvaluateLedgerFile(r.m, path, r.o.Now().UTC())
 	report.Verdict = "NO_GO"
 	if report.ReasonCode == ReasonAllConditions || report.ReasonCode == "" {

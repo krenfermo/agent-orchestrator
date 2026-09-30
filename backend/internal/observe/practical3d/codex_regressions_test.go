@@ -238,7 +238,7 @@ func (w plantReport) Finalize(_ context.Context, _ Manifest, p Position, ws Posi
 	return nil
 }
 
-func TestReportPublicationFailureInvalidatesTheResult(t *testing.T) {
+func TestReportPublicationFailureNeverAnchorsGO(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	o := f.options(t)
@@ -247,7 +247,31 @@ func TestReportPublicationFailureInvalidatesTheResult(t *testing.T) {
 	if err == nil || res.Report.Verdict != "NO_GO" {
 		t.Fatalf("publication failure hidden: err=%v verdict=%s", err, res.Report.Verdict)
 	}
-	if _, err := DecideRun(res.Root, true, time.Now()); err == nil {
-		t.Fatal("invalidated result re-decided")
+	entries, _ := OpenRegistry(filepath.Dir(res.Root)).Entries()
+	for _, e := range entries {
+		if e.Type == "RESULT" && e.Verdict == "GO" {
+			t.Fatal("a GO result was anchored although publication failed")
+		}
+	}
+	if r, err := DecideRun(res.Root, true, time.Now()); err == nil && r.Verdict != "NO_GO" {
+		t.Fatalf("failed publication re-decided as %s", r.Verdict)
+	}
+}
+
+func TestAnchoredFailureCannotBeRedecidedAsGO(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	res, _ := f.mustRun(t) // a genuine GO run
+	regPath := OpenRegistry(filepath.Dir(res.Root)).Path()
+	raw, _ := os.ReadFile(regPath)
+	// Rewrite its anchored RESULT as a runner failure (same digest).
+	lines := bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n"))
+	lines[len(lines)-1] = bytes.Replace(lines[len(lines)-1], []byte(`"kind":"TECHNICAL_TEST"`), []byte(`"kind":"RUNNER_FAILURE_AFTER_START"`), 1)
+	if err := os.WriteFile(regPath, append(bytes.Join(lines, []byte("\n")), '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := DecideRun(res.Root, true, time.Now())
+	if err != nil || r.Verdict != "NO_GO" {
+		t.Fatalf("anchored failure re-decided as %s (%v)", r.Verdict, err)
 	}
 }

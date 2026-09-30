@@ -277,7 +277,7 @@ func runCommand(args []string, out io.Writer) error {
 		Artifacts:   practical3d.DirArtifactResolver{Root: *artifacts},
 		Transport:   commandTransport{path: *providerDriver, envNames: append(allowlistedEnv(m), providerEnv...)},
 		Executor:    commandExecutor{path: *positionDriver, envNames: positionNames},
-		Oracle:      commandOracle{path: *oracleDriver, manifest: m},
+		Oracle:      commandOracle{path: *oracleDriver, manifest: m, envNames: allowlistedEnv(m)},
 		Workspaces:  practical3d.GitWorkspaceManager{FixtureRepo: *fixtureRepo},
 	})
 	if err != nil {
@@ -554,6 +554,7 @@ type commandOracle struct {
 	path     string
 	args     []string
 	manifest practical3d.Manifest
+	envNames []string
 }
 
 type oracleInput struct {
@@ -581,7 +582,11 @@ func (o commandOracle) Evaluate(ctx context.Context, pc practical3d.PositionCont
 	inGroup(cmd)
 	cmd.Dir = pc.Workspace.Root
 	cmd.Stdin = bytes.NewReader(raw)
-	cmd.Env = positionEnv(pc.Workspace, "AO_3D_PRACTICAL_ORACLE")
+	env, err := withEnv(positionEnv(pc.Workspace, "AO_3D_PRACTICAL_ORACLE"), o.envNames)
+	if err != nil {
+		return practical3d.OracleResult{}, err
+	}
+	cmd.Env = env
 	output, err := cmd.Output()
 	_ = killGroup(cmd)
 	if err != nil {

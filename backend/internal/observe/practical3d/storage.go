@@ -253,7 +253,7 @@ func DecideRun(root string, allowExplicitTemp bool, now time.Time) (Report, erro
 	if err != nil {
 		return Report{}, err
 	}
-	registered, results, anchored := 0, 0, ""
+	registered, results, anchored, anchoredKind := 0, 0, "", ""
 	for _, e := range entries {
 		if e.ExperimentID != env.ExperimentID {
 			continue
@@ -267,7 +267,7 @@ func DecideRun(root string, allowExplicitTemp bool, now time.Time) (Report, erro
 		case "RESULT":
 			results++
 			if e.RunRoot == abs {
-				anchored = e.LedgerSHA256
+				anchored, anchoredKind = e.LedgerSHA256, e.Kind
 			}
 		case "INVALIDATED":
 			return Report{}, fmt.Errorf("%w: experiment %s was invalidated (%s)", ErrInvalidManifest, env.ExperimentID, e.ReasonCode)
@@ -284,7 +284,19 @@ func DecideRun(root string, allowExplicitTemp bool, now time.Time) (Report, erro
 	if sha256Hex(raw) != anchored {
 		return Report{}, fmt.Errorf("%w: ledger digest differs from the registry anchor", ErrInvalidManifest)
 	}
-	return EvaluateLedgerFile(m, path, now), nil
+	report := EvaluateLedgerFile(m, path, now)
+	switch anchoredKind {
+	case "OFFICIAL", "TECHNICAL_MINI_E2E", "TECHNICAL_TEST":
+	default:
+		// A runner failure or prestart outcome is anchored as NO_GO; the
+		// ledger can never be re-decided into anything else.
+		report.Verdict = "NO_GO"
+		if report.ReasonCode == ReasonAllConditions {
+			report.ReasonCode = ReasonLineageInvalid
+		}
+		report.Reason = "anchored outcome " + anchoredKind + ": " + report.Reason
+	}
+	return report, nil
 }
 
 // Contains reports whether an experiment_id was ever registered.
