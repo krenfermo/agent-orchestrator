@@ -271,7 +271,7 @@ func checkContextTools(m Manifest, tools []string) error {
 		switch {
 		case strings.HasPrefix(t, "mcp__") && state["mcp"] != "EQUALIZED":
 			return fmt.Errorf("MCP tool %q offered while mcp is %s", t, state["mcp"])
-		case (t == "WebFetch" || t == "WebSearch") && state["web"] != "EQUALIZED":
+		case (t == "WebFetch" || t == "WebSearch" || strings.HasPrefix(t, "web_search")) && state["web"] != "EQUALIZED":
 			return fmt.Errorf("web tool %q offered while web is %s", t, state["web"])
 		}
 	}

@@ -59,16 +59,50 @@ func decodeClaudeCodeConfig(raw json.RawMessage) (effectiveConfigClaudeCodeV1, e
 	return c, nil
 }
 
+// EffectiveConfigSchemaCodexV1 closes the effective configuration of a Codex
+// CLI agent observed at the AO provider proxy (Responses API).
+const EffectiveConfigSchemaCodexV1 = "ao.3d-practical.effective-config.codex.v1"
+
+type effectiveConfigCodexV1 struct {
+	CodexVersion string `json:"codex_version"`
+	Model        string `json:"model"`
+	Stream       *bool  `json:"stream"`
+	ToolPolicy   string `json:"tool_policy"`
+	SandboxMode  string `json:"sandbox_mode"`
+}
+
+func decodeCodexConfig(raw json.RawMessage) (effectiveConfigCodexV1, error) {
+	var c effectiveConfigCodexV1
+	if err := strictUnmarshal(raw, &c); err != nil {
+		return c, err
+	}
+	if c.CodexVersion == "" || c.Model == "" || c.Stream == nil || c.ToolPolicy != ToolPolicyNoMCPNoWeb || c.SandboxMode == "" {
+		return c, errors.New("codex effective config is incomplete")
+	}
+	return c, nil
+}
+
 // checkEffectiveHTTPConfig compares a real request with its frozen cell config.
 func checkEffectiveHTTPConfig(cfg InvocationConfig, req HTTPAttemptRequest) error {
-	if cfg.EffectiveConfigSchema != EffectiveConfigSchemaClaudeCodeV1 {
+	var model string
+	var stream bool
+	switch cfg.EffectiveConfigSchema {
+	case EffectiveConfigSchemaClaudeCodeV1:
+		c, err := decodeClaudeCodeConfig(cfg.EffectiveConfig)
+		if err != nil {
+			return err
+		}
+		model, stream = c.Model, *c.Stream
+	case EffectiveConfigSchemaCodexV1:
+		c, err := decodeCodexConfig(cfg.EffectiveConfig)
+		if err != nil {
+			return err
+		}
+		model, stream = c.Model, *c.Stream
+	default:
 		return fmt.Errorf("cell config schema %q cannot describe a real provider request", cfg.EffectiveConfigSchema)
 	}
-	c, err := decodeClaudeCodeConfig(cfg.EffectiveConfig)
-	if err != nil {
-		return err
-	}
-	if c.Model != cfg.ModelID || c.Model != req.Model || *c.Stream != req.Stream {
+	if model != cfg.ModelID || model != req.Model || stream != req.Stream {
 		return fmt.Errorf("request model/stream differ from the frozen effective config")
 	}
 	return nil
@@ -77,6 +111,10 @@ func checkEffectiveHTTPConfig(cfg InvocationConfig, req HTTPAttemptRequest) erro
 func validateEffectiveConfig(schema string, raw json.RawMessage) error {
 	if schema == EffectiveConfigSchemaClaudeCodeV1 {
 		_, err := decodeClaudeCodeConfig(raw)
+		return err
+	}
+	if schema == EffectiveConfigSchemaCodexV1 {
+		_, err := decodeCodexConfig(raw)
 		return err
 	}
 	if schema != EffectiveConfigSchemaV1 {

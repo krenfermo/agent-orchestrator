@@ -27,7 +27,7 @@ func TestBuildRealMiniManifestValidates(t *testing.T) {
 	}
 	file := []byte("package orders\n\nfunc Quote() { code.Amount(total) }\n")
 	m, blobs, err := BuildRealMiniManifest(RealMiniInputs{AOCommit: env.AOCommit, FixtureCommit: strings.Repeat("b", 40), AccountRefSHA256: sha256Hex([]byte("org")), ClaudeVersion: "2.1.285",
-		PrimaryModel: "claude-sonnet-5-5", HelperModel: "claude-haiku-4-5", Env: env, TaskSpecs: specs, Attachment: []byte("MEMORY FRESHNESS: CURRENT\n\n## pack\n"), AttachmentRef: "attachment-A.bin",
+		PrimaryModel: "claude-sonnet-5-5", HelperModel: "claude-haiku-4-5", CodexModel: "gpt-5.6-sol", CodexVersion: "0.157.1", AccountRefs: map[string]string{"anthropic": sha256Hex([]byte("a")), "openai": sha256Hex([]byte("o"))}, Env: env, TaskSpecs: specs, Attachment: []byte("MEMORY FRESHNESS: CURRENT\n\n## pack\n"), AttachmentRef: "attachment-A.bin",
 		OracleScript: []byte("#!/bin/bash\n"), HiddenManifests: hidden, VerifyCommand: "/bin/sh -c go test ./...", FixtureSubtree: sha256Hex([]byte("tree")),
 		ReviewTarget: []byte("diff"), ReviewFile: file, ReviewFilePath: "internal/orders/pricing.go", ReviewCausalLine: 3, IndexedCommit: strings.Repeat("b", 40), PackDigest: sha256Hex([]byte("pack"))})
 	if err != nil {

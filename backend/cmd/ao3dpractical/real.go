@@ -87,6 +87,9 @@ func miniRealCommand(args []string, out io.Writer) error {
 	helper := fs.String("helper-model", "", "frozen helper (small fast) model")
 	upstream := fs.String("upstream", "https://api.anthropic.com", "provider origin")
 	aoSrc := fs.String("ao-src", "", "directory holding every AO checkout (denied to agents)")
+	realCodex := fs.String("real-codex", "", "real Codex CLI executable (reviewer)")
+	codexModel := fs.String("codex-model", "", "frozen Codex model")
+	openaiUpstream := fs.String("openai-upstream", "https://chatgpt.com", "ChatGPT backend origin for Codex")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -115,11 +118,11 @@ func miniRealCommand(args []string, out io.Writer) error {
 		return err
 	}
 	modelEnv := map[string]string{"ANTHROPIC_MODEL": *primary, "ANTHROPIC_DEFAULT_OPUS_MODEL": *primary, "ANTHROPIC_DEFAULT_SONNET_MODEL": *primary, "ANTHROPIC_DEFAULT_HAIKU_MODEL": *helper, "ANTHROPIC_SMALL_FAST_MODEL": *helper}
-	cfg := practical3d.AORealConfig{AOBinary: aoBin, RealClaude: *realClaude, ShimExecutable: self, AOSrc: src, ToolsRO: *tools, Upstream: *upstream, FixtureRepo: *fixture, WebRoot: filepath.Join(*tools, "webroot"),
+	cfg := practical3d.AORealConfig{AOBinary: aoBin, RealClaude: *realClaude, RealCodex: *realCodex, CodexModel: *codexModel, OpenAIUpstream: *openaiUpstream, ShimExecutable: self, AOSrc: src, ToolsRO: *tools, Upstream: *upstream, FixtureRepo: *fixture, WebRoot: filepath.Join(*tools, "webroot"),
 		ModelEnv: modelEnv, DaemonTimeout: 120 * time.Second, SettleTimeout: 8 * time.Minute, Log: out}
 	envTemplate := practical3d.EnvironmentInputs{
 		RuntimeVersions:                     []practical3d.VersionInput{{Component: "go"}},
-		ProviderClientCLIVersions:           []practical3d.VersionInput{{Component: "claude"}},
+		ProviderClientCLIVersions:           []practical3d.VersionInput{{Component: "claude"}, {Component: "codex"}},
 		TaskToolVersions:                    []practical3d.VersionInput{{Component: "git"}},
 		RunnerInstrumentVersions:            []practical3d.VersionInput{{Component: "ao3dpractical"}},
 		EffectiveEnvironmentConfigAllowlist: []practical3d.ConfigInput{},
@@ -149,6 +152,12 @@ func miniRealCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	codexAccount, err := practical3d.CaptureCodexAccountRef(ctx, *realCodex, *openaiUpstream, *codexModel, base)
+	if err != nil {
+		return err
+	}
+	accounts := map[string]string{"anthropic": account, "openai": codexAccount}
+	cfg.AccountRefs = accounts
 	executor := &practical3d.AORealExecutor{Cfg: cfg}
 	_, _ = fmt.Fprintln(out, "[mini-real] freezing the ASSISTED attachment by provider-free calibration")
 	cal, err := executor.Calibrate(ctx, practical3d.FixtureConfig{Repo: *fixture, Commit: *commit}, specA, practical3d.ArmAssisted, filepath.Join(base, "freeze-calibration"))
@@ -189,12 +198,18 @@ func miniRealCommand(args []string, out io.Writer) error {
 		}
 	}
 	verify := []string{"/bin/sh", "-c", "go build ./... && go test -count=1 ./..."}
-	claudeVersion := ""
+	claudeVersion, codexVersion := "", ""
 	for _, v := range env.ProviderClientCLIVersions {
-		claudeVersion = strings.Fields(v.Version)[0]
+		f := strings.Fields(v.Version)
+		switch v.Component {
+		case "claude":
+			claudeVersion = f[0]
+		case "codex":
+			codexVersion = f[len(f)-1]
+		}
 	}
 	m, blobs, err := practical3d.BuildRealMiniManifest(practical3d.RealMiniInputs{AOCommit: env.AOCommit, FixtureCommit: *commit, AccountRefSHA256: account, ClaudeVersion: claudeVersion,
-		PrimaryModel: *primary, HelperModel: *helper, Env: env, TaskSpecs: specs, Attachment: []byte(cal.Attachment), AttachmentRef: "attachment-A.bin",
+		PrimaryModel: *primary, HelperModel: *helper, CodexModel: *codexModel, CodexVersion: codexVersion, AccountRefs: accounts, Env: env, TaskSpecs: specs, Attachment: []byte(cal.Attachment), AttachmentRef: "attachment-A.bin",
 		OracleScript: oracleScript, HiddenManifests: hidden, VerifyCommand: strings.Join(verify, " "), FixtureSubtree: subtree,
 		ReviewTarget: target, ReviewFile: reviewFile, ReviewFilePath: reviewPath, ReviewCausalLine: causal, IndexedCommit: *commit, PackDigest: cal.PackDigest})
 	if err != nil {

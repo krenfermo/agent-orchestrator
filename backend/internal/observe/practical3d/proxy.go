@@ -40,7 +40,9 @@ type ProxyObservation struct {
 	Role      Role           `json:"role"`
 	MessageID string         `json:"message_id"`
 	ToolUses  []ProxyToolUse `json:"tool_uses"`
-	At        time.Time      `json:"at"`
+	// InputTokens is the attempt's total input (for totals-based joins).
+	InputTokens int64     `json:"input_tokens"`
+	At          time.Time `json:"at"`
 }
 
 // ProxyToolUse is one tool call the model emitted, as the proxy saw it.
@@ -57,7 +59,11 @@ type ProxyToolUse struct {
 // before forwarding and ATTEMPT_FINALIZED after the response, through the
 // position's ObservedClient, so retries and partial streams are attempts.
 type ProviderProxy struct {
-	Upstream    *url.URL
+	Upstream *url.URL // Anthropic Messages origin
+	OpenAI   *url.URL // OpenAI/ChatGPT Responses origin (Codex); nil disables
+	// AccountRefs is the frozen per-provider account reference map whose
+	// canonical digest is the manifest's provider.account_ref_sha256.
+	AccountRefs map[string]string
 	HTTPClient  *http.Client
 	Resolver    RoleResolver
 	EvidenceDir string
@@ -226,9 +232,10 @@ func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if r.Method != http.MethodPost || path != "/v1/messages" {
+	proto := protocolFor(path)
+	if r.Method != http.MethodPost || proto == nil || (proto.name() == "openai" && p.OpenAI == nil) {
 		// Only model inference is allowed; any other API surface (token
-		// counting, models, files, batches...) is refused, not forwarded.
+		// counting, models, files, batches, plugins...) is refused.
 		p.reject(w, c, http.StatusForbidden, fmt.Sprintf("endpoint %s %s is not allowed", r.Method, path))
 		return
 	}
@@ -237,9 +244,9 @@ func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
 		p.reject(w, c, http.StatusRequestEntityTooLarge, "unreadable or oversized request body")
 		return
 	}
-	var parsed messagesRequest
-	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Model == "" {
-		p.reject(w, c, http.StatusBadRequest, "request is not a Messages API request")
+	parsed, err := proto.parse(body)
+	if err != nil {
+		p.reject(w, c, http.StatusBadRequest, "request is not a model inference request: "+err.Error())
 		return
 	}
 	role, err := p.Resolver.ResolveRole(r.Context(), subject, p.now())
@@ -251,14 +258,17 @@ func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
 		p.reject(w, c, http.StatusInternalServerError, "evidence store: "+err.Error())
 		return
 	}
-	attempt, err := c.BeginHTTPAttempt(HTTPAttemptRequest{Subject: subject, Role: role, BaseClass: parsed.baseClass(c.m, c.p.TaskID, role), Model: parsed.Model, Stream: parsed.Stream, ToolNames: parsed.toolNames(), Body: body})
+	attempt, err := c.BeginHTTPAttempt(HTTPAttemptRequest{Subject: subject, Role: role, BaseClass: parsed.baseClass(c.m, c.p.TaskID, role), Model: parsed.model, Stream: parsed.stream, ToolNames: parsed.tools, Body: body})
 	if err != nil {
 		p.reject(w, nil, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	res, obs := p.forward(r.Context(), w, r.Header, r.URL.RawQuery, body, parsed.Stream)
+	res, obs := p.forward(r.Context(), w, r, proto, path, body, parsed.stream)
 	_ = attempt.Finish(res) // failures/malformations are recorded by the client
 	obs.CallIndex, obs.Subject, obs.Role, obs.At = attempt.base.CallIndex, subject, attempt.base.Role, p.now()
+	if res.InputTokens != nil {
+		obs.InputTokens = *res.InputTokens
+	}
 	p.mu.Lock()
 	p.observations = append(p.observations, obs)
 	p.mu.Unlock()
@@ -284,10 +294,14 @@ var hopHeaders = map[string]bool{"Connection": true, "Proxy-Connection": true, "
 
 // forward sends the exact request bytes upstream and streams the response
 // back while extracting outcome, accounting, the message id and tool uses.
-func (p *ProviderProxy) forward(ctx context.Context, w http.ResponseWriter, in http.Header, rawQuery string, body []byte, stream bool) (HTTPAttemptResult, ProxyObservation) {
+func (p *ProviderProxy) forward(ctx context.Context, w http.ResponseWriter, r *http.Request, proto providerProtocol, path string, body []byte, stream bool) (HTTPAttemptResult, ProxyObservation) {
+	in := r.Header
 	target := *p.Upstream
-	target.Path = strings.TrimSuffix(target.Path, "/") + "/v1/messages"
-	target.RawQuery = rawQuery
+	if proto.name() == "openai" {
+		target = *p.OpenAI
+	}
+	target.Path = strings.TrimSuffix(target.Path, "/") + path
+	target.RawQuery = r.URL.RawQuery
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return HTTPAttemptResult{TransportError: err.Error()}, ProxyObservation{}
@@ -318,7 +332,7 @@ func (p *ProviderProxy) forward(ctx context.Context, w http.ResponseWriter, in h
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
 	var captured bytes.Buffer
-	acc := newResponseAccumulator()
+	acc := proto.accumulator()
 	reader := bufio.NewReaderSize(resp.Body, 64<<10)
 	var readErr error
 	for {
@@ -347,15 +361,16 @@ func (p *ProviderProxy) forward(ctx context.Context, w http.ResponseWriter, in h
 	}
 	_ = p.store(captured.Bytes())
 	res := acc.result(resp.StatusCode, stream, readErr)
-	org := resp.Header.Get("Anthropic-Organization-Id")
-	meta := map[string]string{"http_status": fmt.Sprint(resp.StatusCode), "request_id": resp.Header.Get("Request-Id"), "response_sha256": sha256Hex(captured.Bytes()), "proxy_version": ProviderProxyVersion}
-	if org != "" {
-		meta["account_ref_sha256"] = sha256Hex([]byte(org))
+	meta := map[string]any{"http_status": fmt.Sprint(resp.StatusCode), "request_id": firstHeader(resp.Header, "Request-Id", "X-Request-Id"), "response_sha256": sha256Hex(captured.Bytes()), "proxy_version": ProviderProxyVersion, "provider_protocol": proto.name()}
+	if ref := proto.accountRef(in, resp.Header); ref != "" {
+		meta["account_ref_sha256"] = ref
+	}
+	if len(p.AccountRefs) > 0 {
+		meta["account_refs"] = p.AccountRefs
 	}
 	res.ProviderMetadata, _ = json.Marshal(meta)
-	term := map[string]any{"stop_reason": acc.stopReason, "message_stop": acc.stopped, "error_type": acc.errType}
-	res.TerminalMetadata, _ = json.Marshal(term)
-	return res, ProxyObservation{MessageID: acc.messageID, ToolUses: acc.toolUses()}
+	res.TerminalMetadata, _ = json.Marshal(acc.terminal())
+	return res, ProxyObservation{MessageID: acc.id(), ToolUses: acc.toolUses()}
 }
 
 type messagesRequest struct {

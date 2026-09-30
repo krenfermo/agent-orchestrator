@@ -92,6 +92,11 @@ const (
 	// BudgetEnv overrides the per-role pack budgets, as
 	// `role=bytes/items[,role=bytes/items]`.
 	BudgetEnv = "AO_MEMORY_BUDGETS"
+	// RolesEnv restricts which dispatch roles receive memory, as a comma list
+	// of roles (`worker,reviewer,...`). Unset means every role. A role left
+	// out gets exactly the ModeOff behaviour, so a controlled comparison can
+	// target the memory treatment at one role.
+	RolesEnv = "AO_MEMORY_ROLES"
 )
 
 // DefaultSyncTimeout bounds a lifecycle-triggered sync.
@@ -118,6 +123,9 @@ type Config struct {
 	IndexLimits IndexLimits
 	// Budgets are the per-role pack budgets.
 	Budgets BudgetSet
+	// Roles, when non-empty, is the only set of roles memory is provisioned
+	// for (see RolesEnv).
+	Roles map[PackRole]bool
 }
 
 // DefaultConfig is conservative on purpose: memory off, short sync timeout,
@@ -159,6 +167,22 @@ func ConfigFromEnv() (Config, error) {
 			return Config{}, fmt.Errorf("%s: timeout must be positive, got %s", SyncTimeoutEnv, d)
 		}
 		cfg.SyncTimeout = d
+	}
+	if raw, ok := lookupNonEmpty(RolesEnv); ok {
+		cfg.Roles = map[PackRole]bool{}
+		for _, name := range strings.Split(raw, ",") {
+			role := PackRole(strings.ToLower(strings.TrimSpace(name)))
+			if role == "" {
+				continue
+			}
+			if !role.Valid() {
+				return Config{}, fmt.Errorf("%s: unknown role %q", RolesEnv, name)
+			}
+			cfg.Roles[role] = true
+		}
+		if len(cfg.Roles) == 0 {
+			return Config{}, fmt.Errorf("%s: names no role", RolesEnv)
+		}
 	}
 	if raw, ok := lookupNonEmpty(CacheEnv); ok {
 		on, err := strconv.ParseBool(strings.TrimSpace(raw))

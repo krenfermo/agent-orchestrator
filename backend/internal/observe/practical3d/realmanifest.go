@@ -69,6 +69,8 @@ func CaptureAccountRef(ctx context.Context, realClaude, upstream, model, workDir
 type RealMiniInputs struct {
 	AOCommit, FixtureCommit, AccountRefSHA256, ClaudeVersion string
 	PrimaryModel, HelperModel                                string
+	CodexModel, CodexVersion                                 string
+	AccountRefs                                              map[string]string
 	Env                                                      EnvironmentInputs
 	TaskSpecs                                                map[string][]byte // task -> spec JSON
 	Attachment                                               []byte            // frozen ASSISTED attachment (task A worker)
@@ -96,10 +98,17 @@ func BuildRealMiniManifest(in RealMiniInputs) (Manifest, map[string][]byte, erro
 	}
 	present, absent := true, false
 	roles := []Role{RoleWorker, RoleReviewer, RoleRepair}
+	accountRef := in.AccountRefSHA256
+	if len(in.AccountRefs) > 0 {
+		var err error
+		if accountRef, err = AccountRefSet(in.AccountRefs); err != nil {
+			return Manifest{}, nil, err
+		}
+	}
 	m := Manifest{
 		SchemaVersion: ManifestSchemaVersion, ManifestSchemaSHA256: ExpectedManifestSchemaSHA256, Estimand: "project_memory_assisted_vs_off_v1",
 		AOCommit: in.AOCommit, FixtureCommit: in.FixtureCommit, Arms: []Arm{ArmOff, ArmAssisted}, ClosedRoleSet: roles,
-		Provider:               Provider{ProviderID: "anthropic", AccountRefSHA256: in.AccountRefSHA256, ClientID: "technical-claude-code-mini-real", ClientVersion: in.ClaudeVersion, ProviderAPIVersion: "2023-06-01"},
+		Provider:               Provider{ProviderID: "anthropic+openai", AccountRefSHA256: accountRef, ClientID: "technical-claude-code-mini-real", ClientVersion: in.ClaudeVersion, ProviderAPIVersion: "2023-06-01"},
 		ProviderAccessBoundary: "AO_OBSERVED_CLIENT_ONLY_V1",
 		RetryPolicy:            RetryPolicy{AlgorithmVersion: "exponential_capped_v1"},
 		Deadlines:              Deadlines{PositionSeconds: 3600, ProviderAttemptSeconds: 900},
@@ -137,10 +146,9 @@ func BuildRealMiniManifest(in RealMiniInputs) (Manifest, map[string][]byte, erro
 		hidden := put(in.HiddenManifests[task])
 		m.Tasks = append(m.Tasks, Task{TaskID: task, TaskManifestSHA256: put(spec), FixtureSubtreeSHA256: in.FixtureSubtree, OracleRef: hidden, TreatmentTargetRoles: []Role{measuredRoleFor(task)}})
 		m.Q4Oracle.TaskOracles = append(m.Q4Oracle.TaskOracles, TaskOracle{TaskID: task, HiddenTestManifestSHA256: hidden})
-		flow := []RoleFlow{{Role: RoleWorker, FlowPosition: 1, ReachableCallClasses: classes}, {Role: RoleRepair, FlowPosition: 2, ReachableCallClasses: classes}}
-		if task == "C" {
-			flow = []RoleFlow{{Role: RoleReviewer, FlowPosition: 1, ReachableCallClasses: classes}}
-		}
+		// AO task run: worker (Claude), reviewer (Codex, AO's cross-provider
+		// independence), fix in the worker's session (Claude).
+		flow := []RoleFlow{{Role: RoleWorker, FlowPosition: 1, ReachableCallClasses: classes}, {Role: RoleReviewer, FlowPosition: 2, ReachableCallClasses: classes}, {Role: RoleRepair, FlowPosition: 3, ReachableCallClasses: classes}}
 		m.Workflow.TaskRoles = append(m.Workflow.TaskRoles, TaskRoleFlow{TaskID: task, RoleFlow: flow})
 		used := map[Role]bool{}
 		for _, f := range flow {
@@ -168,9 +176,20 @@ func BuildRealMiniManifest(in RealMiniInputs) (Manifest, map[string][]byte, erro
 					// (observed in the real mini-E2E).
 					model = in.HelperModel
 				}
-				m.TreatmentMapping = append(m.TreatmentMapping, TreatmentCell{TaskID: task, Role: f.Role, CallClass: class, OFF: TreatmentArm{AttachmentPresent: &absent}, ASSISTED: assisted})
 				raw, sum := cfgFor(model)
-				m.InvocationConfigs = append(m.InvocationConfigs, InvocationConfig{TaskID: task, Role: f.Role, CallClass: class, ModelID: model, ModelVersion: model, EffectiveConfigSchema: EffectiveConfigSchemaClaudeCodeV1, EffectiveConfigSHA256: sum, EffectiveConfig: raw})
+				schema := EffectiveConfigSchemaClaudeCodeV1
+				if f.Role == RoleReviewer {
+					// Project Memory is targeted at the worker only
+					// (AO_MEMORY_ROLES=worker): the reviewer gets none in
+					// either arm, so its cells carry no attachment.
+					assisted = TreatmentArm{AttachmentPresent: &absent}
+					model = in.CodexModel
+					raw = json.RawMessage(`{"codex_version":"` + in.CodexVersion + `","model":"` + model + `","sandbox_mode":"ao-reviewer","stream":true,"tool_policy":"no_mcp_no_web"}`)
+					c, _ := canonicalRaw(raw, noDecimals)
+					sum, schema = sha256Hex(c), EffectiveConfigSchemaCodexV1
+				}
+				m.TreatmentMapping = append(m.TreatmentMapping, TreatmentCell{TaskID: task, Role: f.Role, CallClass: class, OFF: TreatmentArm{AttachmentPresent: &absent}, ASSISTED: assisted})
+				m.InvocationConfigs = append(m.InvocationConfigs, InvocationConfig{TaskID: task, Role: f.Role, CallClass: class, ModelID: model, ModelVersion: model, EffectiveConfigSchema: schema, EffectiveConfigSHA256: sum, EffectiveConfig: raw})
 			}
 		}
 	}
@@ -196,4 +215,52 @@ func measuredRoleFor(task string) Role {
 		return RoleReviewer
 	}
 	return RoleWorker
+}
+
+// CaptureCodexAccountRef runs one minimal Codex request through a local
+// forwarder (the same custom provider the positions use) and returns SHA-256
+// of the ChatGPT account id the CLI authenticated as.
+func CaptureCodexAccountRef(ctx context.Context, realCodex, upstream, model, workDir string) (string, error) {
+	u, err := url.Parse(upstream)
+	if err != nil {
+		return "", err
+	}
+	var mu sync.Mutex
+	acct := ""
+	rp := httputil.NewSingleHostReverseProxy(u)
+	rp.Transport = &http.Transport{Proxy: nil}
+	base := rp.Director
+	rp.Director = func(r *http.Request) {
+		if v := r.Header.Get("Chatgpt-Account-Id"); v != "" {
+			mu.Lock()
+			acct = v
+			mu.Unlock()
+		}
+		base(r)
+		r.Host = u.Host
+	}
+	srv := &http.Server{Handler: rp, ReadHeaderTimeout: 30 * time.Second}
+	ln, err := netListenLoopback()
+	if err != nil {
+		return "", err
+	}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	args := []string{"exec", "--skip-git-repo-check", "-c", `model_provider="p3d"`, "-c", `model_providers.p3d.name="p3d"`,
+		"-c", `model_providers.p3d.base_url="http://` + ln.Addr().String() + `/backend-api/codex"`, "-c", `model_providers.p3d.wire_api="responses"`,
+		"-c", "model_providers.p3d.requires_openai_auth=true", "-c", "model_providers.p3d.supports_websockets=false", "-c", `model="` + model + `"`, "Reply with exactly: ok"}
+	cmd := exec.CommandContext(cctx, realCodex, args...)
+	cmd.Dir = workDir
+	cmd.Stdin = strings.NewReader("")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("codex account probe: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if acct == "" {
+		return "", errors.New("codex sent no ChatGPT account id")
+	}
+	return sha256Hex([]byte(acct)), nil
 }

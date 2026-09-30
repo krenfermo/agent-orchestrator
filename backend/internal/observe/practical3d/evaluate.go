@@ -529,10 +529,7 @@ func materializeAttempts(m Manifest, p Position, dispatches, finals []Event) mat
 			*errs = append(*errs, "provider/terminal metadata missing")
 			continue
 		}
-		var account struct {
-			AccountRefSHA256 string `json:"account_ref_sha256"`
-		}
-		if json.Unmarshal(f.ProviderMetadata, &account) != nil || account.AccountRefSHA256 != m.Provider.AccountRefSHA256 {
+		if !accountAttested(m, f.ProviderMetadata) {
 			*errs = append(*errs, "provider metadata does not attest the frozen account_ref_sha256")
 			continue
 		}
@@ -950,4 +947,35 @@ func finiteOrZero(x float64) float64 {
 		return 0
 	}
 	return x
+}
+
+// AccountRefSet is the canonical digest of a per-provider account reference
+// map; it is what provider.account_ref_sha256 freezes when one position uses
+// several providers (Claude worker, Codex reviewer).
+func AccountRefSet(refs map[string]string) (string, error) {
+	b, err := CanonicalJSON(refs)
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(b), nil
+}
+
+// accountAttested accepts an attempt whose observed account reference is the
+// frozen one: either equal to provider.account_ref_sha256, or equal to its
+// protocol's entry in a frozen per-provider map whose canonical digest is
+// provider.account_ref_sha256.
+func accountAttested(m Manifest, raw json.RawMessage) bool {
+	var meta struct {
+		Ref      string            `json:"account_ref_sha256"`
+		Protocol string            `json:"provider_protocol"`
+		Refs     map[string]string `json:"account_refs"`
+	}
+	if json.Unmarshal(raw, &meta) != nil || meta.Ref == "" {
+		return false
+	}
+	if len(meta.Refs) == 0 {
+		return meta.Ref == m.Provider.AccountRefSHA256
+	}
+	set, err := AccountRefSet(meta.Refs)
+	return err == nil && set == m.Provider.AccountRefSHA256 && meta.Refs[meta.Protocol] == meta.Ref
 }

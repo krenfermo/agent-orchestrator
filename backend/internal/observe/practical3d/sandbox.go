@@ -53,6 +53,10 @@ const agentSandboxProfile = `(version 1)
 (deny file-read* file-write* (prefix (string-append (param "REAL_HOME") "/.claude.json")))
 (deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/.cache/claude")))
 (deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/.codex")))
+; Codex authenticates with the operator's ChatGPT login (read-only); with all
+; network but the proxy denied, every use of it is an observed attempt.
+(allow file-read* (literal (string-append (param "REAL_HOME") "/.codex/auth.json")))
+(allow file-read-metadata (literal (string-append (param "REAL_HOME") "/.codex")))
 (deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/Library/Caches/claude-cli-nodejs")))
 (deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/Library/Application Support/Claude")))
 
@@ -65,12 +69,13 @@ const agentSandboxProfile = `(version 1)
 (allow network-outbound (remote ip (string-append "localhost:" (param "DAEMON_PORT"))))
 (deny network-inbound (local ip "*:*"))
 
-; No escape by spawning outside the sandbox or re-sandboxing. (Claude Code
+; No escape by spawning outside the sandbox. (Re-sandboxing is allowed: a
+; nested Seatbelt profile can only restrict further; Codex applies its own.)
+; (Claude Code
 ; reads its OAuth credential through /usr/bin/security, so the keychain CLI
 ; stays allowed; with every network destination but the proxy denied, any
 ; use of that credential is still an observed provider attempt.)
 (deny process-exec (literal "/bin/launchctl") (literal "/usr/bin/open") (literal "/usr/bin/osascript")
-                   (literal "/usr/bin/sandbox-exec")
                    (literal "/usr/bin/tmux") (literal "/opt/homebrew/bin/tmux")
                    (subpath "/opt/homebrew/Cellar/tmux") (subpath "/opt/homebrew/opt/tmux"))
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))
@@ -140,6 +145,10 @@ type ShimConfig struct {
 	// Capture, when set, makes every model-calling launch record its argv
 	// there and exit without contacting any provider (calibration).
 	Capture string `json:"capture,omitempty"`
+	// RealCodex and CodexArgs configure the Codex launch; "{BASE}" in an
+	// argument is replaced by the position proxy's tokenized Responses URL.
+	RealCodex string   `json:"real_codex,omitempty"`
+	CodexArgs []string `json:"codex_args,omitempty"`
 }
 
 // shimKeepEnv are the only inherited variables an agent receives (plus AO_*
@@ -161,10 +170,17 @@ func ShimSubject(env func(string) string) (string, error) {
 // nonSessionClaudeArgs are CLI subcommands/flags that never call a model.
 var nonSessionClaudeArgs = map[string]bool{"--version": true, "-v": true, "-h": true, "--help": true, "auth": true, "doctor": true, "config": true, "mcp": true, "update": true, "install": true}
 
+// nonSessionCodexArgs are Codex subcommands/flags that never call a model.
+var nonSessionCodexArgs = map[string]bool{"--version": true, "-V": true, "-h": true, "--help": true, "login": true, "logout": true, "completion": true, "features": true}
+
 // BuildShimLaunch computes the confined argv and the complete environment of
 // one agent launch. Model-calling launches get a proxy token bound to their
 // AO subject; others get an unusable provider endpoint.
 func BuildShimLaunch(cfg ShimConfig, args []string, environ []string, token func(subject string) (string, error)) ([]string, []string, error) {
+	return buildShimLaunch("claude", cfg, args, environ, token)
+}
+
+func buildShimLaunch(harness string, cfg ShimConfig, args []string, environ []string, token func(subject string) (string, error)) ([]string, []string, error) {
 	get := envLookup(environ)
 	env := []string{}
 	for _, k := range shimKeepEnv {
@@ -181,6 +197,9 @@ func BuildShimLaunch(cfg ShimConfig, args []string, environ []string, token func
 	}
 	base := "http://127.0.0.1:1/unreachable"
 	session := len(args) == 0 || !nonSessionClaudeArgs[args[0]]
+	if harness == "codex" {
+		session = len(args) == 0 || !nonSessionCodexArgs[args[0]]
+	}
 	if session {
 		subject, err := ShimSubject(func(k string) string { v, _ := get(k); return v })
 		if err != nil {
@@ -216,11 +235,23 @@ func BuildShimLaunch(cfg ShimConfig, args []string, environ []string, token func
 	for _, k := range keys {
 		out = append(out, k+"="+forced[k])
 	}
-	claudeArgs := args
-	if session {
-		claudeArgs = append(append([]string{}, cfg.ClaudeArgs...), args...)
+	binary, extra := cfg.RealClaude, cfg.ClaudeArgs
+	if harness == "codex" {
+		binary, extra = cfg.RealCodex, nil
+		forced["CODEX_HOME"] = cfg.Sandbox.PosHome + "/codex-home"
+		out = append(out, "CODEX_HOME="+forced["CODEX_HOME"])
+		for _, a := range cfg.CodexArgs {
+			extra = append(extra, strings.ReplaceAll(a, "{BASE}", strings.TrimSuffix(base, "/")+"/backend-api/codex"))
+		}
 	}
-	argv, err := SandboxCommand(cfg.Profile, cfg.Sandbox, append([]string{cfg.RealClaude}, claudeArgs...))
+	finalArgs := args
+	if session || harness == "codex" {
+		finalArgs = append(append([]string{}, extra...), args...)
+	}
+	if binary == "" {
+		return nil, nil, fmt.Errorf("no %s executable configured", harness)
+	}
+	argv, err := SandboxCommand(cfg.Profile, cfg.Sandbox, append([]string{binary}, finalArgs...))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -289,7 +320,7 @@ type ShimCapture struct {
 // the position proxy, or captured in calibration mode. It returns an exit
 // status only on failure; on success the process is replaced.
 func RunShim(name string, args []string, stderr io.Writer, execFn func(string, []string, []string) error) int {
-	if name != "claude" {
+	if name != "claude" && name != "codex" {
 		_, _ = fmt.Fprintf(stderr, "3d-practical: %s is not an allowed agent harness\n", name)
 		return 1
 	}
@@ -299,6 +330,9 @@ func RunShim(name string, args []string, stderr io.Writer, execFn func(string, [
 		return 1
 	}
 	session := len(args) == 0 || !nonSessionClaudeArgs[args[0]]
+	if name == "codex" {
+		session = len(args) == 0 || !nonSessionCodexArgs[args[0]]
+	}
 	subject, _ := ShimSubject(os.Getenv)
 	appendLaunch(cfg.LaunchLog, subject, args)
 	if cfg.Capture != "" && session {
@@ -308,7 +342,7 @@ func RunShim(name string, args []string, stderr io.Writer, execFn func(string, [
 		}
 		return 0
 	}
-	argv, env, err := BuildShimLaunch(cfg, args, os.Environ(), func(subject string) (string, error) {
+	argv, env, err := buildShimLaunch(name, cfg, args, os.Environ(), func(subject string) (string, error) {
 		return RequestProxyToken(cfg.ControlSocket, subject)
 	})
 	if err != nil {

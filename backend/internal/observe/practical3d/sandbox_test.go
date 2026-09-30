@@ -110,6 +110,20 @@ func TestSandboxDeniesExperimentPrivatePaths(t *testing.T) {
 	if out, err := r.sh(t, "ln -s "+shellQuote(r.secret["ledger"])+" link && cat link"); err == nil || strings.Contains(out, "SECRET") {
 		t.Errorf("symlink escape allowed: %q", out)
 	}
+	// Codex's ChatGPT login is the one readable file of ~/.codex.
+	if err := os.MkdirAll(filepath.Join(r.p.RealHome, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, allowed := range map[string]bool{"auth.json": true, "history.jsonl": false} {
+		p := filepath.Join(r.p.RealHome, ".codex", name)
+		if err := os.WriteFile(p, []byte("CODEX\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := r.sh(t, "cat "+shellQuote(p))
+		if got := err == nil && strings.Contains(out, "CODEX"); got != allowed {
+			t.Errorf("~/.codex/%s readable=%v, want %v", name, got, allowed)
+		}
+	}
 	// HOME escape: the operator's provider state.
 	if out, err := r.sh(t, "cat "+shellQuote(filepath.Join(r.p.RealHome, ".claude", "history.jsonl"))); err == nil || strings.Contains(out, "SECRET") {
 		t.Errorf("real HOME provider state readable: %q", out)
@@ -165,7 +179,11 @@ func TestSandboxNetworkOnlyReachesProxyAndDaemon(t *testing.T) {
 			t.Errorf("%s reachable: %q", name, out)
 		}
 	}
-	for _, bin := range []string{"/usr/bin/sandbox-exec", "/usr/bin/osascript", "/bin/launchctl"} {
+	// A nested, fully permissive profile cannot lift the outer confinement.
+	if out, err := r.sh(t, "/usr/bin/sandbox-exec -p '(version 1)(allow default)' /bin/cat "+shellQuote(r.secret["ledger"])); err == nil || strings.Contains(out, "SECRET") {
+		t.Errorf("nested sandbox escaped: %q", out)
+	}
+	for _, bin := range []string{"/usr/bin/osascript", "/bin/launchctl"} {
 		out, err := r.sh(t, bin+" help; echo rc=$?")
 		if err != nil || !strings.Contains(out, "rc=126") {
 			t.Errorf("exec %s not denied: %v %q", bin, err, out)

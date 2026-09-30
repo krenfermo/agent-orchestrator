@@ -61,6 +61,12 @@ func ParseTaskSpec(raw []byte) (TaskSpec, error) {
 type AORealConfig struct {
 	AOBinary       string // frozen `ao` CLI binary (also exec'd by agents: must live under ToolsRO)
 	RealClaude     string // real Claude Code executable
+	RealCodex      string // real Codex CLI executable (reviewer)
+	CodexModel     string // frozen Codex model
+	OpenAIUpstream string // ChatGPT backend origin for Codex, e.g. https://chatgpt.com
+	// AccountRefs is the frozen per-provider account reference map
+	// (anthropic, openai) whose digest is provider.account_ref_sha256.
+	AccountRefs    map[string]string
 	ShimExecutable string // this harness binary; invoked as `claude`/`codex` it is the launch shim
 	AOSrc          string // AO source tree (denied to agents)
 	ToolsRO        string // read-only tools directory agents may exec from
@@ -165,6 +171,13 @@ func (e *AORealExecutor) newRig(w PositionWorkspace) (*positionRig, error) {
 	if err := os.Symlink(filepath.Join(realHome, "Library", "Keychains"), filepath.Join(r.home, "Library", "Keychains")); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Join(r.home, "codex-home"), 0o700); err != nil {
+		return nil, err
+	}
+	// Codex authenticates with the operator's ChatGPT login, linked read-only.
+	if err := os.Symlink(filepath.Join(realHome, ".codex", "auth.json"), filepath.Join(r.home, "codex-home", "auth.json")); err != nil && !os.IsExist(err) {
+		return nil, err
+	}
 	if err := os.WriteFile(filepath.Join(r.home, ".claude.json"), []byte(`{"hasCompletedOnboarding":true,"officialMarketplaceAutoInstallAttempted":true}`), 0o600); err != nil {
 		return nil, err
 	}
@@ -207,7 +220,12 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 	for k, v := range r.e.Cfg.ModelEnv {
 		env[k] = v
 	}
-	cfg := ShimConfig{RealClaude: r.e.Cfg.RealClaude, Profile: profile, ControlSocket: filepath.Join(r.ctlDir, "ctl.sock"), ExtraEnv: env,
+	codexArgs := []string{"-c", `model_provider="p3d"`, "-c", `model_providers.p3d.name="p3d"`, "-c", `model_providers.p3d.base_url="{BASE}"`,
+		"-c", `model_providers.p3d.wire_api="responses"`, "-c", "model_providers.p3d.requires_openai_auth=true", "-c", "model_providers.p3d.supports_websockets=false"}
+	if r.e.Cfg.CodexModel != "" {
+		codexArgs = append(codexArgs, "-c", `model="`+r.e.Cfg.CodexModel+`"`)
+	}
+	cfg := ShimConfig{RealClaude: r.e.Cfg.RealClaude, RealCodex: r.e.Cfg.RealCodex, CodexArgs: codexArgs, Profile: profile, ControlSocket: filepath.Join(r.ctlDir, "ctl.sock"), ExtraEnv: env,
 		ClaudeArgs: []string{"--strict-mcp-config", "--disallowedTools=RemoteTrigger,SendMessage,ListAgents,WebFetch,WebSearch"},
 		LaunchLog:  filepath.Join(r.ctlDir, "launches.jsonl"),
 		Sandbox: SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: r.e.Cfg.AOSrc, PrivateCtl: r.ctlDir, ToolsRO: r.e.Cfg.ToolsRO,
@@ -231,7 +249,7 @@ func (r *positionRig) startDaemon(ctx context.Context, arm Arm) error {
 		"TMPDIR=" + r.tmp + "/",
 		"PATH=" + filepath.Join(r.ctlDir, "bin") + ":" + filepath.Dir(r.e.Cfg.AOBinary) + ":/opt/homebrew/bin:/usr/local/bin:/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin",
 		"AO_DATA_DIR=" + r.dataDir, "AO_RUN_FILE=" + r.runFile, "AO_TRUSTED_LOCAL_MODE=on", "AO_AUTH_MODE=trusted_local",
-		"AO_TMUX_SOCKET=" + r.socket, "AO_MEMORY_EXTERNAL=off", "AO_3DP_SHIM_CONFIG=" + filepath.Join(r.ctlDir, "shim.json"),
+		"AO_TMUX_SOCKET=" + r.socket, "AO_MEMORY_EXTERNAL=off", "AO_MEMORY_ROLES=worker", "CODEX_HOME=" + filepath.Join(r.home, "codex-home"), "AO_3DP_SHIM_CONFIG=" + filepath.Join(r.ctlDir, "shim.json"),
 		"DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "ENABLE_CLAUDEAI_MCP_SERVERS=0", "GOTOOLCHAIN=local"}
 	if arm == ArmAssisted {
 		env = append(env, "AO_MEMORY_MODE=assisted")
@@ -330,6 +348,13 @@ func (r *positionRig) startTaskRun(ctx context.Context, spec TaskSpec) error {
 	// Memory relevance keywords from the prompt, so a random id would make
 	// the ASSISTED attachment differ between positions of the same task.
 	r.project = "practical-" + strings.ToLower(spec.TaskID)
+	// The frozen harness per role: Claude Code workers, a Codex reviewer
+	// (AO's cross-provider review independence), Claude decision resolvers.
+	policy := map[string]any{"policy": map[string]any{"autonomousMode": false, "plannerPriority": []string{}, "workerPriority": []string{"legacy-claude-code"},
+		"reviewerPriority": []string{"legacy-codex"}, "decisionResolverPriority": []string{"legacy-claude-code"}, "fallbackBehavior": "use_next_available", "reviewIndependence": "require_different_provider"}}
+	if _, err := r.api(ctx, http.MethodPut, "/execution-policy", policy, 30*time.Second); err != nil {
+		return err
+	}
 	if _, err := r.api(ctx, http.MethodPost, "/projects", map[string]string{"path": r.work, "projectId": r.project}, 60*time.Second); err != nil {
 		return err
 	}
@@ -444,6 +469,12 @@ func (e *AORealExecutor) Execute(ctx context.Context, pc PositionContext, c *Obs
 	if err != nil {
 		return res, err
 	}
+	if e.Cfg.OpenAIUpstream != "" {
+		if proxy.OpenAI, err = url.Parse(e.Cfg.OpenAIUpstream); err != nil {
+			return res, err
+		}
+	}
+	proxy.AccountRefs = e.Cfg.AccountRefs
 	if r.proxyPort, err = proxy.Start(filepath.Join(r.ctlDir, "ctl.sock")); err != nil {
 		return res, err
 	}
@@ -586,6 +617,9 @@ func checkNoUnobservedProviderCalls(ctx context.Context, dataDir, runID string, 
 		events = append(events, x)
 	}
 	for _, x := range events {
+		if x.harness == "codex" {
+			continue // cumulative-delta rows: checked by totals below
+		}
 		if x.harness != "claude-code" {
 			return fmt.Errorf("AO recorded %s usage the Practical boundary cannot observe", x.harness)
 		}
@@ -601,7 +635,36 @@ func checkNoUnobservedProviderCalls(ctx context.Context, dataDir, runID string, 
 	if len(events) == 0 {
 		return errors.New("AO recorded no provider usage for the run")
 	}
-	return nil
+	return checkCodexTotals(ctx, db, runID, proxy)
+}
+
+// checkCodexTotals: AO meters Codex from cumulative token_count deltas, not
+// per-response ids, so the join is by totals per subject: every input token
+// AO recorded for a Codex subject must have crossed the proxy.
+func checkCodexTotals(ctx context.Context, db *sql.DB, runID string, proxy []ProxyObservation) error {
+	rows, err := db.QueryContext(ctx, `SELECT b.subject_kind || ':' || b.subject_id, COALESCE(SUM(e.input_tokens), 0)
+		FROM model_usage_events e JOIN usage_bindings b ON b.id = e.binding_id
+		WHERE b.harness = 'codex' AND b.subject_kind || char(31) || b.subject_id IN (SELECT subject_kind || char(31) || session_id FROM usage_attribution_windows WHERE workflow_run_id = ?)
+		GROUP BY 1`, runID)
+	if err != nil {
+		return fmt.Errorf("read codex usage: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	observed := map[string]int64{}
+	for _, p := range proxy {
+		observed[p.Subject] += p.InputTokens
+	}
+	for rows.Next() {
+		var subject string
+		var total int64
+		if err := rows.Scan(&subject, &total); err != nil {
+			return err
+		}
+		if total > observed[subject] {
+			return fmt.Errorf("AO recorded %d Codex input tokens for %s but only %d crossed the proxy", total, subject, observed[subject])
+		}
+	}
+	return rows.Err()
 }
 
 // checkRunContext verifies AO's own record of the run's context sources and
