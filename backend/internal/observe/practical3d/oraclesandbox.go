@@ -65,7 +65,7 @@ func stageOracle(o RealOracle, task, wantHidden string) (*oracleStage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(s.script, raw, 0o500); err != nil {
+	if err := os.WriteFile(s.script, raw, 0o400); err != nil { // run as a bash argument
 		return nil, err
 	}
 	entries, err := os.ReadDir(filepath.Join(o.HiddenDir, task))
@@ -81,7 +81,8 @@ func stageOracle(o RealOracle, task, wantHidden string) (*oracleStage, error) {
 			return nil, err
 		}
 	}
-	return s, s.verify(o.Manifest, task, wantHidden)
+	err = s.verify(o.Manifest, task, wantHidden)
+	return s, err
 }
 
 // verify checks the staged bytes against the frozen Q4 oracle.

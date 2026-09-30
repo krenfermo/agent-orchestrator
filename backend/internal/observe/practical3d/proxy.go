@@ -77,6 +77,7 @@ type ProviderProxy struct {
 	tokens       map[string]string // token -> subject
 	observations []ProxyObservation
 	results      map[string]bool // tool_use id -> is_error, as first sent to the provider
+	conv         map[string]*convState
 	ln, ctl      net.Listener
 	srv, ctlSrv  *http.Server
 	rejected     []string
@@ -152,7 +153,6 @@ func (p *ProviderProxy) Unbind() {
 	p.tokens = map[string]string{}
 }
 
-// Observations returns the tool/message inventory seen in responses.
 // ToolResults returns the tool results clients sent to the provider (tool_use
 // id -> is_error): the wire's account of whether a tool call succeeded, which
 // the agent cannot rewrite after the fact (its transcript it can).
@@ -166,10 +166,107 @@ func (p *ProviderProxy) ToolResults() map[string]bool {
 	return out
 }
 
+// Observations returns the tool/message inventory seen in responses.
 func (p *ProviderProxy) Observations() []ProxyObservation {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]ProxyObservation(nil), p.observations...)
+}
+
+// convState is a subject's committed primary-model conversation: the turns
+// of its last successful request (without trailing system turns) and the
+// tool ids that request's response issued.
+type convState struct {
+	core    []string
+	toolIDs []string
+}
+
+// coreOf is a request's turn digests without its trailing system turns
+// (Claude Code replaces its trailing reminder on every request).
+func coreOf(turns []convTurn) []string {
+	n := len(turns)
+	for n > 0 && turns[n-1].role == "system" {
+		n--
+	}
+	out := make([]string, n)
+	for i := range out {
+		out[i] = turns[i].digest
+	}
+	return out
+}
+
+// checkLinear enforces that a subject's primary-model conversation is one
+// linear history the client extends by exactly the provider's last response:
+// the committed turns are a byte-exact prefix, the new suffix's assistant
+// turn issues exactly the tool ids the provider returned, and tool results
+// answer only those. A side request the agent crafts on its tokenized proxy
+// URL either fails this or breaks it for the client's next real request.
+func (p *ProviderProxy) checkLinear(subject string, class CallClass, turns []convTurn) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.conv[subject]
+	if class == CallInitial || class == CallHelper {
+		return nil
+	}
+	if st == nil {
+		return fmt.Errorf("%s request with no committed conversation", class)
+	}
+	if len(turns) < len(st.core) {
+		return errors.New("request drops committed conversation turns")
+	}
+	for i, d := range st.core {
+		if turns[i].digest != d {
+			return fmt.Errorf("request rewrites committed conversation turn %d", i)
+		}
+	}
+	if class == CallRetry {
+		return nil
+	}
+	issued := map[string]bool{}
+	for _, id := range st.toolIDs {
+		issued[id] = true
+	}
+	assistant, uses := 0, map[string]bool{}
+	for _, t := range turns[len(st.core):] {
+		if t.role == "assistant" {
+			assistant++
+			for _, id := range t.toolUses {
+				uses[id] = true
+			}
+		}
+		for _, id := range t.toolResults {
+			if !issued[id] {
+				return fmt.Errorf("tool result %s answers no tool call the provider issued", id)
+			}
+		}
+	}
+	if assistant == 0 {
+		return errors.New("request does not extend the conversation by the provider's response")
+	}
+	if len(uses) != len(issued) {
+		return errors.New("request's assistant turn differs from the provider's response")
+	}
+	for id := range uses {
+		if !issued[id] {
+			return fmt.Errorf("assistant turn carries tool call %s the provider never issued", id)
+		}
+	}
+	return nil
+}
+
+// commitLinear records a successful primary-model request as the subject's
+// conversation.
+func (p *ProviderProxy) commitLinear(subject string, turns []convTurn, toolUses []ProxyToolUse) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.conv == nil {
+		p.conv = map[string]*convState{}
+	}
+	st := &convState{core: coreOf(turns)}
+	for _, tu := range toolUses {
+		st.toolIDs = append(st.toolIDs, tu.ID)
+	}
+	p.conv[subject] = st
 }
 
 // recordResults keeps the first outcome the wire reported for each tool call;
@@ -301,11 +398,18 @@ func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
 		p.reject(w, c, http.StatusInternalServerError, "evidence store: "+err.Error())
 		return
 	}
+	baseClass := parsed.baseClass(c.m, c.p.TaskID, role)
+	// An exact replay (retry) of a failed request passes against the same
+	// committed conversation, since a failed attempt commits nothing.
+	if err := p.checkLinear(subject, baseClass, parsed.turns); err != nil {
+		p.reject(w, c, http.StatusForbidden, "conversation is not the client's linear history: "+err.Error())
+		return
+	}
 	if err := p.recordResults(parsed.results); err != nil {
 		p.reject(w, c, http.StatusForbidden, err.Error())
 		return
 	}
-	attempt, err := c.BeginHTTPAttempt(HTTPAttemptRequest{Subject: subject, Role: role, BaseClass: parsed.baseClass(c.m, c.p.TaskID, role), Model: parsed.model, Stream: parsed.stream, ToolNames: parsed.tools, Body: body})
+	attempt, err := c.BeginHTTPAttempt(HTTPAttemptRequest{Subject: subject, Role: role, BaseClass: baseClass, Model: parsed.model, Stream: parsed.stream, ToolNames: parsed.tools, Body: body})
 	if err != nil {
 		p.reject(w, nil, http.StatusServiceUnavailable, err.Error())
 		return
@@ -317,6 +421,9 @@ func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
 	res.Expired = errors.Is(attemptCtx.Err(), context.DeadlineExceeded)
 	cancel()
 	_ = attempt.Finish(res) // failures/malformations are recorded by the client
+	if res.Outcome == OutcomeSuccess && baseClass != CallHelper {
+		p.commitLinear(subject, parsed.turns, obs.ToolUses)
+	}
 	obs.CallIndex, obs.Subject, obs.Role, obs.At = attempt.base.CallIndex, subject, attempt.base.Role, p.now()
 	if res.InputTokens != nil {
 		obs.InputTokens = *res.InputTokens
@@ -437,6 +544,39 @@ type messagesRequest struct {
 	Tools    []struct {
 		Name string `json:"name"`
 	} `json:"tools"`
+}
+
+// turns digests every message and records the tool ids it issues/answers.
+func (m messagesRequest) turns() []convTurn {
+	out := make([]convTurn, 0, len(m.Messages))
+	for _, raw := range m.Messages {
+		var msg struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		_ = json.Unmarshal(raw, &msg)
+		t := convTurn{role: msg.Role, digest: turnDigest(raw)}
+		if t.role != "assistant" && t.role != "system" {
+			t.role = "user"
+		}
+		var blocks []struct {
+			Type      string `json:"type"`
+			ID        string `json:"id"`
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if json.Unmarshal(msg.Content, &blocks) == nil {
+			for _, b := range blocks {
+				switch {
+				case b.Type == "tool_use" && b.ID != "":
+					t.toolUses = append(t.toolUses, b.ID)
+				case b.Type == "tool_result" && b.ToolUseID != "":
+					t.toolResults = append(t.toolResults, b.ToolUseID)
+				}
+			}
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // toolResults maps each tool_result block in the conversation to whether the
@@ -606,7 +746,8 @@ func (a *responseAccumulator) sseLine(line []byte) {
 	}
 	switch ev.Type {
 	case "message_start":
-		if a.starts++; a.starts > 1 {
+		a.starts++
+		if a.starts > 1 {
 			a.conflict = true
 		}
 		if ev.Message != nil {

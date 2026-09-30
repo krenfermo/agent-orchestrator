@@ -36,6 +36,28 @@ type parsedRequest struct {
 	// results are the tool_result blocks the request carries back to the
 	// provider: tool_use id -> is_error.
 	results map[string]bool
+	// turns is the conversation the request carries, in order.
+	turns []convTurn
+}
+
+// turnDigest identifies a turn by its canonical JSON, so a client that
+// re-serializes an unchanged turn (key order, spacing) still extends its
+// history.
+func turnDigest(raw json.RawMessage) string {
+	if c, err := canonicalRaw(raw, anyDecimals); err == nil {
+		return sha256Hex(c)
+	}
+	return sha256Hex(raw)
+}
+
+// convTurn is one conversation element: its role class (user, assistant,
+// system), a digest of its exact bytes, and the tool ids it issues
+// (assistant) or answers (user).
+type convTurn struct {
+	role        string
+	digest      string
+	toolUses    []string
+	toolResults []string
 }
 
 // protocolFor maps a request path to its protocol; nil means not inference.
@@ -75,7 +97,7 @@ func (anthropicProtocol) parse(body []byte) (parsedRequest, error) {
 	if err := json.Unmarshal(body, &r); err != nil || r.Model == "" {
 		return parsedRequest{}, errors.New("not a Messages API request")
 	}
-	return parsedRequest{model: r.Model, stream: r.Stream, tools: r.toolNames(), baseClass: r.baseClass, results: r.toolResults()}, nil
+	return parsedRequest{model: r.Model, stream: r.Stream, tools: r.toolNames(), baseClass: r.baseClass, results: r.toolResults(), turns: r.turns()}, nil
 }
 
 func (anthropicProtocol) accumulator() streamAccumulator { return newResponseAccumulator() }
@@ -123,7 +145,7 @@ func (openaiProtocol) parse(body []byte) (parsedRequest, error) {
 		tools = append(tools, name)
 	}
 	sort.Strings(tools)
-	return parsedRequest{model: r.Model, stream: r.Stream, tools: tools, baseClass: r.baseClass}, nil
+	return parsedRequest{model: r.Model, stream: r.Stream, tools: tools, baseClass: r.baseClass, turns: r.turns()}, nil
 }
 
 // baseClass for Responses (proxy rules v1): a model other than the role's
@@ -155,6 +177,36 @@ func (r responsesRequest) baseClass(m Manifest, task string, role Role) CallClas
 		return CallToolResult
 	}
 	return CallContinuation
+}
+
+// turns maps Responses input items onto conversation turns: model-side items
+// (assistant messages, reasoning, *_call) are assistant turns issuing their
+// call ids; *_call_output items answer them; developer/system items are
+// system turns.
+func (r responsesRequest) turns() []convTurn {
+	out := make([]convTurn, 0, len(r.Input))
+	for _, raw := range r.Input {
+		var item struct {
+			Type   string `json:"type"`
+			Role   string `json:"role"`
+			CallID string `json:"call_id"`
+			ID     string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &item)
+		t := convTurn{role: "user", digest: turnDigest(raw)}
+		switch {
+		case strings.HasSuffix(item.Type, "_call_output"):
+			t.toolResults = []string{firstNonEmptyStr(item.CallID, item.ID)}
+		case strings.HasSuffix(item.Type, "_call"):
+			t.role, t.toolUses = "assistant", []string{firstNonEmptyStr(item.CallID, item.ID)}
+		case item.Role == "assistant" || item.Type == "reasoning":
+			t.role = "assistant"
+		case item.Role == "developer" || item.Role == "system":
+			t.role = "system"
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 func (openaiProtocol) accumulator() streamAccumulator { return &responsesAccumulator{} }

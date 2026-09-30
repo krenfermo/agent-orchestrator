@@ -173,6 +173,14 @@ func ExtractAttachment(prompt, packDigest string) (string, error) {
 // attachment of the (task, worker, initial) cell.
 func (e *AORealExecutor) CalibrateInitial(ctx context.Context, m Manifest, tasks []string, dir string) error {
 	fx := FixtureConfig{Repo: e.Cfg.FixtureRepo, Commit: m.FixtureCommit}
+	// Every real execution: agents can read the working copy's full Git
+	// history, so no hidden test may exist anywhere in it.
+	if e.Cfg.OracleDir == "" {
+		return errors.New("real executor has no oracle directory (needed for the fixture history check and the sandbox)")
+	}
+	if err := CheckFixtureHistory(ctx, e.Cfg.FixtureRepo, filepath.Join(e.Cfg.OracleDir, "hidden")); err != nil {
+		return err
+	}
 	for _, task := range tasks {
 		spec, err := e.spec(m, task)
 		if err != nil {

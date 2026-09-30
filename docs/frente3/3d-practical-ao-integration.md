@@ -190,6 +190,25 @@ The driver never declares M3.
   - M3's file count comes from file tools only, because 3C gives Bash rows
     no path. That is 3C's frozen M3 definition, identical in both arms,
     not a falsification path.
+- **Linear conversation per subject (R7).** Claude Code passes its
+  environment, including the tokenized proxy URL, to its tools, so an agent
+  can reach the proxy itself. The proxy therefore holds each subject's
+  committed primary-model conversation and requires each later request to
+  meet three conditions:
+  - the committed turns (without trailing system reminders) are a
+    canonical-JSON exact prefix;
+  - the new suffix has an assistant turn issuing exactly the tool ids the
+    provider returned last;
+  - its tool results answer only those ids.
+
+  A fabricated conversation is refused. A side request that extends the
+  real history is accepted, but then the client's next real request no
+  longer extends it, and the position is malformed. Replaying the real
+  traffic of runs 7 and 10 (16 requests) gives 0 violations. The
+  fixture-history guard now also runs in the executor's preflight, not only
+  in the mini command. Residual: it detects exact hidden-test blobs, not
+  edited earlier variants; the fixture's authoring rule (FIXTURE.md: hidden
+  tests never in the repo) covers that case.
 - **Oracle.** The Q4 oracle directory is denied to agents wherever the
   operator keeps it.
 - **Daemon gateway.** AO's API also serves Project Memory (items,

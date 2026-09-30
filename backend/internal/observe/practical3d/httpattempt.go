@@ -279,7 +279,7 @@ func traceHTTPRequest(m Manifest, spans map[string][][]byte, task string, arm Ar
 		// ...in the conversation's opening (AO's initial prompt), before any
 		// assistant turn: a copy moved into a later message or tool result
 		// is agent-authored, not AO's attachment.
-		if first := assistantTurn.FindIndex(req.Body); first != nil && bytes.Index(req.Body, body[0]) > first[0] {
+		if first := assistantTurn.FindIndex(req.Body); len(first) > 0 && bytes.Index(req.Body, body[0]) > first[0] {
 			return treatmentTrace{}, errors.New("ASSISTED attachment appears after the first assistant turn")
 		}
 		// Every Project Memory marker must belong to a copy of the frozen
