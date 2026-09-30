@@ -162,12 +162,11 @@ func BuildRealMiniManifest(in RealMiniInputs) (Manifest, map[string][]byte, erro
 			for _, class := range classes {
 				model := in.PrimaryModel
 				assisted := TreatmentArm{AttachmentPresent: &present, AttachmentSHA256: attDigest, AttachmentArtifactRef: in.AttachmentRef, AttachmentVersion: "ao-project-memory-pack:" + in.PackDigest, ProvenanceSchemaVersion: "ao.project-memory.provenance.v1", ConstructionVersion: "projectmemory.provision.v1", RenderVersion: "projectmemory.render.v1", IndexedCommit: in.IndexedCommit, SourceManifestSHA256: in.FixtureSubtree, FreshnessInputsSHA256: sha256Hex([]byte(in.IndexedCommit)), Origin: "PROJECT_MEMORY"}
-				if class == CallHelper {
-					model = in.PrimaryModel
-					if in.HelperModel != "" {
-						model = in.HelperModel
-					}
-					assisted = TreatmentArm{AttachmentPresent: &absent}
+				if class == CallHelper && in.HelperModel != "" {
+					// Claude Code's helper model is called with the user's
+					// prompt, so in ASSISTED it carries the attachment too
+					// (observed in the real mini-E2E).
+					model = in.HelperModel
 				}
 				m.TreatmentMapping = append(m.TreatmentMapping, TreatmentCell{TaskID: task, Role: f.Role, CallClass: class, OFF: TreatmentArm{AttachmentPresent: &absent}, ASSISTED: assisted})
 				raw, sum := cfgFor(model)

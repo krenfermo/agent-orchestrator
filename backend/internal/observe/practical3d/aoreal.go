@@ -168,6 +168,10 @@ func (e *AORealExecutor) newRig(w PositionWorkspace) (*positionRig, error) {
 	if err := os.WriteFile(filepath.Join(r.home, ".claude.json"), []byte(`{"hasCompletedOnboarding":true,"officialMarketplaceAutoInstallAttempted":true}`), 0o600); err != nil {
 		return nil, err
 	}
+	// Same neutral commit identity in every position (a fresh HOME has none).
+	if err := os.WriteFile(filepath.Join(r.home, ".gitconfig"), []byte("[user]\n\tname = practical\n\temail = practical@example.invalid\n[commit]\n\tgpgsign = false\n"), 0o600); err != nil {
+		return nil, err
+	}
 	if r.daemonPort, err = freePort(); err != nil {
 		return nil, err
 	}
