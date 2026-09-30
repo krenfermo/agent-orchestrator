@@ -58,6 +58,7 @@ type m3Source struct {
 	id                                  int64
 	root, kind, subagent, nativeSession string
 	byteOffset                          int64
+	harness                             string // claude-code or codex
 }
 
 type m3Obs struct {
@@ -126,6 +127,9 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 			continue
 		}
 		for _, s := range sources {
+			if s.harness != "claude-code" {
+				continue // Codex rows carry no message key; they bind by call id
+			}
 			keyed[usage.ClaudeMessageEventKey(s.root, domain.UsageSourceKind(s.kind), s.subagent, s.nativeSession, p.MessageID)] = p
 		}
 	}
@@ -150,25 +154,52 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 		}
 		for idx, tu := range p.ToolUses {
 			for _, s := range sources {
-				wire[usage.ClaudeToolObservationKey(s.root, domain.UsageSourceKind(s.kind), s.subagent, s.nativeSession, tu.ID)] = wireTool{p, tu, idx}
+				key := usage.ClaudeToolObservationKey(s.root, domain.UsageSourceKind(s.kind), s.subagent, s.nativeSession, tu.ID)
+				if s.harness == "codex" {
+					key = usage.CodexToolObservationKey(s.root, s.nativeSession, tu.ID)
+				}
+				wire[key] = wireTool{p, tu, idx}
 			}
 		}
 	}
+	harnessOf := map[int64]string{}
+	for _, s := range sources {
+		harnessOf[s.id] = s.harness
+	}
 	seen := map[string]bool{}
 	for i := range obs {
-		p, ok := keyed[obs[i].eventKey]
-		if !ok {
-			return ev, fmt.Errorf("tool observation %d of %s has no proxy-observed message (forged or unobserved)", i, ev.Subject)
-		}
+		codex := harnessOf[obs[i].source] == "codex"
 		w, ok := wire[obs[i].obsKey]
-		if !ok || w.p.MessageID != p.MessageID {
-			return ev, fmt.Errorf("tool observation %d of %s is not a tool_use the provider returned in that message (forged)", i, ev.Subject)
+		if !ok {
+			return ev, fmt.Errorf("tool observation %d of %s is not a tool call the provider returned (forged or unobserved)", i, ev.Subject)
+		}
+		p := w.p
+		if !codex {
+			// Claude rows also name their message: it must be the one the
+			// provider returned the tool_use in.
+			mp, ok := keyed[obs[i].eventKey]
+			if !ok {
+				return ev, fmt.Errorf("tool observation %d of %s has no proxy-observed message (forged or unobserved)", i, ev.Subject)
+			}
+			if w.p.MessageID != mp.MessageID {
+				return ev, fmt.Errorf("tool observation %d of %s is not a tool_use the provider returned in that message (forged)", i, ev.Subject)
+			}
 		}
 		if seen[obs[i].obsKey] {
 			return ev, fmt.Errorf("tool observation %d of %s duplicates a tool_use", i, ev.Subject)
 		}
 		seen[obs[i].obsKey] = true
-		if want := usage.ClaudeToolOp(w.tu.Name, w.tu.Command); obs[i].op != want || (observedToolNames[w.tu.Name] && obs[i].tool != w.tu.Name) {
+		want := usage.ClaudeToolOp(w.tu.Name, w.tu.Command)
+		if codex {
+			// A Codex call whose command neither side can read (code-mode
+			// JavaScript `exec`) hides what it explored: M3 is not
+			// observable, and is never reported as zero exploration.
+			if w.tu.Command == "" && w.tu.Name == "exec" {
+				return ev, fmt.Errorf("tool observation %d of %s: Codex code-mode call %s is opaque to 3C; M3 not observable", i, ev.Subject, w.tu.ID)
+			}
+			want = usage.CodexToolOp(w.tu.Name, w.tu.Command)
+		}
+		if obs[i].op != want || (!codex && observedToolNames[w.tu.Name] && obs[i].tool != w.tu.Name) {
 			return ev, fmt.Errorf("tool observation %d of %s: 3C %s/%s differs from the provider's %s/%s", i, ev.Subject, obs[i].tool, obs[i].op, w.tu.Name, want)
 		}
 		if !targetMatches(w.tu.Target, obs[i].scope, obs[i].path, in.ProjectRoots) {
@@ -180,8 +211,12 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 		obs[i].resultOK = known && !isErr
 	}
 	// Every tool_use the proxy saw for the measured role must be observed.
+	codexSubject := false
+	for _, s := range sources {
+		codexSubject = codexSubject || s.harness == "codex"
+	}
 	for key, w := range wire {
-		if w.p.Role == in.MeasuredRole && observedToolNames[w.tu.Name] && !seen[key] {
+		if w.p.Role == in.MeasuredRole && (codexSubject || observedToolNames[w.tu.Name]) && !seen[key] {
 			// A key is computed per source; only the source that carries
 			// the message must hold it.
 			carried := false
@@ -228,7 +263,7 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 		}
 		ev.Milestone = fmt.Sprintf("verdict_submission@call_%d", call)
 		for _, o := range obs {
-			if o.call < call || (o.call == call && o.tool != "Bash") {
+			if o.call < call || (o.call == call && !shellTools[o.tool]) {
 				before = append(before, o)
 			}
 		}
@@ -361,7 +396,7 @@ func isReviewSubmit(command string) bool {
 
 // shellTools are the tool names under which the harnesses run commands
 // (Claude Code's Bash; Codex's function tools).
-var shellTools = map[string]bool{"Bash": true, "exec_command": true, "shell": true, "local_shell": true, "container.exec": true}
+var shellTools = map[string]bool{"Bash": true, "exec_command": true, "shell": true, "local_shell": true, "container.exec": true, "exec": true}
 
 func m3Sources(ctx context.Context, db *sql.DB, kind, subject string) ([]m3Source, error) {
 	rows, err := db.QueryContext(ctx, `SELECT s.id, b.native_root_id, s.kind, s.subagent_id, s.native_session_id, s.byte_offset, b.harness,
@@ -381,9 +416,10 @@ func m3Sources(ctx context.Context, db *sql.DB, kind, subject string) ([]m3Sourc
 		if err := rows.Scan(&s.id, &s.root, &s.kind, &s.subagent, &s.nativeSession, &s.byteOffset, &harness, &from, &to, &minX, &maxX, &pre); err != nil {
 			return nil, err
 		}
-		if harness != "claude-code" {
-			return nil, fmt.Errorf("source %d harness %q is not claude-code", s.id, harness)
+		if harness != "claude-code" && harness != "codex" {
+			return nil, fmt.Errorf("source %d harness %q has no Practical M3 binding", s.id, harness)
 		}
+		s.harness = harness
 		if from < 0 || pre != 0 || to < s.byteOffset || minX != maxX || minX == 0 {
 			return nil, fmt.Errorf("3C coverage of source %d is incomplete (from=%d to=%d offset=%d pre=%d extractors=%d..%d)", s.id, from, to, s.byteOffset, pre, minX, maxX)
 		}

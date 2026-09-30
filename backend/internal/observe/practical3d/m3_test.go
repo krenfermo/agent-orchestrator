@@ -379,7 +379,7 @@ func TestM3RejectsForgedOrMissingObservations(t *testing.T) {
 		if _, err := f.db.Exec(`INSERT INTO agent_tool_observations (binding_id, usage_source_id, observation_key, event_key, ordinal, observed_at, origin, op, tool_name, path_scope, path, recorded_at) VALUES (?, ?, 'forged', ?, 1, ?, 'agent_exploration', 'read', 'Read', 'project', 'x.go', ?)`, f.binding, f.source, key, time.Unix(1000, 0).UTC(), time.Unix(1000, 0).UTC()); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.derive(RoleWorker); err == nil || !strings.Contains(err.Error(), "no proxy-observed message") {
+		if _, err := f.derive(RoleWorker); err == nil || !strings.Contains(err.Error(), "forged") {
 			t.Fatalf("err=%v", err)
 		}
 	})
@@ -431,4 +431,91 @@ func TestIsReviewSubmit(t *testing.T) {
 			t.Errorf("isReviewSubmit(%q)=%v", cmd, got)
 		}
 	}
+}
+
+// Reviewer M3 for Codex (task C): 3C rows are bound to the provider's call
+// ids, ops recomputed with 3C's Codex rule, ordered by the proxy, and the
+// milestone is a recorded verdict submission.
+func newCodexM3Fixture(t *testing.T) *m3Fixture {
+	t.Helper()
+	f := newM3Fixture(t, "reviewer")
+	for _, q := range []string{
+		`UPDATE usage_bindings SET harness = 'codex'`,
+		`UPDATE usage_sources SET kind = 'codex_rollout'`,
+	} {
+		if _, err := f.db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	return f
+}
+
+func (f *m3Fixture) codexCall(t *testing.T, call int, name, command, op string, skip3C bool) {
+	t.Helper()
+	id := fmt.Sprintf("call_%d", call)
+	f.proxy = append(f.proxy, ProxyObservation{CallIndex: call, Subject: "runtime_pane:" + f.subjectID, Role: RoleReviewer, MessageID: fmt.Sprintf("resp_%d", call), ToolUses: []ProxyToolUse{{ID: id, Name: name, Command: command}}})
+	if skip3C {
+		return
+	}
+	f.ordinal += 10
+	if _, err := f.db.Exec(`INSERT INTO agent_tool_observations (binding_id, usage_source_id, observation_key, event_key, ordinal, observed_at, origin, op, tool_name, path_scope, recorded_at) VALUES (?, ?, ?, '', ?, ?, 'agent_exploration', ?, ?, 'none', ?)`,
+		f.binding, f.source, usage.CodexToolObservationKey(m3Root, m3Session, id), f.ordinal, time.Unix(1000, 0).UTC(), op, name, time.Unix(1000, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestM3CodexReviewer(t *testing.T) {
+	t.Parallel()
+	submit := `printf '%s' '{"reviews":[]}' | ao review submit --session practical-c-1 --reviews -`
+	t.Run("exploration before the recorded verdict", func(t *testing.T) {
+		f := newCodexM3Fixture(t)
+		f.codexCall(t, 1, "exec_command", "rg -n discount internal", "command_explore", false)
+		f.codexCall(t, 2, "exec_command", "cat internal/orders/pricing.go", "command_explore", false)
+		f.codexCall(t, 3, "exec_command", submit, "command", false)
+		f.codexCall(t, 4, "exec_command", "cat late.go", "command_explore", false)
+		f.verdict(t)
+		ev, err := f.derive(RoleReviewer)
+		if err != nil || ev.Milestone != "verdict_submission@call_3" || ev.Calls != 2 {
+			t.Fatalf("ev=%+v err=%v", ev, err)
+		}
+	})
+	t.Run("row the provider never issued", func(t *testing.T) {
+		f := newCodexM3Fixture(t)
+		f.codexCall(t, 1, "exec_command", submit, "command", false)
+		f.verdict(t)
+		if _, err := f.db.Exec(`INSERT INTO agent_tool_observations (binding_id, usage_source_id, observation_key, event_key, ordinal, observed_at, origin, op, tool_name, path_scope, recorded_at) VALUES (?, ?, ?, '', 1, ?, 'agent_exploration', 'command_explore', 'exec_command', 'none', ?)`,
+			f.binding, f.source, usage.CodexToolObservationKey(m3Root, m3Session, "call_forged"), time.Unix(1000, 0).UTC(), time.Unix(1000, 0).UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.derive(RoleReviewer); err == nil || !strings.Contains(err.Error(), "forged") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("call 3C never observed", func(t *testing.T) {
+		f := newCodexM3Fixture(t)
+		f.codexCall(t, 1, "exec_command", "rg -n x .", "command_explore", true)
+		f.codexCall(t, 2, "exec_command", submit, "command", false)
+		f.verdict(t)
+		if _, err := f.derive(RoleReviewer); err == nil || !strings.Contains(err.Error(), "never observed") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("op differs from 3C's rule", func(t *testing.T) {
+		f := newCodexM3Fixture(t)
+		f.codexCall(t, 1, "exec_command", "rg -n x .", "command_edit", false)
+		f.codexCall(t, 2, "exec_command", submit, "command", false)
+		f.verdict(t)
+		if _, err := f.derive(RoleReviewer); err == nil || !strings.Contains(err.Error(), "differs from the provider") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("code-mode exec is not observable", func(t *testing.T) {
+		f := newCodexM3Fixture(t)
+		f.codexCall(t, 1, "exec", "", "command", false)
+		f.codexCall(t, 2, "exec_command", submit, "command", false)
+		f.verdict(t)
+		if _, err := f.derive(RoleReviewer); err == nil || !strings.Contains(err.Error(), "not observable") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
