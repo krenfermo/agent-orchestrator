@@ -22,7 +22,7 @@ func TestResponsesAccumulatorAccountingAndTools(t *testing.T) {
 		t.Fatalf("result=%+v", res)
 	}
 	tools := a.toolUses()
-	if a.id() != "resp_1" || len(tools) != 2 || tools[0].Command != "bash -lc ao review submit --verdict approve" || tools[1].Name != "local_shell" {
+	if a.id() != "resp_1" || len(tools) != 2 || tools[0].Command != "ao review submit --verdict approve" || tools[1].Name != "local_shell" {
 		t.Fatalf("id=%s tools=%+v", a.id(), tools)
 	}
 }

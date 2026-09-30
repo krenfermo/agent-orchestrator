@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 	"net/http"
 	"sort"
 	"strings"
@@ -286,18 +287,17 @@ func (a *responsesAccumulator) addItem(it *responsesItem) {
 	switch it.Type {
 	case "function_call":
 		tu := ProxyToolUse{ID: firstNonEmptyStr(it.CallID, it.ID), Name: it.Name}
-		var args struct {
-			Command any `json:"command"`
-			Cmd     any `json:"cmd"`
-		}
-		if json.Unmarshal([]byte(it.Arguments), &args) == nil {
-			tu.Command = commandText(firstNonNil(args.Command, args.Cmd))
+		// 3C's own extraction, so both sides classify the same command.
+		if cmd, ok := usage.CodexCallCommand(it.Arguments, nil); ok {
+			tu.Command = cmd
 		}
 		a.tools = append(a.tools, tu)
 	case "local_shell_call":
 		tu := ProxyToolUse{ID: firstNonEmptyStr(it.CallID, it.ID), Name: "local_shell"}
 		if it.Action != nil {
-			tu.Command = strings.Join(it.Action.Command, " ")
+			if cmd, ok := usage.CodexCallCommand("", it.Action.Command); ok {
+				tu.Command = cmd
+			}
 		}
 		a.tools = append(a.tools, tu)
 	}
@@ -417,31 +417,6 @@ func firstNonEmptyStr(vs ...string) string {
 		if v != "" {
 			return v
 		}
-	}
-	return ""
-}
-
-func firstNonNil(vs ...any) any {
-	for _, v := range vs {
-		if v != nil {
-			return v
-		}
-	}
-	return nil
-}
-
-func commandText(v any) string {
-	switch x := v.(type) {
-	case string:
-		return x
-	case []any:
-		parts := make([]string, 0, len(x))
-		for _, p := range x {
-			if s, ok := p.(string); ok {
-				parts = append(parts, s)
-			}
-		}
-		return strings.Join(parts, " ")
 	}
 	return ""
 }

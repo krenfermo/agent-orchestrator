@@ -732,6 +732,23 @@ func observeClaudeRecord(
 	}
 }
 
+// CodexToolObservationKey is the observation key 3C records for one Codex
+// tool call, derived exactly as observeCodexResponseItem derives it from the
+// call id the provider issued.
+func CodexToolObservationKey(nativeRootID, nativeSessionID, callID string) string {
+	return codexObservationKey(domain.UsageSourceContext{NativeRootID: nativeRootID, Source: domain.UsageSourceRecord{NativeSessionID: nativeSessionID}}, "tool", callID)
+}
+
+// CodexToolOp is the op 3C derives for a Codex tool call from its function
+// name and (for shell tools) its command.
+func CodexToolOp(name, command string) domain.ToolOp {
+	op := opOfTool(name)
+	if op == domain.ToolOpCommand && command != "" {
+		op = commandOp(command)
+	}
+	return op
+}
+
 // codexObservationKey is the exactly-once identity of a Codex observation.
 func codexObservationKey(source domain.UsageSourceContext, kind string, parts ...string) string {
 	all := append([]string{source.NativeRootID, source.Source.NativeSessionID, kind}, parts...)
@@ -785,6 +802,24 @@ func codexCommandOf(p codexCallPayload) (string, bool) {
 		}
 	}
 	return rawString(args.Command), rawString(args.Command) != ""
+}
+
+// CodexCallCommand extracts a Codex tool call's command exactly as 3C does
+// (codexCommandOf), from the call's JSON-string arguments or a local shell
+// action, so an external observer of the provider's stream derives the same
+// command 3C classifies.
+func CodexCallCommand(arguments string, action []string) (string, bool) {
+	raw, err := json.Marshal(arguments)
+	if err != nil {
+		return "", false
+	}
+	p := codexCallPayload{Arguments: raw}
+	if len(action) > 0 {
+		p.Action = &struct {
+			Command []string `json:"command"`
+		}{Command: action}
+	}
+	return codexCommandOf(p)
 }
 
 // codexOutputBytes measures a Codex tool output: a string, or a list of
