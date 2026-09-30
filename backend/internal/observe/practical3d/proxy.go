@@ -372,14 +372,25 @@ func (m messagesRequest) toolNames() []string {
 
 // baseClass derives the call class from the request structure (proxy rules
 // v1): a model other than the role's frozen primary model is a `helper`
-// call; the first user turn is `initial`; a turn answering tool_use blocks is
+// call; a conversation with no assistant turn yet is `initial` (Claude Code
+// may send several user blocks before the first answer); a turn answering tool_use blocks is
 // `tool_result`; anything else continues the conversation. `retry` is decided
 // by the ObservedClient from replay of the previous request's bytes.
 func (m messagesRequest) baseClass(man Manifest, task string, role Role) CallClass {
 	if cfg, ok := invocationConfig(man, task, role, CallInitial); ok && m.Model != cfg.ModelID {
 		return CallHelper
 	}
-	if len(m.Messages) <= 1 {
+	assistant := false
+	for _, raw := range m.Messages {
+		var msg struct {
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(raw, &msg) == nil && msg.Role == "assistant" {
+			assistant = true
+			break
+		}
+	}
+	if !assistant {
 		return CallInitial
 	}
 	var last struct {

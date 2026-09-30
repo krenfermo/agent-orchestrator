@@ -99,7 +99,11 @@ func observeVersion(ctx context.Context, expected VersionInput, self string) (Ve
 	}
 	version := expected.Version
 	if expected.Component != "ao3dpractical" {
-		cmd := exec.CommandContext(ctx, path, "--version")
+		flag := "--version"
+		if expected.Component == "go" {
+			flag = "version"
+		}
+		cmd := exec.CommandContext(ctx, path, flag)
 		raw, err := cmd.CombinedOutput()
 		if err != nil {
 			return VersionInput{}, fmt.Errorf("%s --version: %w", expected.Component, err)

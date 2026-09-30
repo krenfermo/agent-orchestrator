@@ -58,6 +58,17 @@ func (g GitWorkspaceManager) Prepare(ctx context.Context, m Manifest, _ Position
 	if err != nil || strings.TrimSpace(string(head)) != m.FixtureCommit {
 		return fmt.Errorf("working copy HEAD does not match fixture commit")
 	}
+	if len(m.Tasks) > 0 {
+		subtree, err := FixtureSubtreeSHA256(ctx, w.WorkingCopy, m.FixtureCommit)
+		if err != nil {
+			return err
+		}
+		for _, t := range m.Tasks {
+			if t.FixtureSubtreeSHA256 != subtree {
+				return fmt.Errorf("fixture subtree digest of task %s differs from the working copy", t.TaskID)
+			}
+		}
+	}
 	status, err := gitOutput(ctx, w.WorkingCopy, "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
 	if err != nil {
 		return err
@@ -71,6 +82,17 @@ func (g GitWorkspaceManager) Prepare(ctx context.Context, m Manifest, _ Position
 // Finalize verifies local teardown.
 func (g GitWorkspaceManager) Finalize(ctx context.Context, _ Manifest, _ Position, w PositionWorkspace) error {
 	return VerifyNoPositionProcesses(ctx, w)
+}
+
+// FixtureSubtreeSHA256 is the deterministic digest of a fixture commit's
+// full tree: SHA-256 of `git ls-tree -r --full-tree <commit>` (every path,
+// mode and blob id). Two checkouts of the same commit always agree.
+func FixtureSubtreeSHA256(ctx context.Context, repo, commit string) (string, error) {
+	out, err := gitOutput(ctx, repo, "ls-tree", "-r", "--full-tree", commit)
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(out), nil
 }
 
 // VerifyNoPositionProcesses fails closed if any process other than the

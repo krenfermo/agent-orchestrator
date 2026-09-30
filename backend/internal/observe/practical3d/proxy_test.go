@@ -377,3 +377,25 @@ func TestProxyAssistedWithAttachmentIsTracedAsProjectMemory(t *testing.T) {
 		t.Fatalf("malformed=%q", m)
 	}
 }
+
+func TestBaseClassFromRequestStructure(t *testing.T) {
+	t.Parallel()
+	m, _ := claudeCodeManifest(t)
+	cls := func(body string) CallClass {
+		var r messagesRequest
+		if err := json.Unmarshal([]byte(body), &r); err != nil {
+			t.Fatal(err)
+		}
+		return r.baseClass(m, "A", RoleWorker)
+	}
+	for want, body := range map[CallClass]string{
+		CallInitial:      `{"model":"` + testPrimaryModel + `","messages":[{"role":"user","content":"reminder"},{"role":"user","content":"task"}]}`,
+		CallToolResult:   `{"model":"` + testPrimaryModel + `","messages":[{"role":"user","content":"t"},{"role":"assistant","content":"x"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"r"}]}]}`,
+		CallContinuation: `{"model":"` + testPrimaryModel + `","messages":[{"role":"user","content":"t"},{"role":"assistant","content":"x"},{"role":"user","content":"more"}]}`,
+		CallHelper:       `{"model":"` + testHelperModel + `","messages":[{"role":"user","content":"t"}]}`,
+	} {
+		if got := cls(body); got != want {
+			t.Errorf("want %s got %s", want, got)
+		}
+	}
+}

@@ -63,6 +63,8 @@ func run(args []string, out io.Writer) error {
 		return miniCommand(args[1:], out)
 	case "calibrate":
 		return calibrateCommand(args[1:], out)
+	case "mini-e2e-real":
+		return miniRealCommand(args[1:], out)
 	case "technical-driver":
 		return technicalDriver(args[1:], os.Stdin, out)
 	default:
