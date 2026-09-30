@@ -66,7 +66,8 @@ func (f *m3Fixture) message(t *testing.T, call int, role Role, tools ...m3Tool) 
 	key := usage.ClaudeMessageEventKey(m3Root, domain.UsageSourceClaudeMain, "", m3Session, msgID)
 	obs := ProxyObservation{CallIndex: call, Subject: "runtime_pane:" + f.subjectID, Role: role, MessageID: msgID}
 	for i, tl := range tools {
-		obs.ToolUses = append(obs.ToolUses, ProxyToolUse{ID: fmt.Sprintf("tu_%d_%d", call, i), Name: tl.name, Command: tl.command})
+		tuID := fmt.Sprintf("tu_%d_%d", call, i)
+		obs.ToolUses = append(obs.ToolUses, ProxyToolUse{ID: tuID, Name: tl.name, Command: tl.command, Target: tl.path})
 		if tl.skip3C {
 			continue
 		}
@@ -76,7 +77,7 @@ func (f *m3Fixture) message(t *testing.T, call int, role Role, tools ...m3Tool) 
 			path = tl.path
 		}
 		if _, err := f.db.Exec(`INSERT INTO agent_tool_observations (binding_id, usage_source_id, observation_key, event_key, ordinal, observed_at, origin, op, tool_name, path_scope, path, recorded_at) VALUES (?, ?, ?, ?, ?, ?, 'agent_exploration', ?, ?, ?, ?, ?)`,
-			f.binding, f.source, fmt.Sprintf("k%d-%d", call, i), key, f.ordinal, time.Unix(1000, 0).UTC(), tl.op, tl.name, tl.scope, path, time.Unix(1000, 0).UTC()); err != nil {
+			f.binding, f.source, usage.ClaudeToolObservationKey(m3Root, domain.UsageSourceClaudeMain, "", m3Session, tuID), key, f.ordinal, time.Unix(1000, 0).UTC(), tl.op, tl.name, tl.scope, path, time.Unix(1000, 0).UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -88,10 +89,13 @@ type m3Tool struct {
 	skip3C                         bool
 }
 
-func read(p string) m3Tool  { return m3Tool{name: "Read", op: "read", scope: "project", path: p} }
-func grep(p string) m3Tool  { return m3Tool{name: "Grep", op: "search", scope: "project", path: p} }
-func edit(p string) m3Tool  { return m3Tool{name: "Edit", op: "edit", scope: "project", path: p} }
-func bash(op string) m3Tool { return m3Tool{name: "Bash", op: op, scope: "none"} }
+func read(p string) m3Tool { return m3Tool{name: "Read", op: "read", scope: "project", path: p} }
+func grep(p string) m3Tool { return m3Tool{name: "Grep", op: "search", scope: "project", path: p} }
+func edit(p string) m3Tool { return m3Tool{name: "Edit", op: "edit", scope: "project", path: p} }
+func bash(op string) m3Tool {
+	command := map[string]string{"command_explore": "grep -rn Lock .", "command_edit": "tee out.txt", "command": "go test ./..."}[op]
+	return m3Tool{name: "Bash", op: op, scope: "none", command: command}
+}
 func submit() m3Tool {
 	return m3Tool{name: "Bash", op: "command", scope: "none", command: "ao review submit --verdict request_changes"}
 }
@@ -218,6 +222,26 @@ func TestM3MilestonesCannotBeFaked(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+	t.Run("an earlier submit --help is not the milestone", func(t *testing.T) {
+		f := newM3Fixture(t, "reviewer")
+		f.message(t, 1, RoleReviewer, m3Tool{name: "Bash", op: "command", scope: "none", command: "ao review submit --help"})
+		f.message(t, 2, RoleReviewer, read("diff.go"), read("pricing.go"))
+		f.message(t, 3, RoleReviewer, submit())
+		f.verdict(t)
+		ev, err := f.derive(RoleReviewer)
+		if err != nil || ev.Milestone != "verdict_submission@call_3" {
+			t.Fatalf("ev=%+v err=%v", ev, err)
+		}
+	})
+	t.Run("a submit without a recorded verdict next to a real one", func(t *testing.T) {
+		f := newM3Fixture(t, "reviewer")
+		f.message(t, 1, RoleReviewer, m3Tool{name: "Bash", op: "command", scope: "none", command: "ao review submit --verdict approve --bogus"})
+		f.message(t, 2, RoleReviewer, read("diff.go"), submit())
+		f.verdict(t)
+		if _, err := f.derive(RoleReviewer); err == nil || !strings.Contains(err.Error(), "recorded 1 verdicts") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 	t.Run("submit that never reached AO is not a verdict", func(t *testing.T) {
 		f := newM3Fixture(t, "reviewer")
 		f.message(t, 1, RoleReviewer, read("diff.go"), submit())
@@ -229,6 +253,46 @@ func TestM3MilestonesCannotBeFaked(t *testing.T) {
 
 func TestM3RejectsForgedOrMissingObservations(t *testing.T) {
 	t.Parallel()
+	insert := func(t *testing.T, f *m3Fixture, obsKey, op, tool, path string) {
+		t.Helper()
+		key := usage.ClaudeMessageEventKey(m3Root, domain.UsageSourceClaudeMain, "", m3Session, "msg_1")
+		if _, err := f.db.Exec(`INSERT INTO agent_tool_observations (binding_id, usage_source_id, observation_key, event_key, ordinal, observed_at, origin, op, tool_name, path_scope, path, recorded_at) VALUES (?, ?, ?, ?, 1, ?, 'agent_exploration', ?, ?, 'project', ?, ?)`, f.binding, f.source, obsKey, key, time.Unix(1000, 0).UTC(), op, tool, path, time.Unix(1000, 0).UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Codex review R2 (P1): the agent rewrites a proxy-keyed transcript
+	// message and adds a fabricated early Edit to it.
+	t.Run("extra tool block in a genuine message", func(t *testing.T) {
+		f := newM3Fixture(t, "worker")
+		f.message(t, 1, RoleWorker, read("a.go"))
+		f.message(t, 2, RoleWorker, read("b.go"), edit("a.go"))
+		insert(t, f, usage.ClaudeToolObservationKey(m3Root, domain.UsageSourceClaudeMain, "", m3Session, "tu_forged"), "edit", "Edit", "z.go")
+		if _, err := f.derive(RoleWorker); err == nil || !strings.Contains(err.Error(), "forged") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("genuine tool_use with a rewritten path", func(t *testing.T) {
+		f := newM3Fixture(t, "worker")
+		f.message(t, 1, RoleWorker, read("a.go"))
+		if _, err := f.db.Exec(`UPDATE agent_tool_observations SET path = 'other.go'`); err != nil {
+			t.Fatal(err)
+		}
+		f.message(t, 2, RoleWorker, edit("a.go"))
+		if _, err := f.derive(RoleWorker); err == nil || !strings.Contains(err.Error(), "not the provider's target") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("genuine tool_use with a rewritten op", func(t *testing.T) {
+		f := newM3Fixture(t, "worker")
+		f.message(t, 1, RoleWorker, read("a.go"))
+		if _, err := f.db.Exec(`UPDATE agent_tool_observations SET op = 'edit', tool_name = 'Edit'`); err != nil {
+			t.Fatal(err)
+		}
+		f.message(t, 2, RoleWorker, edit("a.go"))
+		if _, err := f.derive(RoleWorker); err == nil || !strings.Contains(err.Error(), "differs from the provider") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 	t.Run("observation the proxy never saw", func(t *testing.T) {
 		f := newM3Fixture(t, "worker")
 		f.message(t, 1, RoleWorker, edit("a.go"))
@@ -247,7 +311,7 @@ func TestM3RejectsForgedOrMissingObservations(t *testing.T) {
 		hidden.skip3C = true
 		f.message(t, 1, RoleWorker, hidden, read("a.go"))
 		f.message(t, 2, RoleWorker, edit("a.go"))
-		if _, err := f.derive(RoleWorker); err == nil || !strings.Contains(err.Error(), "proxy saw 2 Read") {
+		if _, err := f.derive(RoleWorker); err == nil || !strings.Contains(err.Error(), "3C never observed it") {
 			t.Fatalf("err=%v", err)
 		}
 	})

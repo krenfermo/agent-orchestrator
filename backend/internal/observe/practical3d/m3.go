@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -61,6 +62,7 @@ type m3Obs struct {
 	tool     string
 	scope    domain.ToolPathScope
 	path     string
+	obsKey   string
 	call     int
 }
 
@@ -124,32 +126,61 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 		return ev, err
 	}
 	ev.Observations = len(obs)
-	perMessage := map[string]map[string]int{}
+	// Every 3C row must be one tool_use block the provider actually returned
+	// (bound by its tool_use id), with the op 3C's own classifier derives
+	// from the provider's input and the path the provider named. Rows the
+	// agent adds or rewrites in its (agent-writable) transcript match none.
+	type wireTool struct {
+		p  ProxyObservation
+		tu ProxyToolUse
+	}
+	wire := map[string]wireTool{}
+	for _, p := range in.Proxy {
+		if p.Subject != ev.Subject {
+			continue
+		}
+		for _, tu := range p.ToolUses {
+			for _, s := range sources {
+				wire[usage.ClaudeToolObservationKey(s.root, domain.UsageSourceKind(s.kind), s.subagent, s.nativeSession, tu.ID)] = wireTool{p, tu}
+			}
+		}
+	}
+	seen := map[string]bool{}
 	for i := range obs {
 		p, ok := keyed[obs[i].eventKey]
 		if !ok {
 			return ev, fmt.Errorf("tool observation %d of %s has no proxy-observed message (forged or unobserved)", i, ev.Subject)
 		}
-		obs[i].call = p.CallIndex
-		if perMessage[obs[i].eventKey] == nil {
-			perMessage[obs[i].eventKey] = map[string]int{}
+		w, ok := wire[obs[i].obsKey]
+		if !ok || w.p.MessageID != p.MessageID {
+			return ev, fmt.Errorf("tool observation %d of %s is not a tool_use the provider returned in that message (forged)", i, ev.Subject)
 		}
-		perMessage[obs[i].eventKey][obs[i].tool]++
+		if seen[obs[i].obsKey] {
+			return ev, fmt.Errorf("tool observation %d of %s duplicates a tool_use", i, ev.Subject)
+		}
+		seen[obs[i].obsKey] = true
+		if want := usage.ClaudeToolOp(w.tu.Name, w.tu.Command); obs[i].op != want || (observedToolNames[w.tu.Name] && obs[i].tool != w.tu.Name) {
+			return ev, fmt.Errorf("tool observation %d of %s: 3C %s/%s differs from the provider's %s/%s", i, ev.Subject, obs[i].tool, obs[i].op, w.tu.Name, want)
+		}
+		if !targetMatches(w.tu.Target, obs[i].scope, obs[i].path) {
+			return ev, fmt.Errorf("tool observation %d of %s: 3C path %q is not the provider's target %q", i, ev.Subject, obs[i].path, w.tu.Target)
+		}
+		obs[i].call = p.CallIndex
 	}
 	// Every tool_use the proxy saw for the measured role must be observed.
-	for key, p := range keyed {
-		if p.Role != in.MeasuredRole {
-			continue
-		}
-		want := map[string]int{}
-		for _, tu := range p.ToolUses {
-			if observedToolNames[tu.Name] {
-				want[tu.Name]++
+	for key, w := range wire {
+		if w.p.Role == in.MeasuredRole && observedToolNames[w.tu.Name] && !seen[key] {
+			// A key is computed per source; only the source that carries
+			// the message must hold it.
+			carried := false
+			for k2, w2 := range wire {
+				if w2.tu.ID == w.tu.ID && seen[k2] {
+					carried = true
+					break
+				}
 			}
-		}
-		for name, c := range want {
-			if perMessage[key][name] != c {
-				return ev, fmt.Errorf("message at call %d: proxy saw %d %s tool uses, 3C observed %d", p.CallIndex, c, name, perMessage[key][name])
+			if !carried {
+				return ev, fmt.Errorf("message at call %d: proxy saw %s tool use %s, 3C never observed it", w.p.CallIndex, w.tu.Name, w.tu.ID)
 			}
 		}
 	}
@@ -165,7 +196,7 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 	var before []m3Obs
 	switch in.MeasuredRole {
 	case RoleReviewer:
-		call := verdictCall(in.Proxy, ev.Subject)
+		call, submits := verdictCall(in.Proxy, ev.Subject)
 		if call == 0 {
 			return ev, fmt.Errorf("reviewer structured verdict (ao review submit) was never observed")
 		}
@@ -177,6 +208,12 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 		}
 		if verdicts == 0 {
 			return ev, fmt.Errorf("AO recorded no review verdict for the reviewer's submission")
+		}
+		// Each submit invocation must be a verdict AO recorded: an earlier
+		// `ao review submit --help` (or a failed attempt) would otherwise
+		// become the milestone of a later real submission.
+		if submits != verdicts {
+			return ev, fmt.Errorf("reviewer ran %d ao review submit commands but AO recorded %d verdicts", submits, verdicts)
 		}
 		ev.Milestone = fmt.Sprintf("verdict_submission@call_%d", call)
 		for _, o := range obs {
@@ -215,27 +252,51 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 	return ev, nil
 }
 
-func verdictCall(proxy []ProxyObservation, subject string) int {
-	best := 0
+func verdictCall(proxy []ProxyObservation, subject string) (first, submits int) {
 	for _, p := range proxy {
 		if p.Subject != subject {
 			continue
 		}
 		for _, tu := range p.ToolUses {
-			if tu.Name == "Bash" && isReviewSubmit(tu.Command) && (best == 0 || p.CallIndex < best) {
-				best = p.CallIndex
+			if tu.Name == "Bash" && isReviewSubmit(tu.Command) {
+				submits++
+				if first == 0 || p.CallIndex < first {
+					first = p.CallIndex
+				}
 			}
 		}
 	}
-	return best
+	return first, submits
 }
 
 // isReviewSubmit reports whether a Bash command is an invocation of
 // `ao review submit` (optionally by path), not a command that merely
 // mentions it (echo, printf, grep, a comment...).
+// targetMatches reports whether a 3C project path is the provider's raw
+// target: the same relative path, or an absolute path ending in it. Paths
+// outside the project carry none in 3C and are not compared.
+func targetMatches(target string, scope domain.ToolPathScope, path string) bool {
+	if scope != domain.ToolPathProject || path == "" {
+		return true
+	}
+	t := filepath.ToSlash(filepath.Clean(strings.TrimSpace(target)))
+	if path == "." {
+		return strings.TrimSpace(target) == "" || filepath.IsAbs(target) || t == "."
+	}
+	return t == path || strings.HasSuffix(t, "/"+path)
+}
+
 func isReviewSubmit(command string) bool {
 	f := strings.Fields(strings.TrimSpace(command))
-	return len(f) >= 3 && (f[0] == "ao" || strings.HasSuffix(f[0], "/ao")) && f[1] == "review" && f[2] == "submit"
+	if len(f) < 3 || (f[0] != "ao" && !strings.HasSuffix(f[0], "/ao")) || f[1] != "review" || f[2] != "submit" {
+		return false
+	}
+	for _, a := range f[3:] {
+		if a == "--help" || a == "-h" || a == "help" {
+			return false
+		}
+	}
+	return true
 }
 
 func m3Sources(ctx context.Context, db *sql.DB, kind, subject string) ([]m3Source, error) {
@@ -271,7 +332,7 @@ func m3Sources(ctx context.Context, db *sql.DB, kind, subject string) ([]m3Sourc
 }
 
 func m3Observations(ctx context.Context, db *sql.DB, kind, subject, role, runID string) ([]m3Obs, error) {
-	rows, err := db.QueryContext(ctx, `SELECT a.usage_source_id, a.event_key, a.ordinal, a.op, a.tool_name, a.path_scope, COALESCE(a.path, '')
+	rows, err := db.QueryContext(ctx, `SELECT a.usage_source_id, a.event_key, a.ordinal, a.op, a.tool_name, a.path_scope, COALESCE(a.path, ''), a.observation_key
 		FROM agent_tool_observation_attribution a JOIN usage_attribution_windows w ON w.id = a.window_id
 		WHERE a.subject_kind = ? AND a.subject_id = ? AND w.role = ? AND w.workflow_run_id = ? AND a.origin = 'agent_exploration'
 		ORDER BY a.usage_source_id, a.ordinal`, kind, subject, role, runID)
@@ -284,7 +345,7 @@ func m3Observations(ctx context.Context, db *sql.DB, kind, subject, role, runID 
 		var o m3Obs
 		var src sql.NullInt64
 		var op, scope string
-		if err := rows.Scan(&src, &o.eventKey, &o.ordinal, &op, &o.tool, &scope, &o.path); err != nil {
+		if err := rows.Scan(&src, &o.eventKey, &o.ordinal, &op, &o.tool, &scope, &o.path, &o.obsKey); err != nil {
 			return nil, err
 		}
 		o.source, o.op, o.scope = src.Int64, domain.ToolOp(op), domain.ToolPathScope(scope)

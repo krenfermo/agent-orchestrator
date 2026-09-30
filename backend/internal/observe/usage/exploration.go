@@ -564,6 +564,27 @@ func toolTargetOf(name string, b claudeToolBlock) (raw string, defaultsToRoot, n
 	return "", false, false
 }
 
+// ClaudeToolObservationKey is the observation key 3C records for one Claude
+// tool_use block, derived exactly as observeClaudeRecord derives it. It lets
+// an external observer that saw the provider's tool_use id on the wire bind a
+// 3C row to that exact block.
+func ClaudeToolObservationKey(nativeRootID string, kind domain.UsageSourceKind, subagentID, nativeSessionID, toolUseID string) string {
+	return claudeObservationKey(domain.UsageSourceContext{
+		NativeRootID: nativeRootID,
+		Source:       domain.UsageSourceRecord{Kind: kind, SubagentID: subagentID, NativeSessionID: nativeSessionID},
+	}, "tool", toolUseID)
+}
+
+// ClaudeToolOp is the op 3C derives for a Claude tool_use block from its tool
+// name and, for Bash, its command.
+func ClaudeToolOp(name, command string) domain.ToolOp {
+	op := opOfTool(name)
+	if op == domain.ToolOpCommand && name == "Bash" {
+		op = commandOp(command)
+	}
+	return op
+}
+
 // claudeObservationKey is the exactly-once identity of a Claude observation.
 func claudeObservationKey(source domain.UsageSourceContext, kind, id string) string {
 	return stableSourceEventKey(

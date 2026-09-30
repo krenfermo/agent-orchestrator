@@ -50,6 +50,9 @@ type ProxyToolUse struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Command string `json:"command,omitempty"`
+	// Target is the raw file/notebook/search path of a file tool, as the
+	// provider returned it (3C's toolTargetOf fields).
+	Target string `json:"target,omitempty"`
 }
 
 // ProviderProxy is the AO-owned provider boundary for one position
@@ -591,12 +594,22 @@ func (a *responseAccumulator) toolUses() []ProxyToolUse {
 	for _, i := range a.order {
 		t := a.tools[i]
 		tu := ProxyToolUse{ID: t.id, Name: t.name}
-		if t.name == "Bash" {
-			var in struct {
-				Command string `json:"command"`
-			}
-			if json.Unmarshal([]byte(t.input.String()), &in) == nil {
+		var in struct {
+			Command      string `json:"command"`
+			FilePath     string `json:"file_path"`
+			NotebookPath string `json:"notebook_path"`
+			Path         string `json:"path"`
+		}
+		if json.Unmarshal([]byte(t.input.String()), &in) == nil {
+			switch t.name {
+			case "Bash":
 				tu.Command = in.Command
+			case "Read", "Edit", "MultiEdit", "Write":
+				tu.Target = in.FilePath
+			case "NotebookRead", "NotebookEdit":
+				tu.Target = in.NotebookPath
+			case "Grep", "Glob", "LS":
+				tu.Target = in.Path
 			}
 		}
 		out = append(out, tu)
