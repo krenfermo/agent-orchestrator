@@ -153,7 +153,16 @@ func miniRealCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	codexAccount, err := practical3d.CaptureCodexAccountRef(ctx, *realCodex, *openaiUpstream, *codexModel, base)
+	// The operator's credentials stay in this (supervisor) process; the
+	// proxy injects them into outgoing requests. Codex's account is
+	// attested from the credential itself.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	creds := &practical3d.OperatorCredentials{CodexAuthFile: filepath.Join(home, ".codex", "auth.json")}
+	cfg.Credentials = creds
+	codexAccount, err := creds.AccountRef("openai")
 	if err != nil {
 		return err
 	}

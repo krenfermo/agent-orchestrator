@@ -68,6 +68,10 @@ type ProviderProxy struct {
 	// canonical digest is the manifest's provider.account_ref_sha256.
 	AccountRefs map[string]string
 	HTTPClient  *http.Client
+	// Credentials injects the operator's provider credential into outgoing
+	// requests (supervisor side); nil forwards the client's headers as-is
+	// (fake-upstream tests only).
+	Credentials ProviderCredentials
 	Resolver    RoleResolver
 	EvidenceDir string
 	Now         func() time.Time
@@ -479,6 +483,17 @@ func (p *ProviderProxy) forward(ctx context.Context, w http.ResponseWriter, r *h
 		}
 	}
 	req.Header.Set("Accept-Encoding", "identity")
+	// The operator's credential is added here, on the outgoing request only;
+	// whatever the client sent (the agent's placeholder) is dropped.
+	injectedRef := ""
+	if p.Credentials != nil {
+		ref, err := p.Credentials.Inject(proto.name(), req.Header)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return HTTPAttemptResult{TransportError: "provider credential: " + err.Error()}, ProxyObservation{}
+		}
+		injectedRef = ref
+	}
 	resp, err := p.HTTPClient.Do(req)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
@@ -526,7 +541,9 @@ func (p *ProviderProxy) forward(ctx context.Context, w http.ResponseWriter, r *h
 	_ = p.store(captured.Bytes())
 	res := acc.result(resp.StatusCode, stream, readErr)
 	meta := map[string]any{"http_status": fmt.Sprint(resp.StatusCode), "request_id": firstHeader(resp.Header, "Request-Id", "X-Request-Id"), "response_sha256": sha256Hex(captured.Bytes()), "proxy_version": ProviderProxyVersion, "provider_protocol": proto.name()}
-	if ref := proto.accountRef(in, resp.Header); ref != "" {
+	if injectedRef != "" {
+		meta["account_ref_sha256"] = injectedRef
+	} else if ref := proto.accountRef(in, resp.Header); ref != "" {
 		meta["account_ref_sha256"] = ref
 	}
 	if len(p.AccountRefs) > 0 {

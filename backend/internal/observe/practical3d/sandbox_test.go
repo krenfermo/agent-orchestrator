@@ -110,11 +110,12 @@ func TestSandboxDeniesExperimentPrivatePaths(t *testing.T) {
 	if out, err := r.sh(t, "ln -s "+shellQuote(r.secret["ledger"])+" link && cat link"); err == nil || strings.Contains(out, "SECRET") {
 		t.Errorf("symlink escape allowed: %q", out)
 	}
-	// Codex's ChatGPT login is the one readable file of ~/.codex.
+	// Nothing of ~/.codex is readable, its login included: the proxy
+	// injects provider credentials.
 	if err := os.MkdirAll(filepath.Join(r.p.RealHome, ".codex"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for name, allowed := range map[string]bool{"auth.json": true, "history.jsonl": false} {
+	for name, allowed := range map[string]bool{"auth.json": false, "history.jsonl": false} {
 		p := filepath.Join(r.p.RealHome, ".codex", name)
 		if err := os.WriteFile(p, []byte("CODEX\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -252,5 +253,31 @@ func TestSandboxAgentCannotRunTheLaunchShim(t *testing.T) {
 	out, err := r.sh(t, "AO_USAGE_SUBJECT=session:worker-1 "+shellQuote(shim)+" -p hi")
 	if err == nil || strings.Contains(out, "SHIM_RAN") {
 		t.Fatalf("agent ran the launch shim: %v %q", err, out)
+	}
+}
+
+// The credential decision: agents cannot recover provider credentials. The
+// probes never print a credential: a successful read would only be counted.
+func TestSandboxAgentsCannotRecoverProviderCredentials(t *testing.T) {
+	r := newSandboxRig(t)
+	keychains := filepath.Join(r.p.RealHome, "Library", "Keychains")
+	if err := os.MkdirAll(keychains, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keychains, "login.keychain-db"), []byte("KEYCHAIN"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, script := range map[string]string{
+		"keychain file":       "cat " + shellQuote(filepath.Join(keychains, "login.keychain-db")),
+		"keychain CLI":        "/usr/bin/security find-generic-password -s 'Claude Code-credentials' -w 2>&1 | grep -c claudeAiOauth",
+		"copied keychain CLI": "cp /usr/bin/security \"$TMPDIR/sec\" && \"$TMPDIR/sec\" find-generic-password -s 'Claude Code-credentials' -w 2>&1 | grep -c claudeAiOauth",
+		"codex login":         "cat " + shellQuote(filepath.Join(r.p.RealHome, ".codex", "auth.json")),
+	} {
+		out, _ := r.sh(t, script)
+		out = strings.TrimSpace(out)
+		if strings.Contains(out, "KEYCHAIN") || strings.Contains(out, "CODEX") || (out != "" && out != "0" && !strings.Contains(out, "denied") && !strings.Contains(out, "not permitted") && !strings.Contains(out, "No such file")) {
+			// Report only the length: the output could be a credential.
+			t.Errorf("%s: agent obtained %d bytes of output", name, len(out))
+		}
 	}
 }

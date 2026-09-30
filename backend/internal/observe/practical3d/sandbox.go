@@ -59,10 +59,6 @@ const agentSandboxProfile = `(version 1)
 (deny file-read* file-write* (prefix (string-append (param "REAL_HOME") "/.claude.json")))
 (deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/.cache/claude")))
 (deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/.codex")))
-; Codex authenticates with the operator's ChatGPT login (read-only); with all
-; network but the proxy denied, every use of it is an observed attempt.
-(allow file-read* (literal (string-append (param "REAL_HOME") "/.codex/auth.json")))
-(allow file-read-metadata (literal (string-append (param "REAL_HOME") "/.codex")))
 (deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/Library/Caches/claude-cli-nodejs")))
 (deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/Library/Application Support/Claude")))
 
@@ -75,12 +71,17 @@ const agentSandboxProfile = `(version 1)
 (allow network-outbound (remote ip (string-append "localhost:" (param "DAEMON_PORT"))))
 (deny network-inbound (local ip "*:*"))
 
+; Provider credentials: agents hold only a placeholder key; the supervisor's
+; proxy injects the operator's credential into the outgoing request. The
+; credential stores are out of reach: ~/.codex (above), the keychain files,
+; the keychain CLI, and the keychain services any binary (even a copied
+; security CLI) would have to ask.
+(deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/Library/Keychains")))
+(deny process-exec (literal "/usr/bin/security"))
+(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd"))
+
 ; No escape by spawning outside the sandbox. (Re-sandboxing is allowed: a
 ; nested Seatbelt profile can only restrict further; Codex applies its own.)
-; (Claude Code
-; reads its OAuth credential through /usr/bin/security, so the keychain CLI
-; stays allowed; with every network destination but the proxy denied, any
-; use of that credential is still an observed provider attempt.)
 (deny process-exec (literal "/bin/launchctl") (literal "/usr/bin/open") (literal "/usr/bin/osascript")
                    (literal "/usr/bin/tmux") (literal "/opt/homebrew/bin/tmux")
                    (subpath "/opt/homebrew/Cellar/tmux") (subpath "/opt/homebrew/opt/tmux"))
@@ -229,6 +230,8 @@ func buildShimLaunch(harness string, cfg ShimConfig, args, environ []string, tok
 	}
 	forced := map[string]string{
 		"HOME": cfg.Sandbox.PosHome, "TMPDIR": cfg.Sandbox.PosTmp + "/", "ANTHROPIC_BASE_URL": base,
+		// Placeholders only: the proxy injects the operator's credential.
+		"ANTHROPIC_AUTH_TOKEN": PlaceholderKey, CodexKeyEnv: PlaceholderKey,
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1",
 		"DISABLE_ERROR_REPORTING": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "0", "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
 		"GOTOOLCHAIN": "local",
@@ -325,6 +328,10 @@ func ReadShimConfig(path string) (ShimConfig, error) {
 	err = strictUnmarshal(raw, &c)
 	return c, err
 }
+
+// CodexKeyEnv is the environment variable Codex's Practical provider reads
+// its (placeholder) API key from (model_providers.p3d.env_key).
+const CodexKeyEnv = "AO_3DP_PROVIDER_KEY"
 
 // ShimEnvConfig names the daemon-environment variable holding the shim
 // configuration path; the shim never passes it to an agent.

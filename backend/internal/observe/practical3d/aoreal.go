@@ -71,14 +71,17 @@ type AORealConfig struct {
 	AOSrc          string // AO source tree (denied to agents)
 	ToolsRO        string // read-only tools directory agents may exec from
 	OracleDir      string // Q4 oracle script and hidden tests (denied to agents)
-	Upstream       string // provider API origin, e.g. https://api.anthropic.com
-	FixtureRepo    string // git repository holding the frozen fixture commit
-	WebRoot        string // compiled (or placeholder) web assets for `ao server`
-	ModelEnv       map[string]string
-	DaemonTimeout  time.Duration
-	RunTimeout     time.Duration
-	SettleTimeout  time.Duration
-	Log            io.Writer
+	// Credentials injects the operator's provider credentials into proxied
+	// requests (supervisor side only). Required for real positions.
+	Credentials   ProviderCredentials
+	Upstream      string // provider API origin, e.g. https://api.anthropic.com
+	FixtureRepo   string // git repository holding the frozen fixture commit
+	WebRoot       string // compiled (or placeholder) web assets for `ao server`
+	ModelEnv      map[string]string
+	DaemonTimeout time.Duration
+	RunTimeout    time.Duration
+	SettleTimeout time.Duration
+	Log           io.Writer
 }
 
 // AORealExecutor runs one Practical position as a real AO task run: its own
@@ -174,19 +177,9 @@ func (e *AORealExecutor) newRig(w PositionWorkspace) (*positionRig, error) {
 			return nil, err
 		}
 	}
-	realHome, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	// Claude auth lives in the login keychain; the provider home is fresh.
-	if err := os.Symlink(filepath.Join(realHome, "Library", "Keychains"), filepath.Join(r.home, "Library", "Keychains")); err != nil && !os.IsExist(err) {
-		return nil, err
-	}
+	// Fresh provider homes with no credential in them: the proxy injects the
+	// operator's credential into outgoing requests (credentials.go).
 	if err := os.MkdirAll(filepath.Join(r.home, "codex-home"), 0o700); err != nil {
-		return nil, err
-	}
-	// Codex authenticates with the operator's ChatGPT login, linked read-only.
-	if err := os.Symlink(filepath.Join(realHome, ".codex", "auth.json"), filepath.Join(r.home, "codex-home", "auth.json")); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
 	if err := os.WriteFile(filepath.Join(r.home, ".claude.json"), []byte(`{"hasCompletedOnboarding":true,"officialMarketplaceAutoInstallAttempted":true}`), 0o600); err != nil {
@@ -242,7 +235,14 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 	// Agents (and their hooks) find the daemon only through the gateway.
 	env["AO_RUN_FILE"] = r.gwRunFile
 	codexArgs := []string{"-c", `model_provider="p3d"`, "-c", `model_providers.p3d.name="p3d"`, "-c", `model_providers.p3d.base_url="{BASE}"`,
-		"-c", `model_providers.p3d.wire_api="responses"`, "-c", "model_providers.p3d.requires_openai_auth=true", "-c", "model_providers.p3d.supports_websockets=false"}
+		"-c", `model_providers.p3d.wire_api="responses"`, "-c", "model_providers.p3d.supports_websockets=false",
+		// External auth: Codex sends a placeholder key and never needs the
+		// operator's ChatGPT login (nor its workspace-routing bootstrap);
+		// the proxy injects the credential.
+		"-c", "model_providers.p3d.requires_openai_auth=false", "-c", `model_providers.p3d.env_key="` + CodexKeyEnv + `"`,
+		// No model-upgrade dialog in a fresh CODEX_HOME (it would block the
+		// reviewer's TUI).
+		"-c", `notice.model_migrations={"gpt-5.6-sol"="gpt-6-sol"}`}
 	if r.e.Cfg.CodexModel != "" {
 		codexArgs = append(codexArgs, "-c", `model="`+r.e.Cfg.CodexModel+`"`)
 	}
@@ -494,6 +494,10 @@ func (e *AORealExecutor) Execute(ctx context.Context, pc PositionContext, c *Obs
 		}
 	}
 	proxy.AccountRefs = e.Cfg.AccountRefs
+	if e.Cfg.Credentials == nil {
+		return res, errors.New("real executor has no provider credential injector")
+	}
+	proxy.Credentials = e.Cfg.Credentials
 	if r.proxyPort, err = proxy.Start(filepath.Join(r.ctlDir, "ctl.sock")); err != nil {
 		return res, err
 	}
