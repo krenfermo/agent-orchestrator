@@ -194,3 +194,34 @@ func TestRunnerFailureAfterStartPublishesNOGO(t *testing.T) {
 		t.Fatalf("registry: %+v", entries)
 	}
 }
+
+func TestArtifactRootMayNotContainProduction(t *testing.T) {
+	t.Parallel()
+	home, _ := os.UserHomeDir()
+	for _, root := range []string{home, filepath.Join(home, ".ao"), "/"} {
+		if _, err := (DirArtifactResolver{Root: root}).ReadArtifact(".ao/data/ao.db"); err == nil {
+			t.Fatalf("artifact root %s (ancestor of production) accepted", root)
+		}
+	}
+}
+
+func TestDecideRunRequiresAnchoredResult(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.mini = 1
+	res, _ := f.mustRun(t)
+	reg := OpenRegistry(filepath.Dir(res.Root))
+	entries, _ := reg.Entries()
+	// Drop the RESULT line: an unanchored run must not be re-decidable.
+	raw, _ := os.ReadFile(reg.Path())
+	lines := bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n"))
+	if len(entries) != 2 {
+		t.Fatalf("entries=%d", len(entries))
+	}
+	if err := os.WriteFile(reg.Path(), append(lines[0], '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecideRun(res.Root, true, time.Now()); err == nil {
+		t.Fatal("run without an anchored RESULT decided")
+	}
+}

@@ -48,8 +48,14 @@ func (d DirArtifactResolver) readContained(path string) ([]byte, error) {
 	if err := RefuseProductionPath(root); err != nil {
 		return nil, err
 	}
+	if prod, err := productionDataDir(); err == nil && (within(prod, root) || within(resolveOrSelf(prod), root)) {
+		return nil, fmt.Errorf("%w: artifact root %s contains production AO data", ErrUnsafeRoot, root)
+	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := RefuseProductionPath(resolved); err != nil {
 		return nil, err
 	}
 	if !within(resolved, root) {
@@ -546,9 +552,8 @@ func (r *runner) decide() (RunResult, error) {
 	if err != nil {
 		return RunResult{Root: r.root}, err
 	}
-	if err := WriteReport(filepath.Join(r.root, "report.json"), report); err != nil {
-		return RunResult{Root: r.root}, err
-	}
+	// The report is published only after the ledger is sealed and its digest
+	// is durably anchored; a failure before that publishes NO_GO instead.
 	digest, err := sealLedger(path)
 	if err != nil {
 		return RunResult{Root: r.root}, err
@@ -556,6 +561,9 @@ func (r *runner) decide() (RunResult, error) {
 	kind := runKind(r.o)
 	if err := r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: kind, Timestamp: r.o.Now().UTC(), Verdict: report.Verdict, ReasonCode: report.ReasonCode, LedgerSHA256: digest}); err != nil {
 		return RunResult{Root: r.root}, err
+	}
+	if err := WriteReport(filepath.Join(r.root, "report.json"), report); err != nil {
+		return RunResult{Root: r.root, Report: report}, err
 	}
 	return RunResult{Root: r.root, Report: report}, nil
 }
@@ -573,10 +581,12 @@ func (r *runner) failAfterStart(cause error) (RunResult, error) {
 		report.ReasonCode = ReasonLineageInvalid
 	}
 	report.Reason = "runner failure after SAMPLE_START: " + cause.Error() + "; " + report.Reason
-	_ = WriteReport(filepath.Join(r.root, "report.json"), report)
-	digest, _ := sealLedger(path)
-	_ = r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: "RUNNER_FAILURE_AFTER_START", Timestamp: r.o.Now().UTC(), Verdict: "NO_GO", ReasonCode: report.ReasonCode, LedgerSHA256: digest})
-	return RunResult{Root: r.root, Report: report}, cause
+	digest, sealErr := sealLedger(path)
+	regErr := r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: "RUNNER_FAILURE_AFTER_START", Timestamp: r.o.Now().UTC(), Verdict: "NO_GO", ReasonCode: report.ReasonCode, LedgerSHA256: digest})
+	reportPath := filepath.Join(r.root, "report.json")
+	_ = os.Remove(reportPath) // never leave an earlier, unanchored report in place
+	repErr := WriteReport(reportPath, report)
+	return RunResult{Root: r.root, Report: report}, errors.Join(cause, sealErr, regErr, repErr)
 }
 
 // sealLedger makes the finished ledger read-only and returns its digest,

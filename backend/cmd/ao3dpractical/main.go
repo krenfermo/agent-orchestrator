@@ -242,15 +242,14 @@ func runCommand(args []string, out io.Writer) error {
 	if !attested["PATH"] {
 		return errors.New("PATH is passed to every driver, so it must be in the frozen environment allowlist")
 	}
+	// Provider-only names are derived from the frozen manifest, not from the
+	// flag: every allowlisted value frozen as a digest (secrets, account
+	// selectors) is withheld from the position driver.
+	providerOnly := digestedEnv(m)
 	for _, name := range providerEnv {
-		if !attested[name] {
-			return fmt.Errorf("--provider-env %s is not attested by the frozen environment allowlist", name)
+		if !providerOnly[name] {
+			return fmt.Errorf("--provider-env %s is not a digest-attested entry of the frozen environment allowlist", name)
 		}
-	}
-	// Provider-only names (credentials) never reach the position driver.
-	providerOnly := map[string]bool{}
-	for _, name := range providerEnv {
-		providerOnly[name] = true
 	}
 	var positionNames []string
 	for _, name := range allowlistedEnv(m) {
@@ -379,6 +378,22 @@ func allowlistedEnv(m practical3d.Manifest) []string {
 		names = append(names, c.Name)
 	}
 	return names
+}
+
+func digestedEnv(m practical3d.Manifest) map[string]bool {
+	out := map[string]bool{}
+	in := m.ExecutionEnvironment.Inputs
+	for _, c := range append(append([]practical3d.ConfigInput{}, in.EffectiveEnvironmentConfigAllowlist...), in.AdditionalLocalConfiguration...) {
+		if len(c.EffectiveValueOrSHA256) == 64 && strings.ToLower(c.EffectiveValueOrSHA256) == c.EffectiveValueOrSHA256 && isHexString(c.EffectiveValueOrSHA256) {
+			out[c.Name] = true
+		}
+	}
+	return out
+}
+
+func isHexString(s string) bool {
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 func withEnv(env, names []string) ([]string, error) {

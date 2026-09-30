@@ -253,29 +253,34 @@ func DecideRun(root string, allowExplicitTemp bool, now time.Time) (Report, erro
 	if err != nil {
 		return Report{}, err
 	}
-	registered, anchored := false, ""
+	registered, results, anchored := 0, 0, ""
 	for _, e := range entries {
-		if e.ExperimentID == env.ExperimentID && e.RunRoot == abs {
-			if e.Type == "REGISTERED" {
-				registered = true
+		if e.ExperimentID != env.ExperimentID {
+			continue
+		}
+		switch e.Type {
+		case "REGISTERED":
+			registered++
+			if e.RunRoot != abs {
+				return Report{}, fmt.Errorf("%w: experiment %s is registered for another run root", ErrUnsafeRoot, env.ExperimentID)
 			}
-			if e.Type == "RESULT" {
+		case "RESULT":
+			results++
+			if e.RunRoot == abs {
 				anchored = e.LedgerSHA256
 			}
 		}
 	}
-	if !registered {
-		return Report{}, fmt.Errorf("%w: run root %s is not registered for experiment %s", ErrUnsafeRoot, abs, env.ExperimentID)
+	if registered != 1 || results != 1 || !validSHA256(anchored) {
+		return Report{}, fmt.Errorf("%w: run root %s needs exactly one registration and one anchored RESULT for experiment %s", ErrUnsafeRoot, abs, env.ExperimentID)
 	}
 	path := filepath.Join(abs, "ledger.jsonl")
-	if anchored != "" {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return Report{}, err
-		}
-		if sha256Hex(raw) != anchored {
-			return Report{}, fmt.Errorf("%w: ledger digest differs from the registry anchor", ErrInvalidManifest)
-		}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Report{}, err
+	}
+	if sha256Hex(raw) != anchored {
+		return Report{}, fmt.Errorf("%w: ledger digest differs from the registry anchor", ErrInvalidManifest)
 	}
 	return EvaluateLedgerFile(m, path, now), nil
 }
