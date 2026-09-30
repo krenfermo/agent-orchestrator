@@ -198,6 +198,9 @@ func CheckFixtureHistory(ctx context.Context, repo, hiddenDir string) error {
 		return err
 	}
 	for _, t := range tasks {
+		if !t.IsDir() {
+			continue // notes next to the task directories
+		}
 		files, err := os.ReadDir(filepath.Join(hiddenDir, t.Name()))
 		if err != nil {
 			return err
