@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,8 @@ type cachedCredential struct {
 }
 
 const credentialRefresh = 60 * time.Second
+
+var keychainUser = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 func (o *OperatorCredentials) now() time.Time {
 	if o.Now != nil {
@@ -129,9 +132,13 @@ func (o *OperatorCredentials) readAnthropic() (cachedCredential, error) {
 	if user == "" {
 		user = os.Getenv("USER")
 	}
-	out, err := exec.Command("/usr/bin/security", "find-generic-password", "-s", "Claude Code-credentials", "-a", user, "-w").Output()
+	if !keychainUser.MatchString(user) {
+		return cachedCredential{}, errors.New("invalid keychain account name")
+	}
+	out, err := exec.Command("/usr/bin/security", "find-generic-password", "-s", "Claude Code-credentials", "-a", user, "-w").Output() //nolint:gosec // fixed binary and arguments; the account name is validated
+
 	if err != nil {
-		return cachedCredential{}, errors.New("Claude Code credential not found in the login keychain")
+		return cachedCredential{}, errors.New("claude code credential not found in the login keychain")
 	}
 	var c struct {
 		ClaudeAiOauth struct {
@@ -140,7 +147,7 @@ func (o *OperatorCredentials) readAnthropic() (cachedCredential, error) {
 		} `json:"claudeAiOauth"`
 	}
 	if json.Unmarshal(out, &c) != nil || c.ClaudeAiOauth.AccessToken == "" {
-		return cachedCredential{}, errors.New("Claude Code keychain item holds no OAuth access token")
+		return cachedCredential{}, errors.New("claude code keychain item holds no OAuth access token")
 	}
 	cc := cachedCredential{token: c.ClaudeAiOauth.AccessToken}
 	if c.ClaudeAiOauth.ExpiresAt > 0 {
@@ -152,7 +159,7 @@ func (o *OperatorCredentials) readAnthropic() (cachedCredential, error) {
 func (o *OperatorCredentials) readOpenAI() (cachedCredential, error) {
 	raw, err := os.ReadFile(o.CodexAuthFile)
 	if err != nil {
-		return cachedCredential{}, errors.New("Codex login not readable")
+		return cachedCredential{}, errors.New("codex login not readable")
 	}
 	var a struct {
 		Tokens struct {
@@ -161,7 +168,7 @@ func (o *OperatorCredentials) readOpenAI() (cachedCredential, error) {
 		} `json:"tokens"`
 	}
 	if json.Unmarshal(raw, &a) != nil || a.Tokens.AccessToken == "" || a.Tokens.AccountID == "" {
-		return cachedCredential{}, errors.New("Codex login holds no ChatGPT tokens")
+		return cachedCredential{}, errors.New("codex login holds no ChatGPT tokens")
 	}
 	return cachedCredential{token: a.Tokens.AccessToken, account: a.Tokens.AccountID}, nil
 }

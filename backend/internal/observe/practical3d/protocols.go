@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 )
 
 // providerProtocol is one model-inference wire protocol the proxy observes.

@@ -254,7 +254,8 @@ func runCommand(args []string, out io.Writer) error {
 	observer := practical3d.LiveEnvironmentObserver{Expected: m.ExecutionEnvironment.Inputs, AOBinaryPath: cfg.AOBinary}
 	opts := realRunnerOptions(m, rf, executor, observer, practical3d.DirArtifactResolver{Root: *artifacts}, *root, env.Metadata)
 	if *plan {
-		return printPlan(out, m, opts)
+		printPlan(out, m, opts)
+		return nil
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -277,13 +278,12 @@ func runCommand(args []string, out io.Writer) error {
 
 // printPlan shows the frozen schedule and the concrete executor, oracle and
 // workspace types the official run would use, without starting anything.
-func printPlan(out io.Writer, m practical3d.Manifest, opts practical3d.RunnerOptions) error {
+func printPlan(out io.Writer, m practical3d.Manifest, opts practical3d.RunnerOptions) {
 	_, _ = fmt.Fprintf(out, "executor=%T oracle=%T workspaces=%T transport=%T\n", opts.Executor, opts.Oracle, opts.Workspaces, opts.Transport)
 	for _, p := range m.Randomization.Schedule {
 		_, _ = fmt.Fprintf(out, "position %d task=%s arm=%s sample=%s\n", p.PositionIndex, p.TaskID, p.Arm, p.SampleID)
 	}
 	_, _ = fmt.Fprintf(out, "positions=%d (plan only: nothing started)\n", len(m.Randomization.Schedule))
-	return nil
 }
 
 func verifyListedBinary(path string, versions []practical3d.VersionInput) error {
