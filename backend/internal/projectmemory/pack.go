@@ -924,8 +924,9 @@ func matchesKeywords(item domain.ProjectMemoryItem, keywords []string) bool {
 //  4. **Scope proximity.** The narrower fact about the same subject.
 //  5. **A deterministic tie-break.** The section order, then the derived id.
 //
-// Every comparison falls through to the id, so no two orderings of the same
-// set are possible and a pack's digest is reproducible.
+// Every comparison falls through to the location-free key (type, scope,
+// subject) and then the id, so no two orderings of the same set are possible
+// and a pack's digest is reproducible -- also across clones of one commit.
 func sortSelected(items []SelectedItem, sectionRank map[domain.ProjectMemoryType]int) {
 	sort.SliceStable(items, func(i, j int) bool {
 		a, b := items[i], items[j]
@@ -940,10 +941,22 @@ func sortSelected(items []SelectedItem, sectionRank map[domain.ProjectMemoryType
 			return a.Item.Key.Scope.Specificity() > b.Item.Key.Scope.Specificity()
 		case sectionRank[a.Item.Key.Type] != sectionRank[b.Item.Key.Type]:
 			return sectionRank[a.Item.Key.Type] < sectionRank[b.Item.Key.Type]
+		case locationFreeKey(a.Item.Key) != locationFreeKey(b.Item.Key):
+			// The row id hashes the repo identity, which is derived from where
+			// the checkout lives; tie-breaking on it would order (and budget-cut)
+			// the same facts differently for two clones of the same commit.
+			return locationFreeKey(a.Item.Key) < locationFreeKey(b.Item.Key)
 		default:
 			return a.Item.ID < b.Item.ID
 		}
 	})
+}
+
+// locationFreeKey is a fact's identity without the project/repo identity
+// (which depends on where the checkout lives).
+func locationFreeKey(k domain.ProjectMemoryKey) string {
+	n := k.Normalized()
+	return string(n.Type) + "\x00" + string(n.Scope) + "\x00" + n.Key
 }
 
 // fit applies the budget.

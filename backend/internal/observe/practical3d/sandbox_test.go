@@ -39,15 +39,15 @@ func newSandboxRig(t *testing.T) *sandboxRig {
 		}
 	}
 	secret := map[string]string{
-		"ledger":        filepath.Join(run, "ledger.jsonl"),
-		"registry":      filepath.Join(aoHome, "scratch", "frente3", "registry.jsonl"),
-		"envelope":      filepath.Join(run, "envelope.json"),
-		"hidden Q4":     filepath.Join(aoHome, "scratch", "frente3", "3d", "hidden", "A", "lockout_oracle_test.go"),
+		"ledger":         filepath.Join(run, "ledger.jsonl"),
+		"registry":       filepath.Join(aoHome, "scratch", "frente3", "registry.jsonl"),
+		"envelope":       filepath.Join(run, "envelope.json"),
+		"hidden Q4":      filepath.Join(aoHome, "scratch", "frente3", "3d", "hidden", "A", "lockout_oracle_test.go"),
 		"other position": filepath.Join(other, "work", "result.txt"),
-		"own ao.db":     filepath.Join(pos, "ao-data", "ao.db"),
-		"production db": filepath.Join(aoHome, "data", "ao.db"),
-		"AO source":     filepath.Join(root, "aosrc", "docs", "3d-practical.md"),
-		"real claude":   filepath.Join(realHome, ".claude", "history.jsonl"),
+		"own ao.db":      filepath.Join(pos, "ao-data", "ao.db"),
+		"production db":  filepath.Join(aoHome, "data", "ao.db"),
+		"AO source":      filepath.Join(root, "aosrc", "docs", "3d-practical.md"),
+		"real claude":    filepath.Join(realHome, ".claude", "history.jsonl"),
 	}
 	for _, p := range secret {
 		if err := os.WriteFile(p, []byte("SECRET\n"), 0o600); err != nil {
@@ -68,7 +68,7 @@ func newSandboxRig(t *testing.T) *sandboxRig {
 	}
 	r := &sandboxRig{profile: profile, secret: secret, ctlSock: filepath.Join(ctlDir, "ctl.sock")}
 	r.p = SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: filepath.Join(root, "aosrc"), PrivateCtl: ctlDir, ToolsRO: filepath.Join(root, "tools"),
-		PosWork: filepath.Join(pos, "work"), PosWorktrees: filepath.Join(pos, "ao-data", "worktrees"), PosHome: filepath.Join(pos, "runtime-home"), PosTmp: filepath.Join(pos, "tmp"), PosRunFile: filepath.Join(pos, "ao-data", "running.json"),
+		PosWork: filepath.Join(pos, "work"), PosWorktrees: filepath.Join(pos, "ao-data", "worktrees"), PosHome: filepath.Join(pos, "runtime-home"), PosTmp: filepath.Join(pos, "tmp"), PosRunFile: filepath.Join(pos, "ao-data", "running.json"), PosPrompts: filepath.Join(pos, "ao-data", "prompts"),
 		ProxyPort: 1, DaemonPort: 2}
 	return r
 }
@@ -138,15 +138,21 @@ func TestSandboxNetworkOnlyReachesProxyAndDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = other.Close() }()
-	go func() { _ = http.Serve(allowed, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("PROXY-OK")) })) }()
-	go func() { _ = http.Serve(other, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("LEAK")) })) }()
+	go func() {
+		_ = http.Serve(allowed, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("PROXY-OK")) }))
+	}()
+	go func() {
+		_ = http.Serve(other, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("LEAK")) }))
+	}()
 	r.p.ProxyPort = allowed.Addr().(*net.TCPAddr).Port
 	ctl, err := net.Listen("unix", r.ctlSock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = ctl.Close() }()
-	go func() { _ = http.Serve(ctl, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("CTL-LEAK")) })) }()
+	go func() {
+		_ = http.Serve(ctl, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("CTL-LEAK")) }))
+	}()
 	if out, err := r.sh(t, fmt.Sprintf("curl -s --max-time 5 http://127.0.0.1:%d/", r.p.ProxyPort)); err != nil || !strings.Contains(out, "PROXY-OK") {
 		t.Fatalf("proxy unreachable: %v %q", err, out)
 	}
@@ -159,7 +165,7 @@ func TestSandboxNetworkOnlyReachesProxyAndDaemon(t *testing.T) {
 			t.Errorf("%s reachable: %q", name, out)
 		}
 	}
-	for _, bin := range []string{"/usr/bin/security", "/usr/bin/sandbox-exec", "/usr/bin/osascript", "/bin/launchctl"} {
+	for _, bin := range []string{"/usr/bin/sandbox-exec", "/usr/bin/osascript", "/bin/launchctl"} {
 		out, err := r.sh(t, bin+" help; echo rc=$?")
 		if err != nil || !strings.Contains(out, "rc=126") {
 			t.Errorf("exec %s not denied: %v %q", bin, err, out)

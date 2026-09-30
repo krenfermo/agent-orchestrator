@@ -28,6 +28,11 @@ import (
 )
 
 func main() {
+	// Invoked as `claude`/`codex` from a position daemon's PATH, this binary
+	// is the Practical launch shim (before any other processing).
+	if name := filepath.Base(os.Args[0]); name == "claude" || name == "codex" {
+		os.Exit(practical3d.RunShim(name, os.Args[1:], os.Stderr, syscall.Exec))
+	}
 	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "ao3dpractical:", err)
 		os.Exit(1)
@@ -56,6 +61,8 @@ func run(args []string, out io.Writer) error {
 		return decideCommand(args[1:], out)
 	case "mini-e2e":
 		return miniCommand(args[1:], out)
+	case "calibrate":
+		return calibrateCommand(args[1:], out)
 	case "technical-driver":
 		return technicalDriver(args[1:], os.Stdin, out)
 	default:

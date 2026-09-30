@@ -62,7 +62,9 @@ type staticRole struct {
 	err  error
 }
 
-func (s staticRole) ResolveRole(context.Context, string, time.Time) (Role, error) { return s.role, s.err }
+func (s staticRole) ResolveRole(context.Context, string, time.Time) (Role, error) {
+	return s.role, s.err
+}
 
 type proxyRig struct {
 	m        Manifest

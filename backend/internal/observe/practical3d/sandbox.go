@@ -39,6 +39,7 @@ const agentSandboxProfile = `(version 1)
 (allow file-read* file-write* (subpath (param "POS_HOME")))
 (allow file-read* file-write* (subpath (param "POS_TMP")))
 (allow file-read* (literal (param "POS_RUN_FILE")))
+(allow file-read* (subpath (param "POS_PROMPTS")))
 (allow file-read* (subpath (param "TOOLS_RO")))
 
 ; AO source trees (they document the experiment) and the supervisor's
@@ -63,10 +64,12 @@ const agentSandboxProfile = `(version 1)
 (allow network-outbound (remote ip (string-append "localhost:" (param "DAEMON_PORT"))))
 (deny network-inbound (local ip "*:*"))
 
-; No escape by spawning outside the sandbox, reading secrets through the
-; keychain CLI, or re-sandboxing.
+; No escape by spawning outside the sandbox or re-sandboxing. (Claude Code
+; reads its OAuth credential through /usr/bin/security, so the keychain CLI
+; stays allowed; with every network destination but the proxy denied, any
+; use of that credential is still an observed provider attempt.)
 (deny process-exec (literal "/bin/launchctl") (literal "/usr/bin/open") (literal "/usr/bin/osascript")
-                   (literal "/usr/bin/security") (literal "/usr/bin/sandbox-exec")
+                   (literal "/usr/bin/sandbox-exec")
                    (literal "/usr/bin/tmux") (literal "/opt/homebrew/bin/tmux")
                    (subpath "/opt/homebrew/Cellar/tmux") (subpath "/opt/homebrew/opt/tmux"))
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))
@@ -75,14 +78,14 @@ const agentSandboxProfile = `(version 1)
 // SandboxParams are the concrete paths/ports of one position.
 type SandboxParams struct {
 	AOHome, RealHome, AOSrc, PrivateCtl, ToolsRO                   string
-	PosWork, PosWorktrees, PosHome, PosTmp, PosRunFile             string
+	PosWork, PosWorktrees, PosHome, PosTmp, PosRunFile, PosPrompts string
 	ProxyPort, DaemonPort                                          int
 }
 
 func (p SandboxParams) args() ([]string, error) {
 	vals := map[string]string{
 		"AO_HOME": p.AOHome, "REAL_HOME": p.RealHome, "AO_SRC": p.AOSrc, "PRIVATE_CTL": p.PrivateCtl, "TOOLS_RO": p.ToolsRO,
-		"POS_WORK": p.PosWork, "POS_WORKTREES": p.PosWorktrees, "POS_HOME": p.PosHome, "POS_TMP": p.PosTmp, "POS_RUN_FILE": p.PosRunFile,
+		"POS_WORK": p.PosWork, "POS_WORKTREES": p.PosWorktrees, "POS_HOME": p.PosHome, "POS_TMP": p.PosTmp, "POS_RUN_FILE": p.PosRunFile, "POS_PROMPTS": p.PosPrompts,
 		"PROXY_PORT": fmt.Sprint(p.ProxyPort), "DAEMON_PORT": fmt.Sprint(p.DaemonPort),
 	}
 	keys := make([]string, 0, len(vals))
@@ -126,13 +129,16 @@ func WriteSandboxProfile(dir string) (string, error) {
 // ShimConfig is the trusted launch configuration the daemon's `claude` shim
 // reads (before confinement) from the supervisor's private directory.
 type ShimConfig struct {
-	RealClaude     string            `json:"real_claude"`
-	Profile        string            `json:"profile"`
-	Sandbox        SandboxParams     `json:"sandbox"`
-	ControlSocket  string            `json:"control_socket"`
-	ExtraEnv       map[string]string `json:"extra_env"`
-	ClaudeArgs     []string          `json:"claude_args"`
-	LaunchLog      string            `json:"launch_log"`
+	RealClaude    string            `json:"real_claude"`
+	Profile       string            `json:"profile"`
+	Sandbox       SandboxParams     `json:"sandbox"`
+	ControlSocket string            `json:"control_socket"`
+	ExtraEnv      map[string]string `json:"extra_env"`
+	ClaudeArgs    []string          `json:"claude_args"`
+	LaunchLog     string            `json:"launch_log"`
+	// Capture, when set, makes every model-calling launch record its argv
+	// there and exit without contacting any provider (calibration).
+	Capture string `json:"capture,omitempty"`
 }
 
 // shimKeepEnv are the only inherited variables an agent receives (plus AO_*
@@ -264,4 +270,70 @@ func ReadShimConfig(path string) (ShimConfig, error) {
 		return c, err
 	}
 	return c, strictUnmarshal(raw, &c)
+}
+
+// ShimEnvConfig names the daemon-environment variable holding the shim
+// configuration path; the shim never passes it to an agent.
+const ShimEnvConfig = "AO_3DP_SHIM_CONFIG"
+
+// ShimCapture is one captured launch (calibration only).
+type ShimCapture struct {
+	Subject string   `json:"subject"`
+	Args    []string `json:"args"`
+}
+
+// RunShim is the entry point when the harness binary is invoked as `claude`
+// or `codex` from a position daemon's PATH. Codex is not part of
+// 3D-PRACTICAL and always fails. A Claude launch is confined and pointed at
+// the position proxy, or captured in calibration mode. It returns an exit
+// status only on failure; on success the process is replaced.
+func RunShim(name string, args []string, stderr io.Writer, execFn func(string, []string, []string) error) int {
+	if name != "claude" {
+		_, _ = fmt.Fprintf(stderr, "3d-practical: %s is not an allowed agent harness\n", name)
+		return 1
+	}
+	cfg, err := ReadShimConfig(os.Getenv(ShimEnvConfig))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "3d-practical shim: %v\n", err)
+		return 1
+	}
+	session := len(args) == 0 || !nonSessionClaudeArgs[args[0]]
+	subject, _ := ShimSubject(os.Getenv)
+	appendLaunch(cfg.LaunchLog, subject, args)
+	if cfg.Capture != "" && session {
+		if err := os.MkdirAll(cfg.Capture, 0o700); err == nil {
+			raw, _ := json.Marshal(ShimCapture{Subject: subject, Args: args})
+			_ = writeExclusive(filepath.Join(cfg.Capture, fmt.Sprintf("%d-%d.json", time.Now().UnixNano(), os.Getpid())), raw)
+		}
+		return 0
+	}
+	argv, env, err := BuildShimLaunch(cfg, args, os.Environ(), func(subject string) (string, error) {
+		return RequestProxyToken(cfg.ControlSocket, subject)
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "3d-practical shim: %v\n", err)
+		return 1
+	}
+	if err := execFn(argv[0], argv, env); err != nil {
+		_, _ = fmt.Fprintf(stderr, "3d-practical shim: exec: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func appendLaunch(path, subject string, args []string) {
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	first := ""
+	if len(args) > 0 {
+		first = args[0]
+	}
+	raw, _ := json.Marshal(map[string]any{"subject": subject, "first_arg": first, "argc": len(args), "at": time.Now().UTC()})
+	_, _ = f.Write(append(raw, '\n'))
 }

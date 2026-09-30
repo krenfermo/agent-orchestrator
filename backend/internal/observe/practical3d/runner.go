@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -194,7 +195,7 @@ func Run(ctx context.Context, m Manifest, o RunnerOptions) (RunResult, error) {
 	if o.Sleep == nil {
 		o.Sleep = sleepContext
 	}
-	if !o.allowTechnicalFullRun && o.MiniE2E != (m.Provider.ProviderID == TechnicalFixtureProviderID) {
+	if !o.allowTechnicalFullRun && o.MiniE2E != IsTechnicalManifest(m) {
 		return RunResult{}, fmt.Errorf("%w: mini-E2E runs only technical-fixture manifests and official runs never do", ErrPrestartInvalid)
 	}
 	abs, err := ValidateRunRoot(o.Root, o.AllowExplicitTemp)
@@ -279,6 +280,24 @@ func (r *runner) preflight(ctx context.Context) error {
 // preflightRepresentations validates the final representation of every
 // initial treatment cell in both arms before the batch (3d-practical §3).
 func (r *runner) preflightRepresentations(ctx context.Context) error {
+	if cal, ok := r.o.Executor.(initialCalibrator); ok {
+		tasks := map[string]bool{}
+		for i, p := range r.m.Randomization.Schedule {
+			if !r.o.MiniE2E || i < r.o.MiniPositions {
+				tasks[p.TaskID] = true
+			}
+		}
+		var list []string
+		for _, t := range taskOrder {
+			if tasks[t] {
+				list = append(list, t)
+			}
+		}
+		if err := cal.CalibrateInitial(ctx, r.m, list, filepath.Join(r.root, "calibration")); err != nil {
+			return fmt.Errorf("%w: initial-cell calibration: %w", ErrPrestartInvalid, err)
+		}
+		return nil
+	}
 	reps, err := r.o.Executor.Preflight(ctx, r.m)
 	if err != nil {
 		return fmt.Errorf("%w: executor preflight: %w", ErrPrestartInvalid, err)
@@ -627,6 +646,13 @@ func registryFor(runRoot string) (Registry, error) {
 		return OpenRegistry(scratch), nil
 	}
 	return OpenRegistry(filepath.Dir(runRoot)), nil
+}
+
+// IsTechnicalManifest reports whether a manifest is a technical one (the
+// in-process fixture, or a real-AO mini-E2E whose client id is marked
+// technical). Official runs refuse them; mini-E2E runs require them.
+func IsTechnicalManifest(m Manifest) bool {
+	return m.Provider.ProviderID == TechnicalFixtureProviderID || strings.HasPrefix(m.Provider.ClientID, "technical-")
 }
 
 func runKind(o RunnerOptions) string {
