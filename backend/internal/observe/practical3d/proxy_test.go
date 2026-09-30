@@ -231,7 +231,7 @@ func TestProxyRetryChainAndBudget(t *testing.T) {
 		w.WriteHeader(529)
 		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error"},"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`)
 	}, nil)
-	body := requestBody(testPrimaryModel, 2, "")
+	body := requestBody(testPrimaryModel, 1, "") // an initial request, retried
 	for i := 0; i < 2; i++ {
 		if code, _ := rig.post(t, body); code != 529 {
 			t.Fatalf("attempt %d status=%d", i, code)
@@ -501,4 +501,39 @@ func TestProxyNeverFollowsRedirects(t *testing.T) {
 	if m, _ := rig.client.Outcome(); !strings.Contains(m, "MISSING") {
 		t.Fatalf("malformed=%q", m)
 	}
+}
+
+// Codex review R5 (P1): a conversation cannot continue before it started,
+// the frozen attachment is a single dose, and a tool result the wire already
+// reported cannot change in a later request.
+func TestProxyR5ClassAndDoseRules(t *testing.T) {
+	t.Parallel()
+	t.Run("continuation before initial", func(t *testing.T) {
+		rig := newProxyRig(t, ArmOff, sseSuccess, nil)
+		rig.post(t, requestBody(testPrimaryModel, 2, ""))
+		if m, _ := rig.client.Outcome(); !strings.Contains(m, "continuation before any initial") {
+			t.Fatalf("malformed=%q", m)
+		}
+	})
+	t.Run("attachment repeated", func(t *testing.T) {
+		rig := newProxyRig(t, ArmAssisted, sseSuccess, nil)
+		span := string(canonicalStringBody(string(rig.art.Attachment)))
+		rig.post(t, requestBody(testPrimaryModel, 1, " "+span+" "+span))
+		if m, _ := rig.client.Outcome(); !strings.Contains(m, "2 times") {
+			t.Fatalf("malformed=%q", m)
+		}
+	})
+	t.Run("tool result rewritten between requests", func(t *testing.T) {
+		rig := newProxyRig(t, ArmOff, sseSuccess, nil)
+		rig.post(t, requestBody(testPrimaryModel, 1, ""))
+		ok := `{"model":"` + testPrimaryModel + `","stream":true,"messages":[{"role":"user","content":"do the task"},{"role":"assistant","content":"x"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu9","content":"r","is_error":true}]}],"tools":[{"name":"Read"},{"name":"Bash"}]}`
+		rig.post(t, []byte(ok))
+		if got := rig.proxy.ToolResults(); !got["tu9"] {
+			t.Fatalf("wire result not recorded: %v", got)
+		}
+		rig.post(t, []byte(strings.Replace(ok, `"is_error":true`, `"is_error":false`, 1)))
+		if m, _ := rig.client.Outcome(); !strings.Contains(m, "changed between requests") {
+			t.Fatalf("malformed=%q", m)
+		}
+	})
 }

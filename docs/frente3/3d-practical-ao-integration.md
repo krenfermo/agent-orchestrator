@@ -149,6 +149,32 @@ The driver never declares M3.
   (`.claude`). The ASSISTED reviewer therefore cannot read the worker's
   transcript with its Project Memory. What the reviewer does see is the
   worker's diff, which is the treatment's legitimate downstream effect.
+- **Oracle execution (R5).** Q1 and Q4 compile and run the worker's
+  commit, i.e. agent-authored code. Both now run under an oracle Seatbelt
+  profile:
+  - no network at all;
+  - `~/.ao`, the AO source, the operator's oracle directory, provider
+    state and keychains are denied;
+  - the environment is scrubbed.
+
+  They run on a private staged copy of `oracle.sh` and the hidden tests.
+  The copy is hidden during Q1, read-only during Q4, and digest-verified
+  before Q1, before Q4 and after Q4. The clone's origin is removed.
+
+  Residual, accepted for Practical (no VMs): code in the worker's commit
+  runs inside the same test binary as the hidden tests, so a deliberately
+  adversarial commit could fake its own test output. The oracle's inputs
+  and the environment are protected; the in-process verdict of hostile
+  code is not.
+- **Wire truth for M3 and dose (R5).**
+  - Whether a tool call succeeded is taken from the `tool_result` the
+    client sent back to the provider, not from the agent-writable
+    transcript; a result that changes between requests is refused.
+  - A subject's first non-helper request must be `initial`.
+  - The frozen attachment must occur exactly once per ASSISTED request.
+  - Bash rows carry no path in 3C, so rewriting a Bash command in the
+    transcript cannot change M3's file count (R5 claim checked and not
+    reproducible).
 - **Oracle.** The Q4 oracle directory is denied to agents wherever the
   operator keeps it.
 - **Daemon gateway.** AO's API also serves Project Memory (items,

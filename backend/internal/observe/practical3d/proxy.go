@@ -76,6 +76,7 @@ type ProviderProxy struct {
 	client       *ObservedClient
 	tokens       map[string]string // token -> subject
 	observations []ProxyObservation
+	results      map[string]bool // tool_use id -> is_error, as first sent to the provider
 	ln, ctl      net.Listener
 	srv, ctlSrv  *http.Server
 	rejected     []string
@@ -152,10 +153,40 @@ func (p *ProviderProxy) Unbind() {
 }
 
 // Observations returns the tool/message inventory seen in responses.
+// ToolResults returns the tool results clients sent to the provider (tool_use
+// id -> is_error): the wire's account of whether a tool call succeeded, which
+// the agent cannot rewrite after the fact (its transcript it can).
+func (p *ProviderProxy) ToolResults() map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]bool, len(p.results))
+	for k, v := range p.results {
+		out[k] = v
+	}
+	return out
+}
+
 func (p *ProviderProxy) Observations() []ProxyObservation {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]ProxyObservation(nil), p.observations...)
+}
+
+// recordResults keeps the first outcome the wire reported for each tool call;
+// a later request contradicting it is a rewritten history.
+func (p *ProviderProxy) recordResults(results map[string]bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.results == nil {
+		p.results = map[string]bool{}
+	}
+	for id, isErr := range results {
+		if prev, ok := p.results[id]; ok && prev != isErr {
+			return fmt.Errorf("tool result %s changed between requests", id)
+		}
+		p.results[id] = isErr
+	}
+	return nil
 }
 
 // Rejected lists requests the proxy refused (each also malforms the position).
@@ -268,6 +299,10 @@ func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := p.store(body); err != nil {
 		p.reject(w, c, http.StatusInternalServerError, "evidence store: "+err.Error())
+		return
+	}
+	if err := p.recordResults(parsed.results); err != nil {
+		p.reject(w, c, http.StatusForbidden, err.Error())
 		return
 	}
 	attempt, err := c.BeginHTTPAttempt(HTTPAttemptRequest{Subject: subject, Role: role, BaseClass: parsed.baseClass(c.m, c.p.TaskID, role), Model: parsed.model, Stream: parsed.stream, ToolNames: parsed.tools, Body: body})
@@ -402,6 +437,35 @@ type messagesRequest struct {
 	Tools    []struct {
 		Name string `json:"name"`
 	} `json:"tools"`
+}
+
+// toolResults maps each tool_result block in the conversation to whether the
+// client reported it as an error.
+func (m messagesRequest) toolResults() map[string]bool {
+	out := map[string]bool{}
+	for _, raw := range m.Messages {
+		var msg struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(raw, &msg) != nil || msg.Role != "user" {
+			continue
+		}
+		var blocks []struct {
+			Type      string `json:"type"`
+			ToolUseID string `json:"tool_use_id"`
+			IsError   bool   `json:"is_error"`
+		}
+		if json.Unmarshal(msg.Content, &blocks) != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b.Type == "tool_result" && b.ToolUseID != "" {
+				out[b.ToolUseID] = b.IsError
+			}
+		}
+	}
+	return out
 }
 
 func (m messagesRequest) toolNames() []string {

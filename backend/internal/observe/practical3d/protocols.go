@@ -33,6 +33,9 @@ type parsedRequest struct {
 	stream    bool
 	tools     []string
 	baseClass func(m Manifest, task string, role Role) CallClass
+	// results are the tool_result blocks the request carries back to the
+	// provider: tool_use id -> is_error.
+	results map[string]bool
 }
 
 // protocolFor maps a request path to its protocol; nil means not inference.
@@ -72,7 +75,7 @@ func (anthropicProtocol) parse(body []byte) (parsedRequest, error) {
 	if err := json.Unmarshal(body, &r); err != nil || r.Model == "" {
 		return parsedRequest{}, errors.New("not a Messages API request")
 	}
-	return parsedRequest{model: r.Model, stream: r.Stream, tools: r.toolNames(), baseClass: r.baseClass}, nil
+	return parsedRequest{model: r.Model, stream: r.Stream, tools: r.toolNames(), baseClass: r.baseClass, results: r.toolResults()}, nil
 }
 
 func (anthropicProtocol) accumulator() streamAccumulator { return newResponseAccumulator() }

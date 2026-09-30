@@ -65,24 +65,17 @@ type RealOracle struct {
 	Exec      *AORealExecutor
 }
 
-// Evaluate implements OracleRunner.
+// Evaluate implements OracleRunner. Both oracle steps compile and run the
+// worker's commit, i.e. agent-authored code: they run confined by the oracle
+// sandbox (no network, no private state, no credentials) with a scrubbed
+// environment, on a staged copy of the oracle whose bytes are verified before
+// each step.
 func (o RealOracle) Evaluate(ctx context.Context, pc PositionContext, _ ExecutionResult) (OracleResult, error) {
 	var res OracleResult
-	script, err := os.ReadFile(o.Script)
-	if err != nil {
-		return res, err
-	}
-	if sha256Hex(script) != o.Manifest.Q4Oracle.CommandSHA256 || sha256Hex(script) != o.Manifest.Q4Oracle.RunnerImageOrBinarySHA256 {
-		return res, errors.New("oracle script digest differs from the frozen Q4 oracle")
-	}
 	if sha256Hex([]byte(strings.Join(o.Verify, " "))) != o.Manifest.Q1Oracle.VerifyCommandSHA256 {
 		return res, errors.New("verify command differs from the frozen Q1 oracle")
 	}
 	spec, err := o.Exec.spec(o.Manifest, pc.Position.TaskID)
-	if err != nil {
-		return res, err
-	}
-	hidden, err := BuildHiddenManifest(o.HiddenDir, spec.OracleTask)
 	if err != nil {
 		return res, err
 	}
@@ -92,37 +85,50 @@ func (o RealOracle) Evaluate(ctx context.Context, pc PositionContext, _ Executio
 			want = t.HiddenTestManifestSHA256
 		}
 	}
-	if sha256Hex(hidden) != want {
-		return res, errors.New("hidden oracle tests differ from the frozen manifest")
+	stage, err := stageOracle(o, spec.OracleTask, want)
+	if stage != nil {
+		defer stage.cleanup()
+	}
+	if err != nil {
+		return res, err
 	}
 	commit, err := finalWorkerCommit(ctx, pc.Workspace)
 	if err != nil {
 		return res, err
 	}
-	tmp, err := os.MkdirTemp("", "ao3dp-oracle-")
-	if err != nil {
-		return res, err
-	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	clone := filepath.Join(tmp, "repo")
+	clone := filepath.Join(stage.root, "clone")
 	if out, err := exec.CommandContext(ctx, "git", "clone", "--quiet", "--no-hardlinks", pc.Workspace.WorkingCopy, clone).CombinedOutput(); err != nil {
 		return res, fmt.Errorf("clone final tree: %w: %s", err, out)
 	}
 	if out, err := exec.CommandContext(ctx, "git", "-C", clone, "checkout", "--quiet", "--detach", commit).CombinedOutput(); err != nil {
 		return res, fmt.Errorf("checkout final commit: %w: %s", err, out)
 	}
-	env := append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off", "GOFLAGS=")
-	q1 := exec.CommandContext(ctx, o.Verify[0], o.Verify[1:]...)
-	q1.Dir, q1.Env = clone, env
+	// The clone must not name the position it came from.
+	if out, err := exec.CommandContext(ctx, "git", "-C", clone, "remote", "remove", "origin").CombinedOutput(); err != nil {
+		return res, fmt.Errorf("detach clone: %w: %s", err, out)
+	}
+	q1, err := stage.command(ctx, o, false, clone, o.Verify...)
+	if err != nil {
+		return res, err
+	}
 	q1out, q1err := q1.CombinedOutput()
 	res.Q1ExitCode = exitCode(q1err)
-	q4 := exec.CommandContext(ctx, "/bin/bash", o.Script, spec.OracleTask, clone)
-	q4.Env = env
+	// Q1 could not reach the staged oracle; verify the bytes Q4 will run.
+	if err := stage.verify(o.Manifest, spec.OracleTask, want); err != nil {
+		return res, err
+	}
+	q4, err := stage.command(ctx, o, true, stage.root, "/bin/bash", stage.script, spec.OracleTask, clone)
+	if err != nil {
+		return res, err
+	}
 	q4out, q4err := q4.CombinedOutput()
 	lines := strings.Split(strings.TrimSpace(string(q4out)), "\n")
 	last := lines[len(lines)-1]
 	res.Q4Passed = q4err == nil && last == "ORACLE "+spec.OracleTask+" PASS"
-	raw, _ := json.Marshal(map[string]any{"final_commit": commit, "q1_exit": res.Q1ExitCode, "q1_output_tail": tail(string(q1out), 4000), "q4_last_line": last, "q4_output_tail": tail(string(q4out), 4000)})
+	if err := stage.verify(o.Manifest, spec.OracleTask, want); err != nil {
+		return res, fmt.Errorf("after Q4: %w", err)
+	}
+	raw, _ := json.Marshal(map[string]any{"final_commit": commit, "q1_exit": res.Q1ExitCode, "q1_output_tail": tail(string(q1out), 4000), "q4_last_line": last, "q4_output_tail": tail(string(q4out), 4000), "sandbox": "oracle.sb"})
 	_ = writeExclusive(filepath.Join(pc.Workspace.Root, "oracle-evidence.json"), raw)
 	res.Q1VerifyCommandSHA256 = o.Manifest.Q1Oracle.VerifyCommandSHA256
 	res.Q4TaskOracleSHA256 = want

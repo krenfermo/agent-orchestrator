@@ -36,6 +36,9 @@ type M3Input struct {
 	RunID        string
 	MeasuredRole Role
 	Proxy        []ProxyObservation
+	// ToolResults are the tool outcomes the proxy saw sent back to the
+	// provider (tool_use id -> is_error).
+	ToolResults map[string]bool
 	// ProjectRoots are the position's working copy and worktrees: a
 	// provider target inside them must be a project row in 3C.
 	ProjectRoots []string
@@ -66,7 +69,7 @@ type m3Obs struct {
 	scope    domain.ToolPathScope
 	path     string
 	obsKey   string
-	resultOK bool // 3C recorded the tool's result, and it was not an error
+	resultOK bool // the wire carried the tool's result back, and not as an error
 	call     int
 	toolIdx  int // position of the tool_use in the provider's message
 }
@@ -172,6 +175,9 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 			return ev, fmt.Errorf("tool observation %d of %s: 3C path %q is not the provider's target %q", i, ev.Subject, obs[i].path, w.tu.Target)
 		}
 		obs[i].call, obs[i].toolIdx = p.CallIndex, w.idx
+		// Success is the wire's account (the transcript's is agent-writable).
+		isErr, known := in.ToolResults[w.tu.ID]
+		obs[i].resultOK = known && !isErr
 	}
 	// Every tool_use the proxy saw for the measured role must be observed.
 	for key, w := range wire {
@@ -376,7 +382,7 @@ func m3Sources(ctx context.Context, db *sql.DB, kind, subject string) ([]m3Sourc
 }
 
 func m3Observations(ctx context.Context, db *sql.DB, kind, subject, role, runID string) ([]m3Obs, error) {
-	rows, err := db.QueryContext(ctx, `SELECT a.usage_source_id, a.event_key, a.ordinal, a.op, a.tool_name, a.path_scope, COALESCE(a.path, ''), a.observation_key, a.result_error
+	rows, err := db.QueryContext(ctx, `SELECT a.usage_source_id, a.event_key, a.ordinal, a.op, a.tool_name, a.path_scope, COALESCE(a.path, ''), a.observation_key
 		FROM agent_tool_observation_attribution a JOIN usage_attribution_windows w ON w.id = a.window_id
 		WHERE a.subject_kind = ? AND a.subject_id = ? AND w.role = ? AND w.workflow_run_id = ? AND a.origin = 'agent_exploration'
 		ORDER BY a.usage_source_id, a.ordinal`, kind, subject, role, runID)
@@ -389,12 +395,10 @@ func m3Observations(ctx context.Context, db *sql.DB, kind, subject, role, runID 
 		var o m3Obs
 		var src sql.NullInt64
 		var op, scope string
-		var resultErr sql.NullInt64
-		if err := rows.Scan(&src, &o.eventKey, &o.ordinal, &op, &o.tool, &scope, &o.path, &o.obsKey, &resultErr); err != nil {
+		if err := rows.Scan(&src, &o.eventKey, &o.ordinal, &op, &o.tool, &scope, &o.path, &o.obsKey); err != nil {
 			return nil, err
 		}
 		o.source, o.op, o.scope = src.Int64, domain.ToolOp(op), domain.ToolPathScope(scope)
-		o.resultOK = resultErr.Valid && resultErr.Int64 == 0
 		if !o.op.Valid() || !o.scope.Valid() {
 			return nil, fmt.Errorf("observation with unknown op/scope %q/%q", op, scope)
 		}

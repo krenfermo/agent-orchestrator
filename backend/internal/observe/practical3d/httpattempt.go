@@ -116,14 +116,21 @@ func (c *ObservedClient) BeginHTTPAttempt(req HTTPAttemptRequest) (*HTTPAttempt,
 	// One conversation start per AO subject: a later request with no
 	// assistant turn (for example an agent-crafted "fresh" conversation on
 	// its own tokenized proxy URL) would otherwise be classed `initial`.
-	if class == CallInitial {
-		if c.initialSeen == nil {
-			c.initialSeen = map[string]bool{}
-		}
+	// Symmetrically, a conversation cannot continue before it started: a
+	// first request carrying a fabricated assistant turn is refused.
+	if c.initialSeen == nil {
+		c.initialSeen = map[string]bool{}
+	}
+	switch class {
+	case CallInitial:
 		if c.initialSeen[req.Subject] {
 			return nil, refuse("second initial request for subject " + req.Subject)
 		}
 		c.initialSeen[req.Subject] = true
+	case CallContinuation, CallToolResult:
+		if !c.initialSeen[req.Subject] {
+			return nil, refuse("continuation before any initial request for subject " + req.Subject)
+		}
 	}
 	trace, err := traceHTTPRequest(c.m, c.spans, c.p.TaskID, c.p.Arm, req.Role, class, req)
 	if err != nil {
@@ -263,6 +270,10 @@ func traceHTTPRequest(m Manifest, spans map[string][][]byte, task string, arm Ar
 		body := spans[attachmentBodyKey(want.AttachmentSHA256)]
 		if len(body) != 1 || !bytes.Contains(req.Body, body[0]) {
 			return treatmentTrace{}, errors.New("ASSISTED request does not carry the frozen attachment bytes")
+		}
+		// Exactly one copy: the frozen dose, not a repeated one.
+		if n := bytes.Count(req.Body, body[0]); n != 1 {
+			return treatmentTrace{}, fmt.Errorf("ASSISTED request carries the frozen attachment %d times", n)
 		}
 		// Every Project Memory marker must belong to a copy of the frozen
 		// attachment: a second, altered memory block (for example returned

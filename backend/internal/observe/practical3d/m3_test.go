@@ -22,6 +22,7 @@ type m3Fixture struct {
 	binding, source       int64
 	ordinal               int64
 	proxy                 []ProxyObservation
+	results               map[string]bool
 }
 
 const m3Root, m3Session = "root-1", "native-1"
@@ -68,6 +69,10 @@ func (f *m3Fixture) message(t *testing.T, call int, role Role, tools ...m3Tool) 
 	for i, tl := range tools {
 		tuID := fmt.Sprintf("tu_%d_%d", call, i)
 		obs.ToolUses = append(obs.ToolUses, ProxyToolUse{ID: tuID, Name: tl.name, Command: tl.command, Target: tl.path})
+		if f.results == nil {
+			f.results = map[string]bool{}
+		}
+		f.results[tuID] = tl.failed
 		if tl.skip3C {
 			continue
 		}
@@ -121,7 +126,7 @@ func (f *m3Fixture) verdict(t *testing.T) {
 }
 
 func (f *m3Fixture) derive(role Role) (M3Evidence, error) {
-	return DeriveM3(context.Background(), M3Input{DataDir: f.dir, RunID: f.runID, MeasuredRole: role, Proxy: f.proxy})
+	return DeriveM3(context.Background(), M3Input{DataDir: f.dir, RunID: f.runID, MeasuredRole: role, Proxy: f.proxy, ToolResults: f.results})
 }
 
 func TestM3WorkerCountsExplorationBeforeFirstEdit(t *testing.T) {
@@ -233,6 +238,23 @@ func TestM3MilestonesCannotBeFaked(t *testing.T) {
 	})
 	// Codex review R4 (P1): an absolute target outside the project cannot
 	// be claimed as the project's path by suffix.
+	// Codex review R5 (P1): the agent rewrites its transcript so a failed
+	// edit reads as successful; the wire's result still says it failed.
+	t.Run("transcript-rewritten result does not rescue a failed edit", func(t *testing.T) {
+		f := newM3Fixture(t, "worker")
+		bad := edit("a.go")
+		bad.failed = true
+		f.message(t, 1, RoleWorker, bad)
+		if _, err := f.db.Exec(`UPDATE agent_tool_observations SET result_error = 0`); err != nil {
+			t.Fatal(err)
+		}
+		f.message(t, 2, RoleWorker, read("b.go"))
+		f.message(t, 3, RoleWorker, edit("a.go"))
+		ev, err := f.derive(RoleWorker)
+		if err != nil || ev.Milestone != "first_edit@call_3" || ev.Calls != 1 {
+			t.Fatalf("ev=%+v err=%v", ev, err)
+		}
+	})
 	t.Run("outside target claimed as a project path", func(t *testing.T) {
 		f := newM3Fixture(t, "worker")
 		f.message(t, 1, RoleWorker, m3Tool{name: "Edit", op: "edit", scope: "project", path: "src/app.go"})
