@@ -348,13 +348,9 @@ func (r *positionRig) startTaskRun(ctx context.Context, spec TaskSpec) error {
 	// Memory relevance keywords from the prompt, so a random id would make
 	// the ASSISTED attachment differ between positions of the same task.
 	r.project = "practical-" + strings.ToLower(spec.TaskID)
-	// The frozen harness per role: Claude Code workers, a Codex reviewer
-	// (AO's cross-provider review independence), Claude decision resolvers.
-	policy := map[string]any{"autonomousMode": false, "plannerPriority": []string{}, "workerPriority": []string{"legacy-claude-code"},
-		"reviewerPriority": []string{"legacy-codex"}, "decisionResolverPriority": []string{"legacy-claude-code"}, "fallbackBehavior": "use_next_available", "reviewIndependence": "require_different_provider"}
-	if _, err := r.api(ctx, http.MethodPut, "/execution-policy", policy, 30*time.Second); err != nil {
-		return err
-	}
+	// AO's bootstrap execution policy (no stored policy) already routes the
+	// worker to Claude Code and, for high-risk tasks, the reviewer to Codex
+	// (cross-provider review independence); the manifest freezes that flow.
 	if _, err := r.api(ctx, http.MethodPost, "/projects", map[string]string{"path": r.work, "projectId": r.project}, 60*time.Second); err != nil {
 		return err
 	}
