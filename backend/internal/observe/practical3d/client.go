@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -118,6 +117,7 @@ func (c *ObservedClient) Call(req ProviderRequest) (ProviderResponse, error) {
 		}
 		attemptCtx, cancel := context.WithTimeout(c.ctx, time.Duration(c.m.Deadlines.ProviderAttemptSeconds)*time.Second)
 		resp, callErr := c.transport.Do(attemptCtx, TransportRequest{CanonicalRequest: bytes.Clone(canonical), Position: c.p, Workspace: c.workspace})
+		attemptExpired := errors.Is(attemptCtx.Err(), context.DeadlineExceeded)
 		cancel()
 		final := base
 		final.Type, final.Timestamp = EventAttemptFinalized, c.now().UTC()
@@ -135,8 +135,12 @@ func (c *ObservedClient) Call(req ProviderRequest) (ProviderResponse, error) {
 		if err := c.ledger.Append(final); err != nil {
 			return ProviderResponse{}, c.malform("ledger append finalization: " + err.Error())
 		}
-		if len(final.MissingAccounting) > 0 {
+		if len(final.MissingAccounting) > 0 && (callErr == nil || !attemptExpired) {
 			return resp, c.malform("provider accounting MISSING")
+		}
+		if callErr != nil && attemptExpired {
+			// The frozen attempt/position deadline ended the attempt: TIMEOUT (06 §4).
+			return resp, c.fail(StateTimeout)
 		}
 		if callErr != nil {
 			return resp, c.malform("transport: " + callErr.Error())
@@ -239,7 +243,7 @@ func traceRepresentation(m Manifest, spans map[string][][]byte, task string, arm
 		trace.AttachmentSHA256, trace.AttachmentVersion, trace.AttachmentOrigin = a.SHA256, a.Version, a.Origin
 		return canonical, trace, nil
 	}
-	for _, span := range spans[task] {
+	for _, span := range spans[allTasksSpans] {
 		if bytes.Contains(canonical, span) {
 			return nil, treatmentTrace{}, errors.New("request without attachment contains a Project Memory attachment span")
 		}
@@ -261,16 +265,25 @@ func attachmentSpans(b []byte) [][]byte {
 		}
 	}
 	add([]byte(base64.StdEncoding.EncodeToString(b)))
-	if esc, err := json.Marshal(string(b)); err == nil && len(esc) > 2 {
-		add(esc[1 : len(esc)-1])
-	}
+	add(canonicalStringBody(string(b)))
 	for _, line := range bytes.Split(b, []byte{'\n'}) {
-		line = bytes.TrimSpace(line)
-		if esc, err := json.Marshal(string(line)); err == nil && len(esc) > 2 {
-			add(esc[1 : len(esc)-1])
-		}
+		add(canonicalStringBody(string(bytes.TrimSpace(line))))
 	}
 	return out
+}
+
+// allTasksSpans keys the union of every frozen attachment's spans: a request
+// without attachment must carry no span of ANY task's attachment.
+const allTasksSpans = "*"
+
+// canonicalStringBody is how a string's bytes appear inside canonical request
+// bytes: NFC, JSON-escaped without HTML escaping, quotes stripped.
+func canonicalStringBody(s string) []byte {
+	b, err := canonicalRequestJSON(s)
+	if err != nil || len(b) < 2 {
+		return nil
+	}
+	return b[1 : len(b)-1]
 }
 
 func sortStrings(xs []string) {

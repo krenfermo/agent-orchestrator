@@ -78,6 +78,28 @@ func DecodeManifest(raw []byte) (Manifest, error) {
 	return m, nil
 }
 
+// DecodeDraftManifest decodes a manifest with the same closed-schema rules as
+// DecodeManifest (unknown, duplicate, missing, null and non-canonical fields
+// rejected) but without validating it, so freeze never fills a default.
+func DecodeDraftManifest(raw []byte) (Manifest, error) {
+	var m Manifest
+	if err := strictUnmarshal(raw, &m); err != nil {
+		return Manifest{}, fmt.Errorf("%w: decode closed schema: %w", ErrInvalidManifest, err)
+	}
+	fromRaw, err := canonicalRaw(raw, manifestDecimals)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("%w: canonicalize input: %w", ErrInvalidManifest, err)
+	}
+	fromStruct, err := CanonicalManifest(m)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("%w: canonicalize manifest: %w", ErrInvalidManifest, err)
+	}
+	if !bytes.Equal(fromRaw, fromStruct) {
+		return Manifest{}, fmt.Errorf("%w: draft has missing, null, prohibited, or non-canonical fields", ErrInvalidManifest)
+	}
+	return m, nil
+}
+
 // CanonicalManifest is canonical_bytes(manifest) of 06 §3.1.
 func CanonicalManifest(m Manifest) ([]byte, error) { return canonicalWith(m, manifestDecimals) }
 

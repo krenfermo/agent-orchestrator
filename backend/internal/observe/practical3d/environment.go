@@ -36,6 +36,12 @@ type LiveEnvironmentObserver struct {
 // Observe measures every allowlisted input without secrets.
 func (o LiveEnvironmentObserver) Observe(ctx context.Context) (EnvironmentInputs, error) {
 	out := o.Expected
+	out.RuntimeVersions = append([]VersionInput(nil), out.RuntimeVersions...)
+	out.ProviderClientCLIVersions = append([]VersionInput(nil), out.ProviderClientCLIVersions...)
+	out.TaskToolVersions = append([]VersionInput(nil), out.TaskToolVersions...)
+	out.RunnerInstrumentVersions = append([]VersionInput(nil), out.RunnerInstrumentVersions...)
+	out.EffectiveEnvironmentConfigAllowlist = append([]ConfigInput(nil), out.EffectiveEnvironmentConfigAllowlist...)
+	out.AdditionalLocalConfiguration = append([]ConfigInput(nil), out.AdditionalLocalConfiguration...)
 	out.OSPlatformArch = OSPlatformArch{OS: runtime.GOOS, Platform: runtime.GOOS, Arch: runtime.GOARCH}
 	self, err := os.Executable()
 	if err != nil {

@@ -178,6 +178,9 @@ func Run(ctx context.Context, m Manifest, o RunnerOptions) (RunResult, error) {
 	} else if seen {
 		return RunResult{}, fmt.Errorf("%w: %s (registry %s)", ErrExperimentRegistered, id, reg.Path())
 	}
+	if err := reg.Claim(id); err != nil {
+		return RunResult{}, err
+	}
 	ledger, root, err := CreateRunDirectory(abs, m, o.Metadata, o.AllowExplicitTemp)
 	if err != nil {
 		return RunResult{}, err

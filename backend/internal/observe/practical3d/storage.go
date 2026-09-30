@@ -191,6 +191,43 @@ func (r Registry) Entries() ([]RegistryEntry, error) {
 	return out, s.Err()
 }
 
+// Claim atomically reserves an experiment_id (O_EXCL marker), so two
+// concurrent runs of the same manifest cannot both start.
+func (r Registry) Claim(id string) error {
+	if !validSHA256(id) {
+		return fmt.Errorf("invalid experiment_id")
+	}
+	dir := filepath.Join(filepath.Dir(r.path), "claims")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, id), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400)
+	if os.IsExist(err) {
+		return fmt.Errorf("%w: %s", ErrExperimentRegistered, id)
+	}
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// RefuseProductionPath rejects an output path inside production AO data.
+func RefuseProductionPath(path string) error {
+	prod, err := productionDataDir()
+	if err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	resolved, _ := resolveThroughExistingAncestor(abs)
+	if within(abs, prod) || (resolved != "" && within(resolved, resolveOrSelf(prod))) {
+		return fmt.Errorf("%w: %s is inside production AO data", ErrUnsafeRoot, abs)
+	}
+	return nil
+}
+
 // Contains reports whether an experiment_id was ever registered.
 func (r Registry) Contains(id string) (bool, error) {
 	entries, err := r.Entries()

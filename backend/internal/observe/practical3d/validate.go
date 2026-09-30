@@ -138,6 +138,10 @@ func validateManifestExceptSchedule(m Manifest) error {
 
 var taskOrder = []string{"A", "B", "C", "D"}
 
+// MaxCap bounds every TOKEN/CALL cap so no sum of caps or of in-cap attempt
+// accounting can overflow int64.
+const MaxCap = 1 << 40
+
 // ProjectMemoryInventoryState records in the context inventory that Project
 // Memory is governed only by the treatment mapping (06 §3.6).
 const ProjectMemoryInventoryState = "TREATMENT_MAPPING"
@@ -330,6 +334,9 @@ func validateCaps(name string, rows []RoleCap, roles []Role, used map[string]map
 			if r.TaskID != task || r.Role != role {
 				return fmt.Errorf("%w: %s must be ordered task A-D × CLOSED_ROLE_SET", ErrInvalidManifest, name)
 			}
+			if r.Cap > MaxCap {
+				return fmt.Errorf("%w: %s %s/%s cap exceeds %d", ErrInvalidManifest, name, task, role, int64(MaxCap))
+			}
 			if used[task][role] && r.Cap <= 0 {
 				return fmt.Errorf("%w: %s %s/%s used role needs a positive cap", ErrInvalidManifest, name, task, role)
 			}
@@ -472,6 +479,15 @@ func validateContext(ext ExternalContext, inv []ContextSource) error {
 	if ext.Policy != "DISABLED" && ext.Policy != "EQUALIZED" {
 		return fmt.Errorf("%w: invalid external context policy", ErrInvalidManifest)
 	}
+	if ext.Policy == "EQUALIZED" && len(equal) == 0 {
+		return fmt.Errorf("%w: EQUALIZED external context needs a non-empty source list", ErrInvalidManifest)
+	}
+	for i := 1; i < len(ext.EqualizedSources); i++ {
+		if ext.EqualizedSources[i].SourceID <= ext.EqualizedSources[i-1].SourceID {
+			return fmt.Errorf("%w: equalized_sources must be ordered by source_id", ErrInvalidManifest)
+		}
+	}
+	equalizedInInventory := 0
 	for i, s := range inv {
 		if s.SourceID != required[i] || s.VerificationVersion == "" {
 			return fmt.Errorf("%w: context inventory order/content", ErrInvalidManifest)
@@ -482,6 +498,9 @@ func validateContext(ext ExternalContext, inv []ContextSource) error {
 				return fmt.Errorf("%w: router must be OFF", ErrInvalidManifest)
 			}
 		case "project_memory":
+			if s.State != ProjectMemoryInventoryState {
+				return fmt.Errorf("%w: project_memory inventory state must be %s", ErrInvalidManifest, ProjectMemoryInventoryState)
+			}
 		default:
 			if s.State != "DISABLED" && s.State != "EQUALIZED" {
 				return fmt.Errorf("%w: invalid source state", ErrInvalidManifest)
@@ -491,12 +510,16 @@ func validateContext(ext ExternalContext, inv []ContextSource) error {
 			if s.RepresentationSHA256 == "" || equal[s.SourceID] != s.RepresentationSHA256 {
 				return fmt.Errorf("%w: unequal context source", ErrInvalidManifest)
 			}
+			equalizedInInventory++
 		} else if s.RepresentationSHA256 != "" {
 			return fmt.Errorf("%w: disabled source has representation", ErrInvalidManifest)
 		}
 		if s.SourceID == "other" && !validSHA256(s.InventorySHA256) {
 			return fmt.Errorf("%w: other inventory digest missing", ErrInvalidManifest)
 		}
+	}
+	if equalizedInInventory != len(equal) {
+		return fmt.Errorf("%w: equalized_sources names a source that is not EQUALIZED in the inventory", ErrInvalidManifest)
 	}
 	return nil
 }

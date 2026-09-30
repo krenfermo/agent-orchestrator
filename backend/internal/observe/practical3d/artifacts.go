@@ -90,7 +90,7 @@ func preflightArtifacts(m Manifest, r ArtifactResolver, dst string) (map[string]
 			}
 			blobs[a.AttachmentSHA256] = b
 		}
-		spans[cell.TaskID] = append(spans[cell.TaskID], attachmentSpans(b)...)
+		spans[allTasksSpans] = append(spans[allTasksSpans], attachmentSpans(b)...)
 	}
 	if err := os.MkdirAll(filepath.Join(dst, "sha256"), 0o700); err != nil {
 		return nil, err

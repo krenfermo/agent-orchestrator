@@ -85,10 +85,11 @@ func freezeCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	var m practical3d.Manifest
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&m); err != nil {
+	if err := practical3d.RefuseProductionPath(*outPath); err != nil {
+		return err
+	}
+	m, err := practical3d.DecodeDraftManifest(raw)
+	if err != nil {
 		return fmt.Errorf("draft: %w", err)
 	}
 	if m.Randomization.SeedHex != "" || len(m.Randomization.Schedule) != 0 {
@@ -187,6 +188,9 @@ func decideCommand(args []string, out io.Writer) error {
 	if *runRoot == "" || *reportPath == "" {
 		return errors.New("--run-root and --report are required")
 	}
+	if err := practical3d.RefuseProductionPath(*reportPath); err != nil {
+		return err
+	}
 	_, m, err := practical3d.ReadEnvelope(filepath.Join(*runRoot, "envelope.json"))
 	if err != nil {
 		return err
@@ -253,8 +257,8 @@ func runCommand(args []string, out io.Writer) error {
 		Metadata:    env.Metadata,
 		Environment: practical3d.LiveEnvironmentObserver{Expected: m.ExecutionEnvironment.Inputs, AOBinaryPath: *aoBinary},
 		Artifacts:   practical3d.DirArtifactResolver{Root: *artifacts},
-		Transport:   commandTransport{path: *providerDriver, envNames: providerEnv},
-		Executor:    commandExecutor{path: *positionDriver},
+		Transport:   commandTransport{path: *providerDriver, envNames: append(allowlistedEnv(m), providerEnv...)},
+		Executor:    commandExecutor{path: *positionDriver, envNames: allowlistedEnv(m)},
 		Oracle:      commandOracle{path: *oracleDriver, manifest: m},
 		Workspaces:  practical3d.GitWorkspaceManager{FixtureRepo: *fixtureRepo},
 	})
@@ -297,15 +301,9 @@ func (t commandTransport) Do(ctx context.Context, request practical3d.TransportR
 	cmd.Dir = request.Workspace.Root
 	cmd.Stdin = bytes.NewReader(request.CanonicalRequest)
 	env := positionEnv(request.Workspace, "AO_3D_PRACTICAL_PROVIDER")
-	for _, name := range t.envNames {
-		if strings.ContainsAny(name, "=\x00") {
-			return practical3d.ProviderResponse{}, fmt.Errorf("invalid provider env name %q", name)
-		}
-		value, ok := os.LookupEnv(name)
-		if !ok {
-			return practical3d.ProviderResponse{}, fmt.Errorf("provider env %q is unset", name)
-		}
-		env = append(env, name+"="+value)
+	env, err := withEnv(env, t.envNames)
+	if err != nil {
+		return practical3d.ProviderResponse{}, err
 	}
 	cmd.Env = env
 	raw, err := cmd.Output()
@@ -337,8 +335,41 @@ type driverMessage struct {
 }
 
 type commandExecutor struct {
-	path string
-	args []string
+	path     string
+	args     []string
+	envNames []string
+}
+
+// reservedEnv are the per-position variables no allowlisted or provider env
+// entry may override.
+var reservedEnv = map[string]bool{"PATH": true, "HOME": true, "AO_DATA_DIR": true, "AO_RUN_FILE": true, "TMPDIR": true}
+
+// allowlistedEnv are the environment variables whose effective values the
+// frozen environment digest attests; drivers receive exactly those values.
+func allowlistedEnv(m practical3d.Manifest) []string {
+	in := m.ExecutionEnvironment.Inputs
+	names := make([]string, 0, len(in.EffectiveEnvironmentConfigAllowlist)+len(in.AdditionalLocalConfiguration))
+	for _, c := range m.ExecutionEnvironment.Inputs.EffectiveEnvironmentConfigAllowlist {
+		names = append(names, c.Name)
+	}
+	for _, c := range m.ExecutionEnvironment.Inputs.AdditionalLocalConfiguration {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+func withEnv(env, names []string) ([]string, error) {
+	for _, name := range names {
+		if name == "" || strings.ContainsAny(name, "=\x00") || reservedEnv[name] || strings.HasPrefix(name, "AO_3D_PRACTICAL") {
+			return nil, fmt.Errorf("env name %q is invalid or reserved", name)
+		}
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			return nil, fmt.Errorf("env %q is unset", name)
+		}
+		env = append(env, name+"="+value)
+	}
+	return env, nil
 }
 
 type driverSession struct {
@@ -403,13 +434,29 @@ func (s *driverSession) next() (driverMessage, error) {
 }
 
 func (e commandExecutor) Preflight(ctx context.Context, m practical3d.Manifest) ([]practical3d.CellRepresentation, error) {
-	dir, err := os.MkdirTemp("", "ao3dpractical-preflight-")
+	scratch, err := practical3d.ScratchRoot()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp(scratch, "ao3dpractical-preflight-")
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	w := practical3d.PositionWorkspace{Root: dir, AODataDir: filepath.Join(dir, "ao-data"), RuntimeHome: filepath.Join(dir, "home")}
-	s, err := e.start(ctx, dir, positionEnv(w, "AO_3D_PRACTICAL_PREFLIGHT"), filepath.Join(dir, "stderr"))
+	for _, d := range []string{w.AODataDir, w.RuntimeHome} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	env, err := withEnv(positionEnv(w, "AO_3D_PRACTICAL_PREFLIGHT"), e.envNames)
+	if err != nil {
+		return nil, err
+	}
+	s, err := e.start(ctx, dir, env, filepath.Join(dir, "stderr"))
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +476,11 @@ func (e commandExecutor) Preflight(ctx context.Context, m practical3d.Manifest) 
 }
 
 func (e commandExecutor) Execute(ctx context.Context, pc practical3d.PositionContext, client *practical3d.ObservedClient) (practical3d.ExecutionResult, error) {
-	s, err := e.start(ctx, pc.Workspace.WorkingCopy, positionEnv(pc.Workspace, "AO_3D_PRACTICAL"), filepath.Join(pc.Workspace.Root, "position-driver.stderr"))
+	env, err := withEnv(positionEnv(pc.Workspace, "AO_3D_PRACTICAL"), e.envNames)
+	if err != nil {
+		return practical3d.ExecutionResult{}, err
+	}
+	s, err := e.start(ctx, pc.Workspace.WorkingCopy, env, filepath.Join(pc.Workspace.Root, "position-driver.stderr"))
 	if err != nil {
 		return practical3d.ExecutionResult{}, err
 	}

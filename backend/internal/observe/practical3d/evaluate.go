@@ -374,6 +374,13 @@ type attemptKey struct {
 
 type attempt struct{ d, f Event }
 
+func taskOf(mat materialized) string {
+	if len(mat.attempts) == 0 {
+		return ""
+	}
+	return mat.attempts[0].d.TaskID
+}
+
 type materialized struct {
 	metrics     Metrics
 	diagnostics PositionDiagnostics
@@ -485,7 +492,7 @@ func materializeAttempts(m Manifest, p Position, dispatches, finals []Event) mat
 			continue
 		}
 		in, cache, uncached := *f.InputTokens, *f.CachedInputTokens, *f.UncachedInputTokens
-		if in < 0 || cache < 0 || uncached < 0 || cache+uncached != in {
+		if in < 0 || cache < 0 || uncached < 0 || in > MaxCap || cache > in || cache+uncached != in {
 			*errs = append(*errs, "attempt accounting outside domain")
 			continue
 		}
@@ -514,7 +521,19 @@ func materializeAttempts(m Manifest, p Position, dispatches, finals []Event) mat
 	roleTokens := map[Role]int64{}
 	roleCalls := map[Role]int64{}
 	diag := &out.diagnostics
+	lastIndex := 0
+	for _, e := range dispatches {
+		if e.CallIndex <= lastIndex {
+			*errs = append(*errs, "ledger dispatch order differs from call_index order")
+			break
+		}
+		lastIndex = e.CallIndex
+	}
 	for _, a := range out.attempts {
+		if u := *a.f.UncachedInputTokens; u > roleCap(m.TokenCaps, p.TaskID, a.d.Role) {
+			*errs = append(*errs, fmt.Sprintf("role %s token cap exceeded by a single attempt", a.d.Role))
+			return out
+		}
 		d, f := a.d, a.f
 		roleCalls[d.Role]++
 		roleTokens[d.Role] += *f.UncachedInputTokens
@@ -549,6 +568,14 @@ func materializeAttempts(m Manifest, p Position, dispatches, finals []Event) mat
 		if err := validateChain(m, chain); err != "" {
 			*errs = append(*errs, err)
 		}
+	}
+	capM1u, capM2 := int64(0), int64(0)
+	for _, r := range m.ClosedRoleSet {
+		capM1u += roleCap(m.TokenCaps, p.TaskID, r)
+		capM2 += roleCap(m.CallCaps, p.TaskID, r)
+	}
+	if out.metrics.M1U < 0 || out.metrics.M1U > capM1u || out.metrics.M2 < 0 || out.metrics.M2 > capM2 {
+		*errs = append(*errs, "M1u/M2 outside [0, sum of caps]")
 	}
 	return out
 }
@@ -622,6 +649,18 @@ func checkTerminalConsistency(m Manifest, state TerminalState, mat materialized)
 	var errs []string
 	switch state {
 	case StateCompleted:
+		measured := false
+		if c, ok := m3Cap(m, taskOf(mat)); ok {
+			for _, chain := range mat.chains {
+				first, last := chain[0], chain[len(chain)-1]
+				if first.d.Role == c.Role && first.d.CallClass == CallInitial && last.f.RequestOutcome == OutcomeSuccess {
+					measured = true
+				}
+			}
+		}
+		if !measured {
+			errs = append(errs, "COMPLETED position has no successful initial logical call of its measured role (M1u not measured)")
+		}
 		for _, c := range mat.chains {
 			if c[len(c)-1].f.RequestOutcome != OutcomeSuccess {
 				errs = append(errs, "COMPLETED position has a logical call that did not succeed")
