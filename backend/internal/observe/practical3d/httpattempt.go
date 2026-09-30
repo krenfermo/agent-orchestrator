@@ -113,6 +113,18 @@ func (c *ObservedClient) BeginHTTPAttempt(req HTTPAttemptRequest) (*HTTPAttempt,
 		_ = c.fail(StateTimeout)
 		return nil, fmt.Errorf("%w: role deadline exceeded", ErrAttemptRefused)
 	}
+	// One conversation start per AO subject: a later request with no
+	// assistant turn (for example an agent-crafted "fresh" conversation on
+	// its own tokenized proxy URL) would otherwise be classed `initial`.
+	if class == CallInitial {
+		if c.initialSeen == nil {
+			c.initialSeen = map[string]bool{}
+		}
+		if c.initialSeen[req.Subject] {
+			return nil, refuse("second initial request for subject " + req.Subject)
+		}
+		c.initialSeen[req.Subject] = true
+	}
 	trace, err := traceHTTPRequest(c.m, c.spans, c.p.TaskID, c.p.Arm, req.Role, class, req)
 	if err != nil {
 		return nil, refuse("treatment/representation: " + err.Error())
@@ -324,6 +336,10 @@ func checkContextTools(m Manifest, tools []string) error {
 			return fmt.Errorf("MCP tool %q offered while mcp is %s", t, state["mcp"])
 		case (t == "WebFetch" || t == "WebSearch" || strings.HasPrefix(t, "web_search")) && state["web"] != "EQUALIZED":
 			return fmt.Errorf("web tool %q offered while web is %s", t, state["web"])
+		case t == "Task" || t == "Agent":
+			// Subagents run in sidechains 3C does not attribute to the
+			// measured session: exploration there would escape M3.
+			return fmt.Errorf("subagent tool %q offered", t)
 		}
 	}
 	return nil

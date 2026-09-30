@@ -132,6 +132,23 @@ The driver never declares M3.
   - The worker milestone is the first edit of a project file.
   - The reviewer milestone is an actual `ao review submit` invocation, and
     the number of submissions must equal the verdicts AO recorded.
+- **One upstream request per attempt.** The proxy never follows redirects,
+  and never lets net/http replay a request (HTTP/1 reuse retry, HTTP/2
+  GOAWAY): the body is not rewindable.
+- **Call class.** An AO subject has exactly one `initial` request; a later
+  request with no assistant turn is refused. Claude's subagent tools
+  (`Task`, `Agent`) are disallowed by flag and refused on the wire, because
+  sidechain exploration would escape M3. Known limitation: Claude Code's
+  auto-compaction restarts a conversation, and would therefore malform a
+  position; it is not expected at task scale.
+- **M3 milestone.** The worker's first edit must also have succeeded (3C
+  `result_error = 0`), and an absolute target must lie under the project
+  roots.
+- **Harness state isolation.** Inside the shared position HOME, Claude Code
+  cannot read Codex's state (`codex-home`) and Codex cannot read Claude's
+  (`.claude`). The ASSISTED reviewer therefore cannot read the worker's
+  transcript with its Project Memory. What the reviewer does see is the
+  worker's diff, which is the treatment's legitimate downstream effect.
 - **Oracle.** The Q4 oracle directory is denied to agents wherever the
   operator keeps it.
 - **Daemon gateway.** AO's API also serves Project Memory (items,

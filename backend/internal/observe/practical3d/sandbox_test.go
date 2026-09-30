@@ -204,3 +204,32 @@ func TestSandboxNetworkOnlyReachesProxyAndDaemon(t *testing.T) {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// Codex review R4 (P1): the reviewer (Codex) cannot read the worker's Claude
+// transcripts in the shared position HOME, nor the worker the reviewer's.
+func TestSandboxSeparatesHarnessState(t *testing.T) {
+	r := newSandboxRig(t)
+	claudeDir := filepath.Join(r.p.PosHome, ".claude", "projects")
+	codexDir := filepath.Join(r.p.PosHome, "codex-home", "sessions")
+	for _, d := range []string{claudeDir, codexDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "t.jsonl"), []byte("MEMORY\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for harness, denied := range map[string]string{"claude": codexDir, "codex": claudeDir} {
+		r.p.HarnessDeny = filepath.Join(r.p.PosHome, "codex-home")
+		own := claudeDir
+		if harness == "codex" {
+			r.p.HarnessDeny, own = filepath.Join(r.p.PosHome, ".claude"), codexDir
+		}
+		if out, err := r.sh(t, "cat "+shellQuote(filepath.Join(denied, "t.jsonl"))); err == nil || strings.Contains(out, "MEMORY") {
+			t.Errorf("%s read the other harness's transcript: %q", harness, out)
+		}
+		if out, err := r.sh(t, "cat "+shellQuote(filepath.Join(own, "t.jsonl"))); err != nil || !strings.Contains(out, "MEMORY") {
+			t.Errorf("%s cannot read its own state: %v %q", harness, err, out)
+		}
+	}
+}

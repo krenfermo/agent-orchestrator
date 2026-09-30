@@ -89,7 +89,10 @@ func NewProviderProxy(upstream string, resolver RoleResolver, evidenceDir string
 		return nil, fmt.Errorf("invalid upstream %q", upstream)
 	}
 	tr := &http.Transport{Proxy: nil, ForceAttemptHTTP2: true, MaxIdleConns: 16, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 20 * time.Second, DisableCompression: true}
-	return &ProviderProxy{Upstream: u, HTTPClient: &http.Client{Transport: tr}, Resolver: resolver, EvidenceDir: evidenceDir, Now: time.Now, tokens: map[string]string{}}, nil
+	// Redirects are never followed: a followed redirect would replay the
+	// request upstream behind the single dispatched attempt.
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &ProviderProxy{Upstream: u, HTTPClient: &http.Client{Transport: tr, CheckRedirect: noRedirect}, Resolver: resolver, EvidenceDir: evidenceDir, Now: time.Now, tokens: map[string]string{}}, nil
 }
 
 // Start listens on 127.0.0.1 (provider traffic) and on a private unix socket
@@ -320,6 +323,11 @@ func (p *ProviderProxy) forward(ctx context.Context, w http.ResponseWriter, r *h
 	if err != nil {
 		return HTTPAttemptResult{TransportError: err.Error()}, ProxyObservation{}
 	}
+	// A body that cannot be rewound is never replayed by net/http (HTTP/1
+	// retry on a reused connection, HTTP/2 GOAWAY retry): exactly one
+	// upstream request per dispatched attempt. A replay is the client's own
+	// next request, observed as a retry.
+	req.GetBody = nil
 	for k, vs := range in {
 		if hopHeaders[http.CanonicalHeaderKey(k)] {
 			continue

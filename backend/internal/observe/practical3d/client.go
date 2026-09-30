@@ -34,6 +34,7 @@ type ObservedClient struct {
 	failure      TerminalState
 	observe      func(context.Context) (string, error)
 	subjects     map[string]*subjectChain
+	initialSeen  map[string]bool // subjects that already sent their one initial request
 	closed       bool
 }
 

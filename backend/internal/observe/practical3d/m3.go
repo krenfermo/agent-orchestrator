@@ -66,6 +66,7 @@ type m3Obs struct {
 	scope    domain.ToolPathScope
 	path     string
 	obsKey   string
+	resultOK bool // 3C recorded the tool's result, and it was not an error
 	call     int
 	toolIdx  int // position of the tool_use in the provider's message
 }
@@ -231,7 +232,9 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 			// Only an edit of a project file is the milestone: a write to
 			// a scratch path outside the working copy is not "the first
 			// edit" and cannot end the exploration window.
-			if (o.op == domain.ToolOpEdit || o.op == domain.ToolOpCommandEdit) && o.scope == domain.ToolPathProject && o.path != "" {
+			// ...and one that succeeded: a deliberately failing Edit changes
+			// nothing and cannot end the window.
+			if (o.op == domain.ToolOpEdit || o.op == domain.ToolOpCommandEdit) && o.scope == domain.ToolPathProject && o.path != "" && o.resultOK {
 				found = true
 				ev.Milestone = fmt.Sprintf("first_edit@call_%d", o.call)
 				break
@@ -282,7 +285,23 @@ func verdictCall(proxy []ProxyObservation, subject string) (first, submits int) 
 func targetMatches(target string, scope domain.ToolPathScope, path string, roots []string) bool {
 	raw := strings.TrimSpace(target)
 	t := filepath.ToSlash(filepath.Clean(raw))
+	within := func(p string) bool {
+		for _, root := range roots {
+			for _, r := range []string{root, resolvedPath(root)} {
+				if rel, err := filepath.Rel(r, filepath.Clean(p)); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	if scope == domain.ToolPathProject && path != "" {
+		// An absolute provider target must itself lie in the project: a
+		// suffix match alone would let a rewritten row claim
+		// /elsewhere/src/app.go as the project's src/app.go.
+		if filepath.IsAbs(raw) && !within(raw) {
+			return false
+		}
 		if path == "." {
 			return raw == "" || filepath.IsAbs(raw) || t == "."
 		}
@@ -295,12 +314,8 @@ func targetMatches(target string, scope domain.ToolPathScope, path string, roots
 	// as outside/unresolved (a rewritten row would drop it from coverage);
 	// secret and excluded project paths are counted but never named.
 	inProject := !filepath.IsAbs(raw) && t != ".." && !strings.HasPrefix(t, "../")
-	for _, root := range roots {
-		for _, r := range []string{root, resolvedPath(root)} {
-			if rel, err := filepath.Rel(r, filepath.Clean(raw)); err == nil && filepath.IsAbs(raw) && rel != ".." && !strings.HasPrefix(rel, "../") {
-				inProject = true
-			}
-		}
+	if filepath.IsAbs(raw) && within(raw) {
+		inProject = true
 	}
 	if inProject {
 		return scope == domain.ToolPathSecret || scope == domain.ToolPathExcluded
@@ -361,7 +376,7 @@ func m3Sources(ctx context.Context, db *sql.DB, kind, subject string) ([]m3Sourc
 }
 
 func m3Observations(ctx context.Context, db *sql.DB, kind, subject, role, runID string) ([]m3Obs, error) {
-	rows, err := db.QueryContext(ctx, `SELECT a.usage_source_id, a.event_key, a.ordinal, a.op, a.tool_name, a.path_scope, COALESCE(a.path, ''), a.observation_key
+	rows, err := db.QueryContext(ctx, `SELECT a.usage_source_id, a.event_key, a.ordinal, a.op, a.tool_name, a.path_scope, COALESCE(a.path, ''), a.observation_key, a.result_error
 		FROM agent_tool_observation_attribution a JOIN usage_attribution_windows w ON w.id = a.window_id
 		WHERE a.subject_kind = ? AND a.subject_id = ? AND w.role = ? AND w.workflow_run_id = ? AND a.origin = 'agent_exploration'
 		ORDER BY a.usage_source_id, a.ordinal`, kind, subject, role, runID)
@@ -374,10 +389,12 @@ func m3Observations(ctx context.Context, db *sql.DB, kind, subject, role, runID 
 		var o m3Obs
 		var src sql.NullInt64
 		var op, scope string
-		if err := rows.Scan(&src, &o.eventKey, &o.ordinal, &op, &o.tool, &scope, &o.path, &o.obsKey); err != nil {
+		var resultErr sql.NullInt64
+		if err := rows.Scan(&src, &o.eventKey, &o.ordinal, &op, &o.tool, &scope, &o.path, &o.obsKey, &resultErr); err != nil {
 			return nil, err
 		}
 		o.source, o.op, o.scope = src.Int64, domain.ToolOp(op), domain.ToolPathScope(scope)
+		o.resultOK = resultErr.Valid && resultErr.Int64 == 0
 		if !o.op.Valid() || !o.scope.Valid() {
 			return nil, fmt.Errorf("observation with unknown op/scope %q/%q", op, scope)
 		}

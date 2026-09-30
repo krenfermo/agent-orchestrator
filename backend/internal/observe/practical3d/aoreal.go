@@ -247,7 +247,7 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 		codexArgs = append(codexArgs, "-c", `model="`+r.e.Cfg.CodexModel+`"`)
 	}
 	cfg := ShimConfig{RealClaude: r.e.Cfg.RealClaude, RealCodex: r.e.Cfg.RealCodex, CodexArgs: codexArgs, Profile: profile, ControlSocket: filepath.Join(r.ctlDir, "ctl.sock"), ExtraEnv: env,
-		ClaudeArgs: []string{"--strict-mcp-config", "--disallowedTools=RemoteTrigger,SendMessage,ListAgents,WebFetch,WebSearch"},
+		ClaudeArgs: []string{"--strict-mcp-config", "--disallowedTools=RemoteTrigger,SendMessage,ListAgents,WebFetch,WebSearch,Task,Agent"},
 		LaunchLog:  filepath.Join(r.ctlDir, "launches.jsonl"),
 		Sandbox: SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: r.e.Cfg.AOSrc, PrivateCtl: r.ctlDir, ToolsRO: r.e.Cfg.ToolsRO, OracleDir: r.e.Cfg.OracleDir,
 			PosWork: r.work, PosWorktrees: filepath.Join(r.dataDir, "worktrees"), PosHome: r.home, PosTmp: r.tmp, PosRunFile: r.runFile, PosPrompts: filepath.Join(r.dataDir, "prompts"), PosHookBin: filepath.Join(r.dataDir, "hook-bin"),

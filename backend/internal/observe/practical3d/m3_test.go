@@ -76,8 +76,12 @@ func (f *m3Fixture) message(t *testing.T, call int, role Role, tools ...m3Tool) 
 		if tl.scope == "project" {
 			path = tl.path
 		}
-		if _, err := f.db.Exec(`INSERT INTO agent_tool_observations (binding_id, usage_source_id, observation_key, event_key, ordinal, observed_at, origin, op, tool_name, path_scope, path, recorded_at) VALUES (?, ?, ?, ?, ?, ?, 'agent_exploration', ?, ?, ?, ?, ?)`,
-			f.binding, f.source, usage.ClaudeToolObservationKey(m3Root, domain.UsageSourceClaudeMain, "", m3Session, tuID), key, f.ordinal, time.Unix(1000, 0).UTC(), tl.op, tl.name, tl.scope, path, time.Unix(1000, 0).UTC()); err != nil {
+		resultErr := 0
+		if tl.failed {
+			resultErr = 1
+		}
+		if _, err := f.db.Exec(`INSERT INTO agent_tool_observations (binding_id, usage_source_id, observation_key, event_key, ordinal, observed_at, origin, op, tool_name, path_scope, path, result_error, recorded_at) VALUES (?, ?, ?, ?, ?, ?, 'agent_exploration', ?, ?, ?, ?, ?, ?)`,
+			f.binding, f.source, usage.ClaudeToolObservationKey(m3Root, domain.UsageSourceClaudeMain, "", m3Session, tuID), key, f.ordinal, time.Unix(1000, 0).UTC(), tl.op, tl.name, tl.scope, path, resultErr, time.Unix(1000, 0).UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -86,7 +90,7 @@ func (f *m3Fixture) message(t *testing.T, call int, role Role, tools ...m3Tool) 
 
 type m3Tool struct {
 	name, op, scope, path, command string
-	skip3C                         bool
+	skip3C, failed                 bool
 }
 
 func read(p string) m3Tool { return m3Tool{name: "Read", op: "read", scope: "project", path: p} }
@@ -212,6 +216,30 @@ func TestM3MilestonesCannotBeFaked(t *testing.T) {
 		}
 		if ev.Milestone != "first_edit@call_3" || ev.Calls != 2 {
 			t.Fatalf("evidence=%+v", ev)
+		}
+	})
+	// Codex review R4 (P1): a deliberately failing Edit changes nothing.
+	t.Run("failed edit is not the first edit", func(t *testing.T) {
+		f := newM3Fixture(t, "worker")
+		bad := edit("a.go")
+		bad.failed = true
+		f.message(t, 1, RoleWorker, bad)
+		f.message(t, 2, RoleWorker, read("a.go"), read("b.go"))
+		f.message(t, 3, RoleWorker, edit("a.go"))
+		ev, err := f.derive(RoleWorker)
+		if err != nil || ev.Milestone != "first_edit@call_3" || ev.Calls != 2 {
+			t.Fatalf("ev=%+v err=%v", ev, err)
+		}
+	})
+	// Codex review R4 (P1): an absolute target outside the project cannot
+	// be claimed as the project's path by suffix.
+	t.Run("outside target claimed as a project path", func(t *testing.T) {
+		f := newM3Fixture(t, "worker")
+		f.message(t, 1, RoleWorker, m3Tool{name: "Edit", op: "edit", scope: "project", path: "src/app.go"})
+		f.proxy[0].ToolUses[0].Target = "/tmp/outside/src/app.go"
+		_, err := DeriveM3(context.Background(), M3Input{DataDir: f.dir, RunID: f.runID, MeasuredRole: RoleWorker, Proxy: f.proxy, ProjectRoots: []string{"/work"}})
+		if err == nil || !strings.Contains(err.Error(), "not the provider's target") {
+			t.Fatalf("err=%v", err)
 		}
 	})
 	t.Run("mentioning ao review submit is not a verdict", func(t *testing.T) {

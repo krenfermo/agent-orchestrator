@@ -456,3 +456,49 @@ func TestProxyAnswersConnectivityCheckLocally(t *testing.T) {
 		t.Fatalf("connectivity check malformed the position: %s", m)
 	}
 }
+
+// Codex review R4 (P1): an agent-crafted "fresh" conversation on its own
+// tokenized proxy URL cannot be classed initial a second time; subagent
+// tools (sidechains outside M3) are refused on the wire.
+func TestProxyRefusesSecondInitialAndSubagentTools(t *testing.T) {
+	t.Parallel()
+	t.Run("second initial", func(t *testing.T) {
+		rig := newProxyRig(t, ArmOff, sseSuccess, nil)
+		rig.post(t, requestBody(testPrimaryModel, 1, ""))
+		if m, _ := rig.client.Outcome(); m != "" {
+			t.Fatalf("first initial malformed: %s", m)
+		}
+		rig.post(t, requestBody(testPrimaryModel, 1, " again"))
+		if m, _ := rig.client.Outcome(); !strings.Contains(m, "second initial") {
+			t.Fatalf("malformed=%q", m)
+		}
+	})
+	t.Run("subagent tool", func(t *testing.T) {
+		rig := newProxyRig(t, ArmOff, sseSuccess, nil)
+		body := bytes.Replace(requestBody(testPrimaryModel, 1, ""), []byte(`{"name":"Bash"}`), []byte(`{"name":"Bash"},{"name":"Task"}`), 1)
+		rig.post(t, body)
+		if m, _ := rig.client.Outcome(); !strings.Contains(m, "subagent") {
+			t.Fatalf("malformed=%q", m)
+		}
+		if rig.hits.Load() != 0 {
+			t.Fatal("request offering a subagent tool was forwarded")
+		}
+	})
+}
+
+// Codex review R4 (P1): a redirect is never followed (it would replay the
+// request upstream behind the one dispatched attempt).
+func TestProxyNeverFollowsRedirects(t *testing.T) {
+	t.Parallel()
+	rig := newProxyRig(t, ArmOff, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/v1/messages?again=1", http.StatusTemporaryRedirect)
+	}, nil)
+	rig.post(t, requestBody(testPrimaryModel, 1, "")) // the test client itself may follow the 307
+	if rig.hits.Load() != 1 {
+		t.Fatalf("upstream hits=%d, want exactly 1", rig.hits.Load())
+	}
+	// A redirect carries no usage: the attempt is MISSING, never zero.
+	if m, _ := rig.client.Outcome(); !strings.Contains(m, "MISSING") {
+		t.Fatalf("malformed=%q", m)
+	}
+}

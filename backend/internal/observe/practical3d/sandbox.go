@@ -42,6 +42,10 @@ const agentSandboxProfile = `(version 1)
 (allow file-read* (subpath (param "POS_PROMPTS")))
 (allow file-read* (subpath (param "POS_HOOKBIN")))
 (allow file-read* (subpath (param "TOOLS_RO")))
+; The other harness's state in the shared position HOME: Claude Code (worker,
+; fix) and Codex (reviewer) cannot read each other's transcripts, which hold
+; the other role's prompts (in ASSISTED, the worker's Project Memory).
+(deny file-read* file-write* (subpath (param "HARNESS_DENY")))
 
 ; AO source trees (they document the experiment) and the supervisor's
 ; private control directory.
@@ -88,12 +92,22 @@ type SandboxParams struct {
 	AOHome, RealHome, AOSrc, PrivateCtl, ToolsRO, OracleDir                    string
 	PosWork, PosWorktrees, PosHome, PosTmp, PosRunFile, PosPrompts, PosHookBin string
 	ProxyPort, DaemonPort                                                      int
+	// HarnessDeny is set per launch by the shim (the other harness's state
+	// directory); a profile written without a launch denies a placeholder.
+	HarnessDeny string
+}
+
+func (p SandboxParams) harnessDeny() string {
+	if p.HarnessDeny != "" {
+		return p.HarnessDeny
+	}
+	return filepath.Join(p.PosHome, ".no-harness")
 }
 
 func (p SandboxParams) args() ([]string, error) {
 	vals := map[string]string{
 		"AO_HOME": p.AOHome, "REAL_HOME": p.RealHome, "AO_SRC": p.AOSrc, "PRIVATE_CTL": p.PrivateCtl, "TOOLS_RO": p.ToolsRO, "ORACLE_DIR": p.OracleDir,
-		"POS_WORK": p.PosWork, "POS_WORKTREES": p.PosWorktrees, "POS_HOME": p.PosHome, "POS_TMP": p.PosTmp, "POS_RUN_FILE": p.PosRunFile, "POS_PROMPTS": p.PosPrompts, "POS_HOOKBIN": p.PosHookBin,
+		"POS_WORK": p.PosWork, "POS_WORKTREES": p.PosWorktrees, "POS_HOME": p.PosHome, "POS_TMP": p.PosTmp, "POS_RUN_FILE": p.PosRunFile, "POS_PROMPTS": p.PosPrompts, "POS_HOOKBIN": p.PosHookBin, "HARNESS_DENY": p.harnessDeny(),
 		"PROXY_PORT": fmt.Sprint(p.ProxyPort), "DAEMON_PORT": fmt.Sprint(p.DaemonPort),
 	}
 	keys := make([]string, 0, len(vals))
@@ -253,7 +267,12 @@ func buildShimLaunch(harness string, cfg ShimConfig, args, environ []string, tok
 	if binary == "" {
 		return nil, nil, fmt.Errorf("no %s executable configured", harness)
 	}
-	argv, err := SandboxCommand(cfg.Profile, cfg.Sandbox, append([]string{binary}, finalArgs...))
+	sb := cfg.Sandbox
+	sb.HarnessDeny = filepath.Join(sb.PosHome, "codex-home")
+	if harness == "codex" {
+		sb.HarnessDeny = filepath.Join(sb.PosHome, ".claude")
+	}
+	argv, err := SandboxCommand(cfg.Profile, sb, append([]string{binary}, finalArgs...))
 	if err != nil {
 		return nil, nil, err
 	}
