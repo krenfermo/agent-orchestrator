@@ -220,6 +220,12 @@ func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := "/" + parts[2]
+	if path == "/api/hello" && (r.Method == http.MethodHead || r.Method == http.MethodGet) {
+		// Claude Code's connectivity check: answered here, never forwarded,
+		// never a model call.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if r.Method != http.MethodPost || path != "/v1/messages" {
 		// Only model inference is allowed; any other API surface (token
 		// counting, models, files, batches...) is refused, not forwarded.

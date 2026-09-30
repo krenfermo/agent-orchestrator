@@ -68,7 +68,7 @@ func newSandboxRig(t *testing.T) *sandboxRig {
 	}
 	r := &sandboxRig{profile: profile, secret: secret, ctlSock: filepath.Join(ctlDir, "ctl.sock")}
 	r.p = SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: filepath.Join(root, "aosrc"), PrivateCtl: ctlDir, ToolsRO: filepath.Join(root, "tools"),
-		PosWork: filepath.Join(pos, "work"), PosWorktrees: filepath.Join(pos, "ao-data", "worktrees"), PosHome: filepath.Join(pos, "runtime-home"), PosTmp: filepath.Join(pos, "tmp"), PosRunFile: filepath.Join(pos, "ao-data", "running.json"), PosPrompts: filepath.Join(pos, "ao-data", "prompts"),
+		PosWork: filepath.Join(pos, "work"), PosWorktrees: filepath.Join(pos, "ao-data", "worktrees"), PosHome: filepath.Join(pos, "runtime-home"), PosTmp: filepath.Join(pos, "tmp"), PosRunFile: filepath.Join(pos, "ao-data", "running.json"), PosPrompts: filepath.Join(pos, "ao-data", "prompts"), PosHookBin: filepath.Join(pos, "ao-data", "hook-bin"),
 		ProxyPort: 1, DaemonPort: 2}
 	return r
 }

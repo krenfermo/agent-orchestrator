@@ -207,7 +207,7 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 		ClaudeArgs: []string{"--strict-mcp-config", "--disallowedTools=RemoteTrigger,SendMessage,ListAgents,WebFetch,WebSearch"},
 		LaunchLog:  filepath.Join(r.ctlDir, "launches.jsonl"),
 		Sandbox: SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: r.e.Cfg.AOSrc, PrivateCtl: r.ctlDir, ToolsRO: r.e.Cfg.ToolsRO,
-			PosWork: r.work, PosWorktrees: filepath.Join(r.dataDir, "worktrees"), PosHome: r.home, PosTmp: r.tmp, PosRunFile: r.runFile, PosPrompts: filepath.Join(r.dataDir, "prompts"),
+			PosWork: r.work, PosWorktrees: filepath.Join(r.dataDir, "worktrees"), PosHome: r.home, PosTmp: r.tmp, PosRunFile: r.runFile, PosPrompts: filepath.Join(r.dataDir, "prompts"), PosHookBin: filepath.Join(r.dataDir, "hook-bin"),
 			ProxyPort: r.proxyPort, DaemonPort: r.daemonPort}}
 	if capture {
 		cfg.Capture = filepath.Join(r.ctlDir, "captures")

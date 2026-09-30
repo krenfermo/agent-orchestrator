@@ -40,6 +40,7 @@ const agentSandboxProfile = `(version 1)
 (allow file-read* file-write* (subpath (param "POS_TMP")))
 (allow file-read* (literal (param "POS_RUN_FILE")))
 (allow file-read* (subpath (param "POS_PROMPTS")))
+(allow file-read* (subpath (param "POS_HOOKBIN")))
 (allow file-read* (subpath (param "TOOLS_RO")))
 
 ; AO source trees (they document the experiment) and the supervisor's
@@ -77,15 +78,15 @@ const agentSandboxProfile = `(version 1)
 
 // SandboxParams are the concrete paths/ports of one position.
 type SandboxParams struct {
-	AOHome, RealHome, AOSrc, PrivateCtl, ToolsRO                   string
-	PosWork, PosWorktrees, PosHome, PosTmp, PosRunFile, PosPrompts string
-	ProxyPort, DaemonPort                                          int
+	AOHome, RealHome, AOSrc, PrivateCtl, ToolsRO                               string
+	PosWork, PosWorktrees, PosHome, PosTmp, PosRunFile, PosPrompts, PosHookBin string
+	ProxyPort, DaemonPort                                                      int
 }
 
 func (p SandboxParams) args() ([]string, error) {
 	vals := map[string]string{
 		"AO_HOME": p.AOHome, "REAL_HOME": p.RealHome, "AO_SRC": p.AOSrc, "PRIVATE_CTL": p.PrivateCtl, "TOOLS_RO": p.ToolsRO,
-		"POS_WORK": p.PosWork, "POS_WORKTREES": p.PosWorktrees, "POS_HOME": p.PosHome, "POS_TMP": p.PosTmp, "POS_RUN_FILE": p.PosRunFile, "POS_PROMPTS": p.PosPrompts,
+		"POS_WORK": p.PosWork, "POS_WORKTREES": p.PosWorktrees, "POS_HOME": p.PosHome, "POS_TMP": p.PosTmp, "POS_RUN_FILE": p.PosRunFile, "POS_PROMPTS": p.PosPrompts, "POS_HOOKBIN": p.PosHookBin,
 		"PROXY_PORT": fmt.Sprint(p.ProxyPort), "DAEMON_PORT": fmt.Sprint(p.DaemonPort),
 	}
 	keys := make([]string, 0, len(vals))

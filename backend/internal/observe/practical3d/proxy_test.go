@@ -307,6 +307,14 @@ func TestProxyRefusesUnobservableOrOutOfMappingRequests(t *testing.T) {
 			_ = resp.Body.Close()
 			return resp.StatusCode, ""
 		}},
+		"models endpoint": {ArmOff, nil, func(r *proxyRig) (int, string) {
+			resp, err := http.Get(r.base + "/v1/models")
+			if err != nil {
+				return 0, err.Error()
+			}
+			_ = resp.Body.Close()
+			return resp.StatusCode, ""
+		}},
 		"count_tokens endpoint": {ArmOff, nil, func(r *proxyRig) (int, string) {
 			resp, err := http.Post(r.base+"/v1/messages/count_tokens", "application/json", bytes.NewReader(requestBody(testPrimaryModel, 1, "")))
 			if err != nil {
@@ -397,5 +405,22 @@ func TestBaseClassFromRequestStructure(t *testing.T) {
 		if got := cls(body); got != want {
 			t.Errorf("want %s got %s", want, got)
 		}
+	}
+}
+
+func TestProxyAnswersConnectivityCheckLocally(t *testing.T) {
+	t.Parallel()
+	rig := newProxyRig(t, ArmOff, sseSuccess, nil)
+	req, _ := http.NewRequest(http.MethodHead, rig.base+"/api/hello", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 || rig.hits.Load() != 0 {
+		t.Fatalf("status=%d upstream hits=%d", resp.StatusCode, rig.hits.Load())
+	}
+	if m, _ := rig.client.Outcome(); m != "" {
+		t.Fatalf("connectivity check malformed the position: %s", m)
 	}
 }
