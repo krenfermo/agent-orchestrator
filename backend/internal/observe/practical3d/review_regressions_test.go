@@ -197,3 +197,18 @@ func TestRetriedInitialCallStillCountsAsMeasured(t *testing.T) {
 		t.Fatalf("retried-then-successful initial call rejected: %s %v", pr.State, pr.Errors)
 	}
 }
+
+func TestLiveEnvironmentObserverKeepsEmptyListsPresent(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := EnvironmentInputs{RuntimeVersions: []VersionInput{}, ProviderClientCLIVersions: []VersionInput{}, TaskToolVersions: []VersionInput{}, RunnerInstrumentVersions: []VersionInput{}, EffectiveEnvironmentConfigAllowlist: []ConfigInput{}, AdditionalLocalConfiguration: []ConfigInput{}}
+	got, err := LiveEnvironmentObserver{Expected: e, AOBinaryPath: self}.Observe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RuntimeVersions == nil || got.AdditionalLocalConfiguration == nil || got.EffectiveEnvironmentConfigAllowlist == nil {
+		t.Fatal("empty lists became nil")
+	}
+}
