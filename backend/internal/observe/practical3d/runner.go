@@ -32,7 +32,37 @@ func (d DirArtifactResolver) ReadArtifact(ref string) ([]byte, error) {
 	if !safeRelative(ref) {
 		return nil, fmt.Errorf("unsafe artifact ref %q", ref)
 	}
-	return os.ReadFile(filepath.Join(d.Root, filepath.FromSlash(ref)))
+	return d.readContained(filepath.Join(d.Root, filepath.FromSlash(ref)))
+}
+
+// readContained refuses a root inside production AO data, and any file that
+// is not a regular file resolving (through symlinks) inside the root.
+func (d DirArtifactResolver) readContained(path string) ([]byte, error) {
+	if err := RefuseProductionPath(d.Root); err != nil {
+		return nil, err
+	}
+	root, err := filepath.EvalSymlinks(d.Root)
+	if err != nil {
+		return nil, err
+	}
+	if err := RefuseProductionPath(root); err != nil {
+		return nil, err
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	if !within(resolved, root) {
+		return nil, fmt.Errorf("artifact %s escapes the artifact root", path)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("artifact %s is not a regular file", path)
+	}
+	return os.ReadFile(resolved)
 }
 
 // ReadDigest reads <Root>/sha256/<digest>.
@@ -40,7 +70,7 @@ func (d DirArtifactResolver) ReadDigest(digest string) ([]byte, error) {
 	if !validSHA256(digest) {
 		return nil, fmt.Errorf("invalid content digest")
 	}
-	return os.ReadFile(filepath.Join(d.Root, "sha256", digest))
+	return d.readContained(filepath.Join(d.Root, "sha256", digest))
 }
 
 // TransportRequest carries the immutable canonical request bytes. The
@@ -202,9 +232,16 @@ func Run(ctx context.Context, m Manifest, o RunnerOptions) (RunResult, error) {
 		if !r.started && errors.Is(err, ErrPrestartInvalid) {
 			return r.prestartInvalid(err)
 		}
+		if r.started {
+			return r.failAfterStart(err)
+		}
 		return RunResult{Root: root}, err
 	}
-	return r.decide()
+	res, err := r.decide()
+	if err != nil && res.Report.Verdict == "" {
+		return r.failAfterStart(err)
+	}
+	return res, err
 }
 
 func (r *runner) preflight(ctx context.Context) error {
@@ -280,9 +317,10 @@ func (r *runner) prestartInvalid(cause error) (RunResult, error) {
 	_ = r.ledger.Append(Event{Type: EventPrestartInvalid, ExperimentID: r.id, Timestamp: now, ReasonCode: ReasonPrestartInvalid, Reason: cause.Error()})
 	_ = r.ledger.Append(Event{Type: EventDecision, ExperimentID: r.id, Timestamp: now, Decision: "NO_GO", ReasonCode: ReasonPrestartInvalid, Reason: cause.Error()})
 	_ = r.ledger.Close()
+	digest, _ := sealLedger(filepath.Join(r.root, "ledger.jsonl"))
 	report := Report{SchemaVersion: ReportSchemaVersion, ExperimentID: r.id, Verdict: "NO_GO", ReasonCode: ReasonPrestartInvalid, Reason: cause.Error(), GeneratedAt: now, SignalAvailability: map[string]string{}, ResidualConfounder: ResidualConfounder{Present: true, Statement: "batch never started"}}
 	_ = WriteReport(filepath.Join(r.root, "report.json"), report)
-	_ = r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: "PRESTART_INVALID", Timestamp: now, Verdict: "NO_GO", ReasonCode: ReasonPrestartInvalid})
+	_ = r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: "PRESTART_INVALID", Timestamp: now, Verdict: "NO_GO", ReasonCode: ReasonPrestartInvalid, LedgerSHA256: digest})
 	if errors.Is(cause, ErrPrestartInvalid) {
 		return RunResult{Root: r.root, Report: report}, cause
 	}
@@ -326,15 +364,27 @@ func (r *runner) runSchedule(ctx context.Context) error {
 			}
 			continue
 		}
-		state, err := r.runPosition(ctx, p)
+		state, teardownErr, err := r.runPosition(ctx, p)
 		if err != nil {
 			return err
 		}
 		if state == StateProviderSanction {
 			stopNext = "PROVIDER_SANCTION at position " + fmt.Sprint(p.PositionIndex)
 		}
+		if teardownErr != nil {
+			stopNext = fmt.Sprintf("local teardown not verified after position %d: %v", p.PositionIndex, teardownErr)
+		}
 	}
 	return nil
+}
+
+type positionKey struct{}
+
+// PositionFromContext reports the position an environment observation or
+// provider call belongs to (absent for the batch preflight).
+func PositionFromContext(ctx context.Context) (Position, bool) {
+	p, ok := ctx.Value(positionKey{}).(Position)
+	return p, ok
 }
 
 func (r *runner) observe(ctx context.Context) (string, error) {
@@ -352,19 +402,20 @@ func (r *runner) event(p Position, typ EventType) Event {
 // runPosition returns the terminal state it recorded. A returned error is a
 // ledger failure (or, before the first SAMPLE_START, PRESTART_INVALID); the
 // decision then sees an incomplete lineage and is NO_GO.
-func (r *runner) runPosition(ctx context.Context, p Position) (TerminalState, error) {
+func (r *runner) runPosition(ctx context.Context, p Position) (TerminalState, error, error) { //nolint:revive // (state, teardown error, fatal error)
+	ctx = context.WithValue(ctx, positionKey{}, p)
 	expected := r.m.ExecutionEnvironment.ExpectedExecutionEnvironmentDigest
 	preDigest, obsErr := r.observe(ctx)
 	pre := r.event(p, EventEnvironment)
 	pre.Phase, pre.ObservedDigest = "PRE_START", preDigest
 	if err := r.ledger.Append(pre); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !r.started && (obsErr != nil || preDigest != expected) {
 		if obsErr == nil {
 			obsErr = fmt.Errorf("observed digest %s", preDigest)
 		}
-		return "", fmt.Errorf("%w: environment diverged before the first SAMPLE_START: %w", ErrPrestartInvalid, obsErr)
+		return "", nil, fmt.Errorf("%w: environment diverged before the first SAMPLE_START: %w", ErrPrestartInvalid, obsErr)
 	}
 	workspace, setupErr := createPositionWorkspace(r.root, p)
 	if setupErr == nil {
@@ -374,10 +425,10 @@ func (r *runner) runPosition(ctx context.Context, p Position) (TerminalState, er
 		setupErr = r.o.Workspaces.Prepare(ctx, r.m, p, workspace)
 	}
 	if setupErr != nil && !r.started {
-		return "", fmt.Errorf("%w: position workspace: %w", ErrPrestartInvalid, setupErr)
+		return "", nil, fmt.Errorf("%w: position workspace: %w", ErrPrestartInvalid, setupErr)
 	}
 	if err := r.ledger.Append(r.event(p, EventSampleStart)); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	r.started = true
 
@@ -394,6 +445,7 @@ func (r *runner) runPosition(ctx context.Context, p Position) (TerminalState, er
 		positionCtx, cancel := context.WithTimeout(ctx, time.Duration(r.m.Deadlines.PositionSeconds)*time.Second)
 		pc := PositionContext{ExperimentID: r.id, Position: p, Workspace: workspace}
 		client := newObservedClient(positionCtx, r.m, p, workspace, r.id, r.ledger, r.o.Transport, r.o.Now, r.o.Sleep, r.spans)
+		client.observe = r.observe
 		var execErr error
 		execution, execErr = r.o.Executor.Execute(positionCtx, pc, client)
 		timedOut := errors.Is(positionCtx.Err(), context.DeadlineExceeded)
@@ -410,8 +462,9 @@ func (r *runner) runPosition(ctx context.Context, p Position) (TerminalState, er
 			}
 		}
 	}
-	if err := r.o.Workspaces.Finalize(ctx, r.m, p, workspace); err != nil {
-		state, reason = StateMalformedResult, "teardown verification: "+err.Error()
+	teardownErr := r.o.Workspaces.Finalize(ctx, r.m, p, workspace)
+	if teardownErr != nil {
+		state, reason = StateMalformedResult, "teardown verification: "+teardownErr.Error()
 	}
 	postDigest, postErr := r.observe(ctx)
 	if postErr != nil || postDigest != expected {
@@ -420,20 +473,20 @@ func (r *runner) runPosition(ctx context.Context, p Position) (TerminalState, er
 	post := r.event(p, EventEnvironment)
 	post.Phase, post.ObservedDigest = "PRE_TERMINAL", postDigest
 	if err := r.ledger.Append(post); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	result.TerminalState = state
 	res := r.event(p, EventPositionResult)
 	res.Result = &result
 	if err := r.ledger.Append(res); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	term := r.event(p, EventPositionTerminal)
 	term.TerminalState, term.Reason = state, reason
 	if err := r.ledger.Append(term); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return state, nil
+	return state, teardownErr, nil
 }
 
 // classify maps executor/client evidence onto the single terminal enum.
@@ -481,16 +534,11 @@ func (r *runner) decide() (RunResult, error) {
 		return RunResult{Root: r.root}, err
 	}
 	path := filepath.Join(r.root, "ledger.jsonl")
-	events, err := ReadLedger(path)
+	report := EvaluateLedgerFile(r.m, path, r.o.Now().UTC())
+	l, err := reopenLedger(path)
 	if err != nil {
 		return RunResult{Root: r.root}, err
 	}
-	report := Evaluate(r.m, events, r.o.Now().UTC())
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
-	if err != nil {
-		return RunResult{Root: r.root}, err
-	}
-	l := &Ledger{file: f, path: path}
 	err = l.Append(Event{Type: EventDecision, ExperimentID: r.id, Timestamp: r.o.Now().UTC(), Decision: report.Verdict, ReasonCode: report.ReasonCode, Reason: report.Reason})
 	if cerr := l.Close(); err == nil {
 		err = cerr
@@ -501,11 +549,47 @@ func (r *runner) decide() (RunResult, error) {
 	if err := WriteReport(filepath.Join(r.root, "report.json"), report); err != nil {
 		return RunResult{Root: r.root}, err
 	}
+	digest, err := sealLedger(path)
+	if err != nil {
+		return RunResult{Root: r.root}, err
+	}
 	kind := runKind(r.o)
-	if err := r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: kind, Timestamp: r.o.Now().UTC(), Verdict: report.Verdict, ReasonCode: report.ReasonCode}); err != nil {
+	if err := r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: kind, Timestamp: r.o.Now().UTC(), Verdict: report.Verdict, ReasonCode: report.ReasonCode, LedgerSHA256: digest}); err != nil {
 		return RunResult{Root: r.root}, err
 	}
 	return RunResult{Root: r.root, Report: report}, nil
+}
+
+// failAfterStart handles a runner/ledger failure after the first
+// SAMPLE_START: no position is omitted silently. It publishes the NO_GO
+// decision over whatever the ledger holds (missing terminals are malformed
+// and invalidate the lineage) and anchors it in the registry.
+func (r *runner) failAfterStart(cause error) (RunResult, error) {
+	_ = r.ledger.Close()
+	path := filepath.Join(r.root, "ledger.jsonl")
+	report := EvaluateLedgerFile(r.m, path, r.o.Now().UTC())
+	report.Verdict = "NO_GO"
+	if report.ReasonCode == ReasonAllConditions || report.ReasonCode == "" {
+		report.ReasonCode = ReasonLineageInvalid
+	}
+	report.Reason = "runner failure after SAMPLE_START: " + cause.Error() + "; " + report.Reason
+	_ = WriteReport(filepath.Join(r.root, "report.json"), report)
+	digest, _ := sealLedger(path)
+	_ = r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: "RUNNER_FAILURE_AFTER_START", Timestamp: r.o.Now().UTC(), Verdict: "NO_GO", ReasonCode: report.ReasonCode, LedgerSHA256: digest})
+	return RunResult{Root: r.root, Report: report}, cause
+}
+
+// sealLedger makes the finished ledger read-only and returns its digest,
+// which the registry anchors.
+func sealLedger(path string) (string, error) {
+	if err := os.Chmod(path, 0o400); err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(raw), nil
 }
 
 // registryFor returns the single registry for every run under the Frente 3

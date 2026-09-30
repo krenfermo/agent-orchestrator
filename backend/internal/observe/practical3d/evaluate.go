@@ -14,6 +14,27 @@ type eventBucket struct{ all, envPre, envPost, starts, results, terminals, dispa
 // ReportSchemaVersion versions the published report.
 const ReportSchemaVersion = "ao.3d-practical.report.v2"
 
+// EvaluateLedgerFile verifies the ledger hash chain and decides it. A broken
+// chain (a removed, inserted, reordered or edited line) invalidates lineage.
+func EvaluateLedgerFile(m Manifest, path string, now time.Time) Report {
+	events, err := ReadLedger(path)
+	if err != nil {
+		r := Evaluate(m, nil, now)
+		r.ReasonCode, r.Reason = ReasonLineageInvalid, "ledger unreadable: "+err.Error()
+		return r
+	}
+	report := Evaluate(m, events, now)
+	if err := VerifyLedgerChain(path); err != nil {
+		report.Verdict, report.LineageValid, report.AllCompleted = "NO_GO", false, false
+		report.LineageErrors = append(report.LineageErrors, err.Error())
+		if report.ReasonCode == ReasonAllConditions || report.ReasonCode == ReasonNotAllCompleted || report.ReasonCode == ReasonQuality || report.ReasonCode == ReasonEfficiency || report.ReasonCode == ReasonNegativeControl {
+			report.ReasonCode = ReasonLineageInvalid
+		}
+		report.Reason = err.Error()
+	}
+	return report
+}
+
 // Evaluate is decide(manifest, ledger) of 06 §6 plus the diagnostic
 // publication of 06 §7. It is total: every input yields a Report, and every
 // report other than GO is NO_GO.
@@ -454,6 +475,10 @@ func materializeAttempts(m Manifest, p Position, dispatches, finals []Event) mat
 			*errs = append(*errs, "dispatch provider/model/config differs from the invocation mapping")
 			continue
 		}
+		if d.ObservedDigest != m.ExecutionEnvironment.ExpectedExecutionEnvironmentDigest {
+			*errs = append(*errs, "dispatch lacks a matching per-attempt environment observation")
+			continue
+		}
 		if !validSHA256(d.RepresentationSHA256) || d.AttachmentPresent == nil || d.ExternalContext == nil || *d.ExternalContext {
 			*errs = append(*errs, "dispatch trace incomplete")
 			continue
@@ -502,6 +527,13 @@ func materializeAttempts(m Manifest, p Position, dispatches, finals []Event) mat
 		}
 		if len(f.ProviderMetadata) == 0 || !json.Valid(f.ProviderMetadata) || len(f.TerminalMetadata) == 0 || !json.Valid(f.TerminalMetadata) {
 			*errs = append(*errs, "provider/terminal metadata missing")
+			continue
+		}
+		var account struct {
+			AccountRefSHA256 string `json:"account_ref_sha256"`
+		}
+		if json.Unmarshal(f.ProviderMetadata, &account) != nil || account.AccountRefSHA256 != m.Provider.AccountRefSHA256 {
+			*errs = append(*errs, "provider metadata does not attest the frozen account_ref_sha256")
 			continue
 		}
 		if f.Timestamp.Before(d.Timestamp) {

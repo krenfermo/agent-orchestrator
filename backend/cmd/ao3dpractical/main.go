@@ -237,6 +237,29 @@ func runCommand(args []string, out io.Writer) error {
 	if *positionDriver == "" || *providerDriver == "" || *oracleDriver == "" || *artifacts == "" || *aoBinary == "" || *fixtureRepo == "" || *root == "" {
 		return errors.New("--run-root, --artifact-root, --ao-binary, --fixture-repo, --position-driver, --provider-driver and --oracle-driver are required")
 	}
+	attested := map[string]bool{}
+	for _, name := range allowlistedEnv(m) {
+		attested[name] = true
+	}
+	if !attested["PATH"] {
+		return errors.New("PATH is passed to every driver, so it must be in the frozen environment allowlist")
+	}
+	for _, name := range providerEnv {
+		if !attested[name] {
+			return fmt.Errorf("--provider-env %s is not attested by the frozen environment allowlist", name)
+		}
+	}
+	// Provider-only names (credentials) never reach the position driver.
+	providerOnly := map[string]bool{}
+	for _, name := range providerEnv {
+		providerOnly[name] = true
+	}
+	var positionNames []string
+	for _, name := range allowlistedEnv(m) {
+		if !providerOnly[name] {
+			positionNames = append(positionNames, name)
+		}
+	}
 	if err := verifyListedBinary(*positionDriver, append(append([]practical3d.VersionInput{}, m.ExecutionEnvironment.Inputs.TaskToolVersions...), m.ExecutionEnvironment.Inputs.RunnerInstrumentVersions...)); err != nil {
 		return err
 	}
@@ -253,12 +276,14 @@ func runCommand(args []string, out io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	res, err := practical3d.Run(ctx, m, practical3d.RunnerOptions{
-		Root:        *root,
+		Root: *root,
+		// Every allowlisted value is observed by LiveEnvironmentObserver and
+		// covered by the expected environment digest.
 		Metadata:    env.Metadata,
 		Environment: practical3d.LiveEnvironmentObserver{Expected: m.ExecutionEnvironment.Inputs, AOBinaryPath: *aoBinary},
 		Artifacts:   practical3d.DirArtifactResolver{Root: *artifacts},
-		Transport:   commandTransport{path: *providerDriver, envNames: append(allowlistedEnv(m), providerEnv...)},
-		Executor:    commandExecutor{path: *positionDriver, envNames: allowlistedEnv(m)},
+		Transport:   commandTransport{path: *providerDriver, envNames: allowlistedEnv(m)},
+		Executor:    commandExecutor{path: *positionDriver, envNames: positionNames},
 		Oracle:      commandOracle{path: *oracleDriver, manifest: m},
 		Workspaces:  practical3d.GitWorkspaceManager{FixtureRepo: *fixtureRepo},
 	})
@@ -360,6 +385,9 @@ func allowlistedEnv(m practical3d.Manifest) []string {
 
 func withEnv(env, names []string) ([]string, error) {
 	for _, name := range names {
+		if name == "PATH" {
+			continue // positionEnv already passes the attested PATH
+		}
 		if name == "" || strings.ContainsAny(name, "=\x00") || reservedEnv[name] || strings.HasPrefix(name, "AO_3D_PRACTICAL") {
 			return nil, fmt.Errorf("env name %q is invalid or reserved", name)
 		}

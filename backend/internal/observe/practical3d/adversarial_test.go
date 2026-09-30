@@ -1,6 +1,7 @@
 package practical3d
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,10 +86,10 @@ func TestAttackD_TwoRetryBudgetsForOneRole(t *testing.T) {
 func TestAttackE_ToolVersionDiffersBetweenArms(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	divergent := func(n int) (EnvironmentInputs, error) {
+	divergent := func(ctx context.Context) (EnvironmentInputs, error) {
 		e := f.env
-		// Observation 1 is the batch preflight; then PRE_START/PRE_TERMINAL per position.
-		if n >= 2 && f.m.Randomization.Schedule[(n-2)/2].Arm == ArmAssisted {
+		// The batch preflight has no position; every later observation does.
+		if p, ok := PositionFromContext(ctx); ok && p.Arm == ArmAssisted {
 			e.TaskToolVersions = []VersionInput{{Component: "go", Version: "go1.27", BinarySHA256: sha256Hex([]byte("go1.27"))}}
 		}
 		return e, nil

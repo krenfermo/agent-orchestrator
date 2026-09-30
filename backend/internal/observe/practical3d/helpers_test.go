@@ -41,7 +41,7 @@ type fixture struct {
 	respond   func(Position, int) (ProviderResponse, error)
 	result    func(Position) ExecutionResult
 	oracle    func(Position) OracleResult
-	observe   func(n int) (EnvironmentInputs, error)
+	observe   func(ctx context.Context) (EnvironmentInputs, error)
 	preflight func() ([]CellRepresentation, error)
 	execute   func(context.Context, PositionContext, *ObservedClient) (ExecutionResult, error)
 	now       func() time.Time
@@ -73,14 +73,14 @@ func newFixture(t *testing.T) *fixture {
 		return r
 	}
 	f.oracle = func(p Position) OracleResult { return goodOracle(f.m, p.TaskID) }
-	f.observe = func(int) (EnvironmentInputs, error) { return f.env, nil }
+	f.observe = func(context.Context) (EnvironmentInputs, error) { return f.env, nil }
 	f.preflight = func() ([]CellRepresentation, error) { return TechnicalPreflight(f.m, f.art.Attachment), nil }
 	return f
 }
 
 func success(uncached, cached int64) ProviderResponse {
 	in := uncached + cached
-	return ProviderResponse{Output: json.RawMessage(`{"ok":true}`), Outcome: OutcomeSuccess, InputTokens: &in, CachedInputTokens: &cached, UncachedInputTokens: &uncached, ProviderMetadata: json.RawMessage(`{"fixture":true}`), TerminalMetadata: json.RawMessage(`{}`)}
+	return ProviderResponse{Output: json.RawMessage(`{"ok":true}`), Outcome: OutcomeSuccess, InputTokens: &in, CachedInputTokens: &cached, UncachedInputTokens: &uncached, ProviderMetadata: json.RawMessage(`{"account_ref_sha256":"` + sha256Hex([]byte("fixture-zero")) + `"}`), TerminalMetadata: json.RawMessage(`{}`)}
 }
 
 func outcome(o RequestOutcome, uncached int64) ProviderResponse {
@@ -160,12 +160,11 @@ type countingObserver struct {
 	n  int
 }
 
-func (o *countingObserver) Observe(context.Context) (EnvironmentInputs, error) {
+func (o *countingObserver) Observe(ctx context.Context) (EnvironmentInputs, error) {
 	o.mu.Lock()
 	o.n++
-	n := o.n
 	o.mu.Unlock()
-	return o.f.observe(n)
+	return o.f.observe(ctx)
 }
 
 func (f *fixture) options(t *testing.T) RunnerOptions {

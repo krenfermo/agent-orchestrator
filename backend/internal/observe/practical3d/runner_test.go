@@ -418,7 +418,7 @@ func TestEnvironmentDigestMismatch(t *testing.T) {
 	t.Parallel()
 	t.Run("before batch is PRESTART_INVALID", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe = func(int) (EnvironmentInputs, error) {
+		f.observe = func(context.Context) (EnvironmentInputs, error) {
 			e := f.env
 			e.TaskToolVersions = []VersionInput{{Component: "go", Version: "other", BinarySHA256: sha256Hex([]byte("go"))}}
 			return e, nil
@@ -438,9 +438,9 @@ func TestEnvironmentDigestMismatch(t *testing.T) {
 	})
 	t.Run("after first SAMPLE_START is MALFORMED for that position", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe = func(n int) (EnvironmentInputs, error) {
+		f.observe = func(ctx context.Context) (EnvironmentInputs, error) {
 			e := f.env
-			if n == 6 { // preflight=1, pos1 pre=2 post=3, pos2 pre=4 post=5, pos3 pre=6
+			if p, ok := PositionFromContext(ctx); ok && p.PositionIndex == 3 {
 				e.TaskToolVersions = []VersionInput{{Component: "go", Version: "other", BinarySHA256: sha256Hex([]byte("go"))}}
 			}
 			return e, nil

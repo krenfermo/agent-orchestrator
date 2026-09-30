@@ -555,6 +555,7 @@ const (
 // or rewritten; every field that a lifecycle rule repeats is repeated verbatim.
 type Event struct {
 	Type                         EventType       `json:"type"`
+	PrevEventSHA256              string          `json:"prev_event_sha256,omitempty"`
 	ExperimentID                 string          `json:"experiment_id"`
 	Timestamp                    time.Time       `json:"timestamp"`
 	ManifestSHA256               string          `json:"manifest_sha256,omitempty"`

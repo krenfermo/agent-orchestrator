@@ -200,6 +200,7 @@ func technicalDriver(args []string, in io.Reader, out io.Writer) error {
 	case "position":
 		return technicalPosition(m, attachment, in, out)
 	case "provider":
+		_ = os.Setenv("AO_3D_TECHNICAL_ACCOUNT", m.Provider.AccountRefSHA256)
 		return technicalProvider(in, out)
 	case "oracle":
 		return technicalOracle(m, in, out)
@@ -279,7 +280,7 @@ func technicalProvider(in io.Reader, out io.Writer) error {
 	}
 	uncached, cached := int64(len(req)/4), int64(n*3)
 	total := uncached + cached
-	return json.NewEncoder(out).Encode(practical3d.ProviderResponse{Output: json.RawMessage(`{"technical":true}`), Outcome: outcome, InputTokens: &total, CachedInputTokens: &cached, UncachedInputTokens: &uncached, ProviderMetadata: json.RawMessage(`{"technical_provider":true}`), TerminalMetadata: json.RawMessage(`{"attempt":` + strconv.Itoa(n) + `}`)})
+	return json.NewEncoder(out).Encode(practical3d.ProviderResponse{Output: json.RawMessage(`{"technical":true}`), Outcome: outcome, InputTokens: &total, CachedInputTokens: &cached, UncachedInputTokens: &uncached, ProviderMetadata: json.RawMessage(`{"account_ref_sha256":"` + os.Getenv("AO_3D_TECHNICAL_ACCOUNT") + `"}`), TerminalMetadata: json.RawMessage(`{"attempt":` + strconv.Itoa(n) + `}`)})
 }
 
 func technicalOracle(m practical3d.Manifest, in io.Reader, out io.Writer) error {

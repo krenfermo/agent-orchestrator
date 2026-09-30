@@ -32,6 +32,7 @@ type ObservedClient struct {
 	roleStart    map[Role]time.Time
 	malformed    string
 	failure      TerminalState
+	observe      func(context.Context) (string, error)
 	closed       bool
 }
 
@@ -100,6 +101,14 @@ func (c *ObservedClient) Call(req ProviderRequest) (ProviderResponse, error) {
 			return ProviderResponse{}, c.malform("treatment/representation: " + err.Error())
 		}
 		cfg, _ := invocationConfig(c.m, c.p.TaskID, req.Role, class)
+		observed := ""
+		if c.observe != nil {
+			d, err := c.observe(c.ctx)
+			if err != nil || d != c.m.ExecutionEnvironment.ExpectedExecutionEnvironmentDigest {
+				return ProviderResponse{}, c.malform("execution environment diverged before a provider attempt")
+			}
+			observed = d
+		}
 		c.callIndex++
 		attemptID := sha256Hex([]byte(fmt.Sprintf("attempt:%s:%s:%d", c.experimentID, c.p.SampleID, c.callIndex)))
 		base := Event{ExperimentID: c.experimentID, SampleID: c.p.SampleID, PositionIndex: c.p.PositionIndex, TaskID: c.p.TaskID, Arm: c.p.Arm, AttemptID: attemptID, CallIndex: c.callIndex, Role: req.Role, CallClass: class, RetryChainID: chain, RetryIndex: retryIndex, RetryCause: retryCause}
@@ -107,6 +116,7 @@ func (c *ObservedClient) Call(req ProviderRequest) (ProviderResponse, error) {
 		dispatch.Type, dispatch.Timestamp = EventAttemptDispatched, c.now().UTC()
 		dispatch.ProviderID, dispatch.ModelID, dispatch.ModelVersion, dispatch.EffectiveConfigSHA256 = c.m.Provider.ProviderID, cfg.ModelID, cfg.ModelVersion, cfg.EffectiveConfigSHA256
 		dispatch.RepresentationSHA256 = sha256Hex(canonical)
+		dispatch.ObservedDigest = observed
 		dispatch.AttachmentPresent, dispatch.AttachmentSHA256, dispatch.AttachmentVersion, dispatch.AttachmentOrigin = trace.AttachmentPresent, trace.AttachmentSHA256, trace.AttachmentVersion, trace.AttachmentOrigin
 		dispatch.ExternalContext, dispatch.ContextSourceInventorySHA256, dispatch.ContextSourceStates = ptr(false), trace.ContextSourceInventorySHA256, trace.ContextSourceStates
 		if err := c.ledger.Append(dispatch); err != nil {

@@ -161,6 +161,7 @@ type RegistryEntry struct {
 	Timestamp    time.Time `json:"timestamp"`
 	Verdict      string    `json:"verdict,omitempty"`
 	ReasonCode   string    `json:"reason_code,omitempty"`
+	LedgerSHA256 string    `json:"ledger_sha256,omitempty"`
 }
 
 // OpenRegistry opens <dir>/registry.jsonl.
@@ -228,6 +229,57 @@ func RefuseProductionPath(path string) error {
 	return nil
 }
 
+// DecideRun re-decides a finished run from disk. It accepts only a run root
+// that the registry recorded (so a copied or fabricated directory cannot be
+// decided), verifies the envelope identity, the ledger hash chain and, when
+// the run has a RESULT, the anchored ledger digest.
+func DecideRun(root string, allowExplicitTemp bool, now time.Time) (Report, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return Report{}, err
+	}
+	if _, err := ValidateRunRoot(filepath.Join(abs, "x"), allowExplicitTemp); err != nil {
+		return Report{}, err
+	}
+	reg, err := registryFor(abs)
+	if err != nil {
+		return Report{}, err
+	}
+	entries, err := reg.Entries()
+	if err != nil {
+		return Report{}, err
+	}
+	env, m, err := ReadEnvelope(filepath.Join(abs, "envelope.json"))
+	if err != nil {
+		return Report{}, err
+	}
+	registered, anchored := false, ""
+	for _, e := range entries {
+		if e.ExperimentID == env.ExperimentID && e.RunRoot == abs {
+			if e.Type == "REGISTERED" {
+				registered = true
+			}
+			if e.Type == "RESULT" {
+				anchored = e.LedgerSHA256
+			}
+		}
+	}
+	if !registered {
+		return Report{}, fmt.Errorf("%w: run root %s is not registered for experiment %s", ErrUnsafeRoot, abs, env.ExperimentID)
+	}
+	path := filepath.Join(abs, "ledger.jsonl")
+	if anchored != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return Report{}, err
+		}
+		if sha256Hex(raw) != anchored {
+			return Report{}, fmt.Errorf("%w: ledger digest differs from the registry anchor", ErrInvalidManifest)
+		}
+	}
+	return EvaluateLedgerFile(m, path, now), nil
+}
+
 // Contains reports whether an experiment_id was ever registered.
 func (r Registry) Contains(id string) (bool, error) {
 	entries, err := r.Entries()
@@ -270,6 +322,7 @@ type Ledger struct {
 	mu   sync.Mutex
 	file *os.File
 	path string
+	head string // SHA-256 of the last appended line (hash chain)
 }
 
 // CreateRunDirectory creates a fresh run root (never reusing an existing one),
@@ -353,6 +406,7 @@ func (l *Ledger) Append(event Event) error {
 	if l.file == nil {
 		return errors.New("ledger closed")
 	}
+	event.PrevEventSHA256 = l.head
 	raw, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -363,7 +417,11 @@ func (l *Ledger) Append(event Event) error {
 	if _, err = l.file.Write(append(raw, '\n')); err != nil {
 		return err
 	}
-	return l.file.Sync()
+	if err := l.file.Sync(); err != nil {
+		return err
+	}
+	l.head = sha256Hex(raw)
+	return nil
 }
 
 // Close closes the ledger file.
@@ -380,6 +438,45 @@ func (l *Ledger) Close() error {
 
 // Path is the ledger file.
 func (l *Ledger) Path() string { return l.path }
+
+// reopenLedger opens an existing ledger for append, continuing its hash chain.
+func reopenLedger(path string) (*Ledger, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	head := ""
+	lines := bytes.Split(bytes.TrimSuffix(raw, []byte{'\n'}), []byte{'\n'})
+	if len(raw) > 0 {
+		head = sha256Hex(lines[len(lines)-1])
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &Ledger{file: f, path: path, head: head}, nil
+}
+
+// VerifyLedgerChain checks that every line names the SHA-256 of the previous
+// line, so no line can be removed, inserted, reordered or edited without
+// rewriting every later line.
+func VerifyLedgerChain(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	prev := ""
+	for i, line := range bytes.Split(bytes.TrimSuffix(raw, []byte{'\n'}), []byte{'\n'}) {
+		var e struct {
+			Prev string `json:"prev_event_sha256"`
+		}
+		if err := json.Unmarshal(line, &e); err != nil || e.Prev != prev {
+			return fmt.Errorf("ledger hash chain broken at line %d", i+1)
+		}
+		prev = sha256Hex(line)
+	}
+	return nil
+}
 
 // ReadLedger strictly decodes every ledger line.
 func ReadLedger(path string) ([]Event, error) {

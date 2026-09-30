@@ -19,7 +19,7 @@ func GenerateSchedule(r Randomization) ([]Position, error) {
 		return nil, fmt.Errorf("%w: randomization constants differ from the frozen protocol", ErrInvalidManifest)
 	}
 	seed, err := hex.DecodeString(r.SeedHex)
-	if err != nil || len(seed) != 32 {
+	if err != nil || len(seed) != 32 || !validSHA256(r.SeedHex) {
 		return nil, fmt.Errorf("%w: seed_hex must be 32 bytes", ErrInvalidManifest)
 	}
 	out := make([]Position, 0, ExpectedPositions)
