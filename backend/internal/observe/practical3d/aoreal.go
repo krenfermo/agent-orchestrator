@@ -102,20 +102,21 @@ func (e *AORealExecutor) logf(format string, args ...any) {
 
 func (e *AORealExecutor) spec(m Manifest, task string) (TaskSpec, error) {
 	for _, t := range m.Tasks {
-		if t.TaskID == task {
-			raw, err := e.Artifacts.ReadDigest(t.TaskManifestSHA256)
-			if err != nil {
-				return TaskSpec{}, err
-			}
-			if sha256Hex(raw) != t.TaskManifestSHA256 {
-				return TaskSpec{}, errors.New("task manifest digest mismatch")
-			}
-			s, err := ParseTaskSpec(raw)
-			if err == nil && s.TaskID != task {
-				err = errors.New("task spec names another task")
-			}
-			return s, err
+		if t.TaskID != task {
+			continue
 		}
+		raw, err := e.Artifacts.ReadDigest(t.TaskManifestSHA256)
+		if err != nil {
+			return TaskSpec{}, err
+		}
+		if sha256Hex(raw) != t.TaskManifestSHA256 {
+			return TaskSpec{}, errors.New("task manifest digest mismatch")
+		}
+		s, err := ParseTaskSpec(raw)
+		if err == nil && s.TaskID != task {
+			err = errors.New("task spec names another task")
+		}
+		return s, err
 	}
 	return TaskSpec{}, fmt.Errorf("task %s not in manifest", task)
 }
@@ -143,7 +144,11 @@ func freePort() (int, error) {
 		return 0, err
 	}
 	defer func() { _ = ln.Close() }()
-	return ln.Addr().(*net.TCPAddr).Port, nil
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0, errors.New("loopback listener has no TCP address")
+	}
+	return addr.Port, nil
 }
 
 func randHex(n int) string {
@@ -277,7 +282,7 @@ func (r *positionRig) startDaemon(ctx context.Context, arm Arm, task string) err
 		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", r.daemonPort))
 		if err == nil {
 			_ = resp.Body.Close()
-			if resp.StatusCode == 200 {
+			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
 		}
@@ -573,6 +578,9 @@ func (d dbRoleResolver) ResolveRole(ctx context.Context, subject string, at time
 			best, role = opened, rl
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
 	switch role {
 	case "worker":
 		return RoleWorker, nil
@@ -611,6 +619,9 @@ func checkNoUnobservedProviderCalls(ctx context.Context, dataDir, runID string, 
 			return err
 		}
 		events = append(events, x)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read usage ledger: %w", err)
 	}
 	for _, x := range events {
 		if x.harness == "codex" {
@@ -690,5 +701,32 @@ func checkRunContext(ctx context.Context, dataDir, runID string, arm Arm, m Mani
 	if arm == ArmAssisted && n == 0 {
 		return errors.New("ASSISTED run has no Project Memory context manifest")
 	}
-	return nil
+	if arm != ArmAssisted {
+		return nil
+	}
+	// Every pack AO rendered must be the frozen one, for the targeted role.
+	target := measuredRoleFor(task)
+	cell, ok := treatmentCell(m, task, target, CallInitial)
+	if !ok || cell.ASSISTED.AttachmentPresent == nil || !*cell.ASSISTED.AttachmentPresent {
+		return fmt.Errorf("task %s has no ASSISTED attachment for %s", task, target)
+	}
+	want := strings.TrimPrefix(cell.ASSISTED.AttachmentVersion, "ao-project-memory-pack:")
+	rows, err := db.QueryContext(ctx, `SELECT role, pack_digest FROM project_memory_context_manifests WHERE workflow_run_id = ? AND pack_digest <> ''`, runID)
+	if err != nil {
+		return fmt.Errorf("read memory manifests: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var role, digest string
+		if err := rows.Scan(&role, &digest); err != nil {
+			return err
+		}
+		if role != aoRole(target) {
+			return fmt.Errorf("ASSISTED run rendered Project Memory for AO role %q; only %s is targeted", role, target)
+		}
+		if digest != want {
+			return fmt.Errorf("ASSISTED run rendered pack %s, frozen pack is %s", digest, want)
+		}
+	}
+	return rows.Err()
 }

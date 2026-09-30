@@ -81,20 +81,25 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 	}
 	defer func() { _ = db.Close() }()
 	role := aoRole(in.MeasuredRole)
-	rows, err := db.QueryContext(ctx, `SELECT DISTINCT subject_kind, session_id FROM usage_attribution_windows WHERE workflow_run_id = ? AND role = ?`, in.RunID, role)
-	if err != nil {
-		return ev, fmt.Errorf("read role windows: %w", err)
-	}
 	var kind, subject string
 	n := 0
-	for rows.Next() {
-		n++
-		if err := rows.Scan(&kind, &subject); err != nil {
-			_ = rows.Close()
-			return ev, err
+	scanErr := func() error {
+		rows, err := db.QueryContext(ctx, `SELECT DISTINCT subject_kind, session_id FROM usage_attribution_windows WHERE workflow_run_id = ? AND role = ?`, in.RunID, role)
+		if err != nil {
+			return err
 		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			n++
+			if err := rows.Scan(&kind, &subject); err != nil {
+				return err
+			}
+		}
+		return rows.Err()
+	}()
+	if scanErr != nil {
+		return ev, fmt.Errorf("read role windows: %w", scanErr)
 	}
-	_ = rows.Close()
 	if n != 1 {
 		return ev, fmt.Errorf("measured role %s has %d AO subjects in run %s, want exactly 1", role, n, in.RunID)
 	}
@@ -133,7 +138,7 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 	}
 	// Every tool_use the proxy saw for the measured role must be observed.
 	for key, p := range keyed {
-		if Role(p.Role) != in.MeasuredRole {
+		if p.Role != in.MeasuredRole {
 			continue
 		}
 		want := map[string]int{}

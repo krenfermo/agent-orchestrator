@@ -110,7 +110,11 @@ func (p *ProviderProxy) Start(controlSocket string) (int, error) {
 	p.ctlSrv = &http.Server{Handler: http.HandlerFunc(p.serveControl), ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = p.srv.Serve(ln) }()
 	go func() { _ = p.ctlSrv.Serve(ctl) }()
-	return ln.Addr().(*net.TCPAddr).Port, nil
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0, errors.New("proxy listener has no TCP address")
+	}
+	return addr.Port, nil
 }
 
 // Close stops both listeners.
@@ -201,9 +205,11 @@ func (p *ProviderProxy) reject(w http.ResponseWriter, c *ObservedClient, status 
 	if c != nil {
 		c.Violation("provider proxy refused a request: " + reason)
 	}
+	body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "permission_error", "message": "ao 3d-practical proxy: " + reason}})
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	_, _ = fmt.Fprintf(w, `{"type":"error","error":{"type":"permission_error","message":%q}}`, "ao 3d-practical proxy: "+reason)
+	_, _ = w.Write(body)
 }
 
 const maxRequestBody = 64 << 20
@@ -419,11 +425,19 @@ func (m messagesRequest) baseClass(man Manifest, task string, role Role) CallCla
 	if !assistant {
 		return CallInitial
 	}
+	// Claude Code may append a trailing system-role message (reminders);
+	// the class is decided by the last conversational turn.
 	var last struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	}
-	if json.Unmarshal(m.Messages[len(m.Messages)-1], &last) == nil && last.Role == "user" {
+	for i := len(m.Messages) - 1; i >= 0; i-- {
+		last.Role, last.Content = "", nil
+		if json.Unmarshal(m.Messages[i], &last) != nil || last.Role != "system" {
+			break
+		}
+	}
+	if last.Role == "user" {
 		var blocks []struct {
 			Type string `json:"type"`
 		}
@@ -573,7 +587,7 @@ func (a *responseAccumulator) jsonBody(b []byte) {
 }
 
 func (a *responseAccumulator) toolUses() []ProxyToolUse {
-	out := []ProxyToolUse{}
+	out := make([]ProxyToolUse, 0, len(a.order))
 	for _, i := range a.order {
 		t := a.tools[i]
 		tu := ProxyToolUse{ID: t.id, Name: t.name}

@@ -176,11 +176,11 @@ var nonSessionCodexArgs = map[string]bool{"--version": true, "-V": true, "-h": t
 // BuildShimLaunch computes the confined argv and the complete environment of
 // one agent launch. Model-calling launches get a proxy token bound to their
 // AO subject; others get an unusable provider endpoint.
-func BuildShimLaunch(cfg ShimConfig, args []string, environ []string, token func(subject string) (string, error)) ([]string, []string, error) {
+func BuildShimLaunch(cfg ShimConfig, args, environ []string, token func(subject string) (string, error)) ([]string, []string, error) {
 	return buildShimLaunch("claude", cfg, args, environ, token)
 }
 
-func buildShimLaunch(harness string, cfg ShimConfig, args []string, environ []string, token func(subject string) (string, error)) ([]string, []string, error) {
+func buildShimLaunch(harness string, cfg ShimConfig, args, environ []string, token func(subject string) (string, error)) ([]string, []string, error) {
 	get := envLookup(environ)
 	env := []string{}
 	for _, k := range shimKeepEnv {
@@ -301,7 +301,8 @@ func ReadShimConfig(path string) (ShimConfig, error) {
 	if err != nil {
 		return c, err
 	}
-	return c, strictUnmarshal(raw, &c)
+	err = strictUnmarshal(raw, &c)
+	return c, err
 }
 
 // ShimEnvConfig names the daemon-environment variable holding the shim

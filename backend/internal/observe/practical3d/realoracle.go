@@ -169,6 +169,9 @@ func finalWorkerCommit(ctx context.Context, w PositionWorkspace) (string, error)
 		}
 		branches = append(branches, b)
 	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
 	if len(branches) != 1 {
 		return "", fmt.Errorf("position has %d worker branches, want exactly 1", len(branches))
 	}

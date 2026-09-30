@@ -95,12 +95,11 @@ func newProxyRig(t *testing.T, arm Arm, upstream http.HandlerFunc, resolver Role
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	l, _, err := CreateRunDirectory(filepath.Join(dir, "run"), m, EnvelopeMetadata{}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledgerPath = l.Path()
+	ledgerPath := l.Path()
 	id, _ := ExperimentID(m)
 	rig := &proxyRig{m: m, art: art, ledger: ledgerPath}
 	rig.upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -396,6 +395,11 @@ func TestBaseClassFromRequestStructure(t *testing.T) {
 		}
 		return r.baseClass(m, "A", RoleWorker)
 	}
+	// Claude Code appends a trailing system-role reminder (observed in the
+	// real mini-E2E); the class comes from the last conversational turn.
+	if got := cls(`{"model":"` + testPrimaryModel + `","messages":[{"role":"user","content":"t"},{"role":"assistant","content":"x"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"r"}]},{"role":"system","content":[{"type":"text","text":"reminder"}]}]}`); got != CallToolResult {
+		t.Errorf("trailing system message: want tool_result got %s", got)
+	}
 	for want, body := range map[CallClass]string{
 		CallInitial:      `{"model":"` + testPrimaryModel + `","messages":[{"role":"user","content":"reminder"},{"role":"user","content":"task"}]}`,
 		CallToolResult:   `{"model":"` + testPrimaryModel + `","messages":[{"role":"user","content":"t"},{"role":"assistant","content":"x"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"r"}]}]}`,
@@ -417,7 +421,7 @@ func TestProxyAnswersConnectivityCheckLocally(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != 200 || rig.hits.Load() != 0 {
+	if resp.StatusCode != http.StatusOK || rig.hits.Load() != 0 {
 		t.Fatalf("status=%d upstream hits=%d", resp.StatusCode, rig.hits.Load())
 	}
 	if m, _ := rig.client.Outcome(); m != "" {

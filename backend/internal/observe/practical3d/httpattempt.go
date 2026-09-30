@@ -68,9 +68,9 @@ var ErrAttemptRefused = errors.New("3d practical: provider attempt refused")
 func (c *ObservedClient) BeginHTTPAttempt(req HTTPAttemptRequest) (*HTTPAttempt, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	refuse := func(reason string) (*HTTPAttempt, error) {
+	refuse := func(reason string) error {
 		_ = c.malform(reason)
-		return nil, fmt.Errorf("%w: %s", ErrAttemptRefused, reason)
+		return fmt.Errorf("%w: %s", ErrAttemptRefused, reason)
 	}
 	if c.closed {
 		return nil, fmt.Errorf("%w: position ended", ErrAttemptRefused)
@@ -82,7 +82,7 @@ func (c *ObservedClient) BeginHTTPAttempt(req HTTPAttemptRequest) (*HTTPAttempt,
 		return nil, fmt.Errorf("%w: position already %s", ErrAttemptRefused, c.failure)
 	}
 	if strings.TrimSpace(req.Subject) == "" {
-		return refuse("provider request without an AO subject")
+		return nil, refuse("provider request without an AO subject")
 	}
 	digest := sha256Hex(req.Body)
 	if c.subjects == nil {
@@ -115,14 +115,14 @@ func (c *ObservedClient) BeginHTTPAttempt(req HTTPAttemptRequest) (*HTTPAttempt,
 	}
 	trace, err := traceHTTPRequest(c.m, c.spans, c.p.TaskID, c.p.Arm, req.Role, class, req)
 	if err != nil {
-		return refuse("treatment/representation: " + err.Error())
+		return nil, refuse("treatment/representation: " + err.Error())
 	}
 	cfg, _ := invocationConfig(c.m, c.p.TaskID, req.Role, class)
 	observed := ""
 	if c.observe != nil {
 		d, err := c.observe(c.ctx)
 		if err != nil || d != c.m.ExecutionEnvironment.ExpectedExecutionEnvironmentDigest {
-			return refuse("execution environment diverged before a provider attempt")
+			return nil, refuse("execution environment diverged before a provider attempt")
 		}
 		observed = d
 	}
@@ -143,7 +143,7 @@ func (c *ObservedClient) BeginHTTPAttempt(req HTTPAttemptRequest) (*HTTPAttempt,
 	dispatch.AttachmentPresent, dispatch.AttachmentSHA256, dispatch.AttachmentVersion, dispatch.AttachmentOrigin = trace.AttachmentPresent, trace.AttachmentSHA256, trace.AttachmentVersion, trace.AttachmentOrigin
 	dispatch.ExternalContext, dispatch.ContextSourceInventorySHA256, dispatch.ContextSourceStates = ptr(false), trace.ContextSourceInventorySHA256, trace.ContextSourceStates
 	if err := c.ledger.Append(dispatch); err != nil {
-		return refuse("ledger append dispatch: " + err.Error())
+		return nil, refuse("ledger append dispatch: " + err.Error())
 	}
 	if _, ok := c.roleStart[req.Role]; !ok {
 		c.roleStart[req.Role] = c.now()
