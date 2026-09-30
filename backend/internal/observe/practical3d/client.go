@@ -33,6 +33,7 @@ type ObservedClient struct {
 	malformed    string
 	failure      TerminalState
 	observe      func(context.Context) (string, error)
+	subjects     map[string]*subjectChain
 	closed       bool
 }
 

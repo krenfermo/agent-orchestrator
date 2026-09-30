@@ -31,7 +31,54 @@ type effectiveConfigV1 struct {
 	SystemPromptSHA256    json.RawMessage `json:"system_prompt_sha256"`
 }
 
+// EffectiveConfigSchemaClaudeCodeV1 closes the effective configuration of a
+// Claude Code agent observed at the AO provider proxy. Every key is checked
+// against the bytes of each real request (model, stream, tool policy) or
+// against the frozen execution environment (CLI version, permission mode).
+const EffectiveConfigSchemaClaudeCodeV1 = "ao.3d-practical.effective-config.claude-code.v1"
+
+// ToolPolicyNoMCPNoWeb forbids MCP and web tools in every request.
+const ToolPolicyNoMCPNoWeb = "no_mcp_no_web"
+
+type effectiveConfigClaudeCodeV1 struct {
+	ClaudeCodeVersion string `json:"claude_code_version"`
+	Model             string `json:"model"`
+	Stream            *bool  `json:"stream"`
+	ToolPolicy        string `json:"tool_policy"`
+	PermissionMode    string `json:"permission_mode"`
+}
+
+func decodeClaudeCodeConfig(raw json.RawMessage) (effectiveConfigClaudeCodeV1, error) {
+	var c effectiveConfigClaudeCodeV1
+	if err := strictUnmarshal(raw, &c); err != nil {
+		return c, err
+	}
+	if c.ClaudeCodeVersion == "" || c.Model == "" || c.Stream == nil || c.ToolPolicy != ToolPolicyNoMCPNoWeb || c.PermissionMode == "" {
+		return c, errors.New("claude-code effective config is incomplete")
+	}
+	return c, nil
+}
+
+// checkEffectiveHTTPConfig compares a real request with its frozen cell config.
+func checkEffectiveHTTPConfig(cfg InvocationConfig, req HTTPAttemptRequest) error {
+	if cfg.EffectiveConfigSchema != EffectiveConfigSchemaClaudeCodeV1 {
+		return fmt.Errorf("cell config schema %q cannot describe a real provider request", cfg.EffectiveConfigSchema)
+	}
+	c, err := decodeClaudeCodeConfig(cfg.EffectiveConfig)
+	if err != nil {
+		return err
+	}
+	if c.Model != cfg.ModelID || c.Model != req.Model || *c.Stream != req.Stream {
+		return fmt.Errorf("request model/stream differ from the frozen effective config")
+	}
+	return nil
+}
+
 func validateEffectiveConfig(schema string, raw json.RawMessage) error {
+	if schema == EffectiveConfigSchemaClaudeCodeV1 {
+		_, err := decodeClaudeCodeConfig(raw)
+		return err
+	}
 	if schema != EffectiveConfigSchemaV1 {
 		return fmt.Errorf("unknown effective_config_schema %q", schema)
 	}

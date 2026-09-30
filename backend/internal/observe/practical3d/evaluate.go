@@ -614,7 +614,7 @@ func materializeAttempts(m Manifest, p Position, dispatches, finals []Event) mat
 
 // validateChain enforces 06 §3.4: a logical call's first attempt has
 // retry_index 0; every later attempt is a `retry` call of the same role,
-// directly follows an attempt whose outcome was RETRYABLE or RATE_LIMITED,
+// dispatched after the finalization of an attempt whose outcome was RETRYABLE or RATE_LIMITED,
 // names that outcome as its cause, and carries retry_index = number of
 // retries with that cause so far, never beyond the frozen budget.
 func validateChain(m Manifest, chain []attempt) string {
@@ -626,8 +626,8 @@ func validateChain(m Manifest, chain []attempt) string {
 	used := map[RequestOutcome]int{}
 	for i := 1; i < len(chain); i++ {
 		prev, cur := chain[i-1], chain[i].d
-		if cur.Role != first.Role || cur.CallClass != CallRetry || cur.CallIndex != prev.d.CallIndex+1 {
-			return "retry is not an immediately following retry call of the same role"
+		if cur.Role != first.Role || cur.CallClass != CallRetry || cur.CallIndex <= prev.d.CallIndex || cur.Timestamp.Before(prev.f.Timestamp) {
+			return "retry is not a later retry call of the same role dispatched after the failed attempt finalized"
 		}
 		cause := prev.f.RequestOutcome
 		if cause != OutcomeRetryable && cause != OutcomeRateLimited {

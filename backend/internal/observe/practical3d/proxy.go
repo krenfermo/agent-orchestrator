@@ -1,0 +1,595 @@
+package practical3d
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+// ProviderProxyVersion versions the observation rules below (call-class
+// derivation, outcome mapping, accounting). It is recorded in the manifest's
+// instrument.provider_request_schema_version.
+const ProviderProxyVersion = "ao.3d-practical.provider-proxy.v1"
+
+// RoleResolver maps an AO usage subject to its role at a moment, from AO's
+// durable control plane (usage_attribution_windows), never from agent text.
+type RoleResolver interface {
+	ResolveRole(ctx context.Context, subject string, at time.Time) (Role, error)
+}
+
+// ProxyObservation is what the proxy saw in one provider response: the billed
+// message id and every tool_use block (id, name and, for Bash, the command).
+type ProxyObservation struct {
+	CallIndex int            `json:"call_index"`
+	Subject   string         `json:"subject"`
+	Role      Role           `json:"role"`
+	MessageID string         `json:"message_id"`
+	ToolUses  []ProxyToolUse `json:"tool_uses"`
+	At        time.Time      `json:"at"`
+}
+
+// ProxyToolUse is one tool call the model emitted, as the proxy saw it.
+type ProxyToolUse struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Command string `json:"command,omitempty"`
+}
+
+// ProviderProxy is the AO-owned provider boundary for one position
+// (AO_OBSERVED_CLIENT_ONLY_V1 realized for CLI agents): agent CLIs reach the
+// provider only through it (ANTHROPIC_BASE_URL), and the position sandbox
+// denies every other network destination. It appends ATTEMPT_DISPATCHED
+// before forwarding and ATTEMPT_FINALIZED after the response, through the
+// position's ObservedClient, so retries and partial streams are attempts.
+type ProviderProxy struct {
+	Upstream    *url.URL
+	HTTPClient  *http.Client
+	Resolver    RoleResolver
+	EvidenceDir string
+	Now         func() time.Time
+
+	mu           sync.Mutex
+	client       *ObservedClient
+	tokens       map[string]string // token -> subject
+	observations []ProxyObservation
+	ln, ctl      net.Listener
+	srv, ctlSrv  *http.Server
+	rejected     []string
+}
+
+// NewProviderProxy builds a proxy toward the real provider API. The HTTP
+// client ignores HTTP(S)_PROXY from the environment.
+func NewProviderProxy(upstream string, resolver RoleResolver, evidenceDir string) (*ProviderProxy, error) {
+	u, err := url.Parse(upstream)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return nil, fmt.Errorf("invalid upstream %q", upstream)
+	}
+	tr := &http.Transport{Proxy: nil, ForceAttemptHTTP2: true, MaxIdleConns: 16, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 20 * time.Second, DisableCompression: true}
+	return &ProviderProxy{Upstream: u, HTTPClient: &http.Client{Transport: tr}, Resolver: resolver, EvidenceDir: evidenceDir, Now: time.Now, tokens: map[string]string{}}, nil
+}
+
+// Start listens on 127.0.0.1 (provider traffic) and on a private unix socket
+// (token issuance for the trusted launch shim). It returns the provider port.
+func (p *ProviderProxy) Start(controlSocket string) (int, error) {
+	if err := os.MkdirAll(p.EvidenceDir, 0o700); err != nil {
+		return 0, err
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	ctl, err := net.Listen("unix", controlSocket)
+	if err != nil {
+		_ = ln.Close()
+		return 0, err
+	}
+	_ = os.Chmod(controlSocket, 0o600)
+	p.ln, p.ctl = ln, ctl
+	p.srv = &http.Server{Handler: http.HandlerFunc(p.serveProvider), ReadHeaderTimeout: 30 * time.Second}
+	p.ctlSrv = &http.Server{Handler: http.HandlerFunc(p.serveControl), ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = p.srv.Serve(ln) }()
+	go func() { _ = p.ctlSrv.Serve(ctl) }()
+	return ln.Addr().(*net.TCPAddr).Port, nil
+}
+
+// Close stops both listeners.
+func (p *ProviderProxy) Close() error {
+	var errs []error
+	if p.srv != nil {
+		errs = append(errs, p.srv.Close())
+	}
+	if p.ctlSrv != nil {
+		errs = append(errs, p.ctlSrv.Close())
+	}
+	return errors.Join(errs...)
+}
+
+// Bind attaches the proxy to the running position; requests outside a
+// binding are refused.
+func (p *ProviderProxy) Bind(c *ObservedClient) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.client = c
+}
+
+// Unbind detaches the position and revokes every token.
+func (p *ProviderProxy) Unbind() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.client = nil
+	p.tokens = map[string]string{}
+}
+
+// Observations returns the tool/message inventory seen in responses.
+func (p *ProviderProxy) Observations() []ProxyObservation {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]ProxyObservation(nil), p.observations...)
+}
+
+// Rejected lists requests the proxy refused (each also malforms the position).
+func (p *ProviderProxy) Rejected() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.rejected...)
+}
+
+// IssueToken binds a fresh random token to an AO usage subject.
+func (p *ProviderProxy) IssueToken(subject string) (string, error) {
+	if strings.TrimSpace(subject) == "" || strings.ContainsAny(subject, "\n\r") {
+		return "", errors.New("invalid subject")
+	}
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(b)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.client == nil {
+		return "", errors.New("no position is running")
+	}
+	p.tokens[tok] = subject
+	return tok, nil
+}
+
+func (p *ProviderProxy) serveControl(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.URL.Path != "/token" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	var req struct {
+		Subject string `json:"subject"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	tok, err := p.IssueToken(req.Subject)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{"token": tok})
+}
+
+func (p *ProviderProxy) reject(w http.ResponseWriter, c *ObservedClient, status int, reason string) {
+	p.mu.Lock()
+	p.rejected = append(p.rejected, reason)
+	p.mu.Unlock()
+	if c != nil {
+		c.Violation("provider proxy refused a request: " + reason)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprintf(w, `{"type":"error","error":{"type":"permission_error","message":%q}}`, "ao 3d-practical proxy: "+reason)
+}
+
+const maxRequestBody = 64 << 20
+
+func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
+	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 3)
+	p.mu.Lock()
+	c := p.client
+	subject := ""
+	if len(parts) == 3 && parts[0] == "t" {
+		subject = p.tokens[parts[1]]
+	}
+	p.mu.Unlock()
+	if c == nil {
+		p.reject(w, nil, http.StatusServiceUnavailable, "no position bound")
+		return
+	}
+	if subject == "" {
+		p.reject(w, c, http.StatusForbidden, "request without a valid subject token")
+		return
+	}
+	path := "/" + parts[2]
+	if r.Method != http.MethodPost || path != "/v1/messages" {
+		// Only model inference is allowed; any other API surface (token
+		// counting, models, files, batches...) is refused, not forwarded.
+		p.reject(w, c, http.StatusForbidden, fmt.Sprintf("endpoint %s %s is not allowed", r.Method, path))
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+	if err != nil || len(body) > maxRequestBody {
+		p.reject(w, c, http.StatusRequestEntityTooLarge, "unreadable or oversized request body")
+		return
+	}
+	var parsed messagesRequest
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Model == "" {
+		p.reject(w, c, http.StatusBadRequest, "request is not a Messages API request")
+		return
+	}
+	role, err := p.Resolver.ResolveRole(r.Context(), subject, p.now())
+	if err != nil {
+		p.reject(w, c, http.StatusForbidden, "role unresolvable from AO control plane: "+err.Error())
+		return
+	}
+	if err := p.store(body); err != nil {
+		p.reject(w, c, http.StatusInternalServerError, "evidence store: "+err.Error())
+		return
+	}
+	attempt, err := c.BeginHTTPAttempt(HTTPAttemptRequest{Subject: subject, Role: role, BaseClass: parsed.baseClass(c.m, c.p.TaskID, role), Model: parsed.Model, Stream: parsed.Stream, ToolNames: parsed.toolNames(), Body: body})
+	if err != nil {
+		p.reject(w, nil, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	res, obs := p.forward(r.Context(), w, r.Header, r.URL.RawQuery, body, parsed.Stream)
+	_ = attempt.Finish(res) // failures/malformations are recorded by the client
+	obs.CallIndex, obs.Subject, obs.Role, obs.At = attempt.base.CallIndex, subject, attempt.base.Role, p.now()
+	p.mu.Lock()
+	p.observations = append(p.observations, obs)
+	p.mu.Unlock()
+}
+
+func (p *ProviderProxy) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
+}
+
+func (p *ProviderProxy) store(b []byte) error {
+	path := filepath.Join(p.EvidenceDir, sha256Hex(b))
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	return writeExclusive(path, b)
+}
+
+// hopHeaders are never forwarded.
+var hopHeaders = map[string]bool{"Connection": true, "Proxy-Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true, "Proxy-Authorization": true, "Te": true, "Trailer": true, "Transfer-Encoding": true, "Upgrade": true, "Accept-Encoding": true, "Content-Length": true, "Host": true}
+
+// forward sends the exact request bytes upstream and streams the response
+// back while extracting outcome, accounting, the message id and tool uses.
+func (p *ProviderProxy) forward(ctx context.Context, w http.ResponseWriter, in http.Header, rawQuery string, body []byte, stream bool) (HTTPAttemptResult, ProxyObservation) {
+	target := *p.Upstream
+	target.Path = strings.TrimSuffix(target.Path, "/") + "/v1/messages"
+	target.RawQuery = rawQuery
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
+	if err != nil {
+		return HTTPAttemptResult{TransportError: err.Error()}, ProxyObservation{}
+	}
+	for k, vs := range in {
+		if hopHeaders[http.CanonicalHeaderKey(k)] {
+			continue
+		}
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := p.HTTPClient.Do(req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		return HTTPAttemptResult{TransportError: err.Error()}, ProxyObservation{}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	for k, vs := range resp.Header {
+		if hopHeaders[http.CanonicalHeaderKey(k)] {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	flusher, _ := w.(http.Flusher)
+	var captured bytes.Buffer
+	acc := newResponseAccumulator()
+	reader := bufio.NewReaderSize(resp.Body, 64<<10)
+	var readErr error
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			captured.Write(line)
+			if _, werr := w.Write(line); werr != nil && readErr == nil {
+				readErr = werr
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if stream && resp.StatusCode == http.StatusOK {
+				acc.sseLine(line)
+			}
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				readErr = err
+			}
+			break
+		}
+	}
+	if !stream || resp.StatusCode != http.StatusOK {
+		acc.jsonBody(captured.Bytes())
+	}
+	_ = p.store(captured.Bytes())
+	res := acc.result(resp.StatusCode, stream, readErr)
+	org := resp.Header.Get("Anthropic-Organization-Id")
+	meta := map[string]string{"http_status": fmt.Sprint(resp.StatusCode), "request_id": resp.Header.Get("Request-Id"), "response_sha256": sha256Hex(captured.Bytes()), "proxy_version": ProviderProxyVersion}
+	if org != "" {
+		meta["account_ref_sha256"] = sha256Hex([]byte(org))
+	}
+	res.ProviderMetadata, _ = json.Marshal(meta)
+	term := map[string]any{"stop_reason": acc.stopReason, "message_stop": acc.stopped, "error_type": acc.errType}
+	res.TerminalMetadata, _ = json.Marshal(term)
+	return res, ProxyObservation{MessageID: acc.messageID, ToolUses: acc.toolUses()}
+}
+
+type messagesRequest struct {
+	Model    string            `json:"model"`
+	Stream   bool              `json:"stream"`
+	Messages []json.RawMessage `json:"messages"`
+	Tools    []struct {
+		Name string `json:"name"`
+	} `json:"tools"`
+}
+
+func (m messagesRequest) toolNames() []string {
+	out := make([]string, 0, len(m.Tools))
+	for _, t := range m.Tools {
+		out = append(out, t.Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// baseClass derives the call class from the request structure (proxy rules
+// v1): a model other than the role's frozen primary model is a `helper`
+// call; the first user turn is `initial`; a turn answering tool_use blocks is
+// `tool_result`; anything else continues the conversation. `retry` is decided
+// by the ObservedClient from replay of the previous request's bytes.
+func (m messagesRequest) baseClass(man Manifest, task string, role Role) CallClass {
+	if cfg, ok := invocationConfig(man, task, role, CallInitial); ok && m.Model != cfg.ModelID {
+		return CallHelper
+	}
+	if len(m.Messages) <= 1 {
+		return CallInitial
+	}
+	var last struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(m.Messages[len(m.Messages)-1], &last) == nil && last.Role == "user" {
+		var blocks []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(last.Content, &blocks) == nil {
+			for _, b := range blocks {
+				if b.Type == "tool_result" {
+					return CallToolResult
+				}
+			}
+		}
+	}
+	return CallContinuation
+}
+
+type responseAccumulator struct {
+	messageID                    string
+	input, cacheRead, cacheWrite *int64
+	stopped                      bool
+	stopReason, errType          string
+	tools                        map[int]*toolAcc
+	order                        []int
+}
+
+type toolAcc struct {
+	id, name string
+	input    strings.Builder
+}
+
+func newResponseAccumulator() *responseAccumulator {
+	return &responseAccumulator{tools: map[int]*toolAcc{}}
+}
+
+type usageBlock struct {
+	InputTokens              *int64 `json:"input_tokens"`
+	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+}
+
+func (a *responseAccumulator) setUsage(u *usageBlock) {
+	if u == nil {
+		return
+	}
+	if u.InputTokens != nil {
+		a.input = u.InputTokens
+	}
+	if u.CacheCreationInputTokens != nil {
+		a.cacheWrite = u.CacheCreationInputTokens
+	}
+	if u.CacheReadInputTokens != nil {
+		a.cacheRead = u.CacheReadInputTokens
+	}
+}
+
+func (a *responseAccumulator) sseLine(line []byte) {
+	line = bytes.TrimSpace(line)
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return
+	}
+	var ev struct {
+		Type    string `json:"type"`
+		Index   int    `json:"index"`
+		Message *struct {
+			ID    string      `json:"id"`
+			Usage *usageBlock `json:"usage"`
+		} `json:"message"`
+		ContentBlock *struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"content_block"`
+		Delta *struct {
+			Type        string `json:"type"`
+			PartialJSON string `json:"partial_json"`
+			StopReason  string `json:"stop_reason"`
+		} `json:"delta"`
+		Usage *usageBlock `json:"usage"`
+		Error *struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(line[len("data:"):]), &ev) != nil {
+		return
+	}
+	switch ev.Type {
+	case "message_start":
+		if ev.Message != nil {
+			a.messageID = ev.Message.ID
+			a.setUsage(ev.Message.Usage)
+		}
+	case "content_block_start":
+		if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
+			a.tools[ev.Index] = &toolAcc{id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
+			a.order = append(a.order, ev.Index)
+		}
+	case "content_block_delta":
+		if t := a.tools[ev.Index]; t != nil && ev.Delta != nil && ev.Delta.Type == "input_json_delta" {
+			t.input.WriteString(ev.Delta.PartialJSON)
+		}
+	case "message_delta":
+		if ev.Delta != nil && ev.Delta.StopReason != "" {
+			a.stopReason = ev.Delta.StopReason
+		}
+		a.setUsage(ev.Usage)
+	case "message_stop":
+		a.stopped = true
+	case "error":
+		if ev.Error != nil {
+			a.errType = ev.Error.Type
+		}
+	}
+}
+
+func (a *responseAccumulator) jsonBody(b []byte) {
+	var body struct {
+		ID         string      `json:"id"`
+		Type       string      `json:"type"`
+		StopReason string      `json:"stop_reason"`
+		Usage      *usageBlock `json:"usage"`
+		Content    []struct {
+			Type  string          `json:"type"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+		Error *struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(b, &body) != nil {
+		return
+	}
+	if body.Type == "error" && body.Error != nil {
+		a.errType = body.Error.Type
+		return
+	}
+	a.messageID, a.stopReason = body.ID, body.StopReason
+	a.setUsage(body.Usage)
+	a.stopped = body.Type == "message"
+	for i, c := range body.Content {
+		if c.Type == "tool_use" {
+			t := &toolAcc{id: c.ID, name: c.Name}
+			t.input.Write(c.Input)
+			a.tools[i] = t
+			a.order = append(a.order, i)
+		}
+	}
+}
+
+func (a *responseAccumulator) toolUses() []ProxyToolUse {
+	out := []ProxyToolUse{}
+	for _, i := range a.order {
+		t := a.tools[i]
+		tu := ProxyToolUse{ID: t.id, Name: t.name}
+		if t.name == "Bash" {
+			var in struct {
+				Command string `json:"command"`
+			}
+			if json.Unmarshal([]byte(t.input.String()), &in) == nil {
+				tu.Command = in.Command
+			}
+		}
+		out = append(out, tu)
+	}
+	return out
+}
+
+// result maps the observed HTTP exchange onto the request-outcome and
+// accounting rules of proxy v1: a provider rejection with a definite HTTP
+// status processed no input (explicit zero); a 2xx response must report
+// usage or it is MISSING; a 2xx stream that ends before message_stop is a
+// partial, non-replayable TERMINAL_PROVIDER_FAILURE that still counts.
+func (a *responseAccumulator) result(status int, stream bool, readErr error) HTTPAttemptResult {
+	var res HTTPAttemptResult
+	zero := int64(0)
+	switch {
+	case status == http.StatusOK && a.stopped && a.errType == "" && readErr == nil:
+		res.Outcome = OutcomeSuccess
+	case status == http.StatusOK && (a.errType == "overloaded_error" || a.errType == "api_error"):
+		res.Outcome = OutcomeRetryable
+	case status == http.StatusOK:
+		res.Outcome = OutcomeTerminalFailure
+	case status == http.StatusTooManyRequests || a.errType == "rate_limit_error":
+		res.Outcome = OutcomeRateLimited
+	case status == 529 || status == http.StatusInternalServerError || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout:
+		res.Outcome = OutcomeRetryable
+	default:
+		res.Outcome = OutcomeTerminalFailure
+	}
+	if status != http.StatusOK {
+		res.InputTokens, res.CachedInputTokens, res.UncachedInputTokens = &zero, &zero, &zero
+		return res
+	}
+	if a.input == nil {
+		return res // MISSING: a 2xx response must report usage
+	}
+	read, write := int64(0), int64(0)
+	if a.cacheRead != nil {
+		read = *a.cacheRead
+	}
+	if a.cacheWrite != nil {
+		write = *a.cacheWrite
+	}
+	total, uncached := *a.input+read+write, *a.input+write
+	res.InputTokens, res.CachedInputTokens, res.UncachedInputTokens = &total, &read, &uncached
+	return res
+}

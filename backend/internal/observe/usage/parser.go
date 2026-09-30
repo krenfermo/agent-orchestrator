@@ -545,6 +545,17 @@ func parseClaude(source domain.UsageSourceContext, scope explorationScope, recor
 // claudeSourceEventKey is the exactly-once identity of one billed Claude
 // message. Tool observations carry it too, which is what links a tool call to
 // the provider call that issued it.
+// ClaudeMessageEventKey is the source_event_key (and observation event_key)
+// AO derives for one billed Claude message, exposed so an external observer
+// (3D-PRACTICAL's provider proxy) can join the message ids it saw on the wire
+// to AO's usage ledger and tool observations without re-deriving the rule.
+func ClaudeMessageEventKey(nativeRootID string, kind domain.UsageSourceKind, subagentID, nativeSessionID, messageID string) string {
+	return claudeSourceEventKey(domain.UsageSourceContext{
+		NativeRootID: nativeRootID,
+		Source:       domain.UsageSourceRecord{Kind: kind, SubagentID: subagentID, NativeSessionID: nativeSessionID},
+	}, messageID)
+}
+
 func claudeSourceEventKey(source domain.UsageSourceContext, keyID string) string {
 	return stableSourceEventKey(
 		"claude",
