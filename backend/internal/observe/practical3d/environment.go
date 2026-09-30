@@ -99,6 +99,10 @@ func observeVersion(ctx context.Context, expected VersionInput, self string) (Ve
 		return VersionInput{}, err
 	}
 	version := expected.Version
+	if expected.Component == "ao3dpractical" {
+		// The harness's own version is its VCS revision (empty is invalid).
+		version = "ao3dpractical@" + buildCommitFromFile(self)
+	}
 	if expected.Component != "ao3dpractical" {
 		flag := "--version"
 		if expected.Component == "go" {

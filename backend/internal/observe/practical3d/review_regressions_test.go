@@ -212,3 +212,20 @@ func TestLiveEnvironmentObserverKeepsEmptyListsPresent(t *testing.T) {
 		t.Fatal("empty lists became nil")
 	}
 }
+
+func TestLiveEnvironmentInputsValidate(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := EnvironmentInputs{RuntimeVersions: []VersionInput{{Component: "go"}}, ProviderClientCLIVersions: []VersionInput{}, TaskToolVersions: []VersionInput{{Component: "git"}}, RunnerInstrumentVersions: []VersionInput{{Component: "ao3dpractical"}}, EffectiveEnvironmentConfigAllowlist: []ConfigInput{}, AdditionalLocalConfiguration: []ConfigInput{}}
+	got, err := LiveEnvironmentObserver{Expected: e, AOBinaryPath: self}.Observe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range [][]VersionInput{got.RuntimeVersions, got.TaskToolVersions, got.RunnerInstrumentVersions} {
+		if err := validateVersionInputs(l); err != nil {
+			t.Fatalf("%v: %+v", err, l)
+		}
+	}
+}
