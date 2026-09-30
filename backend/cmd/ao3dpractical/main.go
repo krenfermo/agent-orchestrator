@@ -177,6 +177,9 @@ func scheduleCommand(args []string, out io.Writer) error {
 	return nil
 }
 
+// allowTempDecide lets in-package tests decide runs below os.TempDir().
+var allowTempDecide = false
+
 func decideCommand(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("decide", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -191,15 +194,10 @@ func decideCommand(args []string, out io.Writer) error {
 	if err := practical3d.RefuseProductionPath(*reportPath); err != nil {
 		return err
 	}
-	_, m, err := practical3d.ReadEnvelope(filepath.Join(*runRoot, "envelope.json"))
+	report, err := practical3d.DecideRun(*runRoot, allowTempDecide, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	events, err := practical3d.ReadLedger(filepath.Join(*runRoot, "ledger.jsonl"))
-	if err != nil {
-		return err
-	}
-	report := practical3d.Evaluate(m, events, time.Now().UTC())
 	if err := practical3d.WriteReport(*reportPath, report); err != nil {
 		return err
 	}

@@ -25,6 +25,8 @@ func TestMain(m *testing.M) {
 
 func TestMiniE2EThroughCLIDrivers(t *testing.T) {
 	t.Setenv("AO_DATA_DIR", t.TempDir())
+	allowTempDecide = true
+	defer func() { allowTempDecide = false }()
 	var out strings.Builder
 	if err := runMini(filepath.Join(t.TempDir(), "mini"), 2, true, &out); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
