@@ -86,8 +86,12 @@ func miniRealCommand(args []string, out io.Writer) error {
 	primary := fs.String("primary-model", "", "frozen primary model")
 	helper := fs.String("helper-model", "", "frozen helper (small fast) model")
 	upstream := fs.String("upstream", "https://api.anthropic.com", "provider origin")
+	aoSrc := fs.String("ao-src", "", "directory holding every AO checkout (denied to agents)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *aoSrc == "" {
+		return errors.New("--ao-src is required")
 	}
 	ctx := context.Background()
 	scratch, err := practical3d.ScratchRoot()
@@ -106,7 +110,10 @@ func miniRealCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	src, _ := filepath.Abs("../..")
+	src, err := filepath.Abs(*aoSrc)
+	if err != nil {
+		return err
+	}
 	modelEnv := map[string]string{"ANTHROPIC_MODEL": *primary, "ANTHROPIC_DEFAULT_OPUS_MODEL": *primary, "ANTHROPIC_DEFAULT_SONNET_MODEL": *primary, "ANTHROPIC_DEFAULT_HAIKU_MODEL": *helper, "ANTHROPIC_SMALL_FAST_MODEL": *helper}
 	cfg := practical3d.AORealConfig{AOBinary: aoBin, RealClaude: *realClaude, ShimExecutable: self, AOSrc: src, ToolsRO: *tools, Upstream: *upstream, FixtureRepo: *fixture, WebRoot: filepath.Join(*tools, "webroot"),
 		ModelEnv: modelEnv, DaemonTimeout: 120 * time.Second, SettleTimeout: 8 * time.Minute, Log: out}

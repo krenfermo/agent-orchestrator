@@ -80,6 +80,13 @@ func runMini(base string, positions int, allowTemp bool, out io.Writer) error {
 		return err
 	}
 	m.FixtureCommit = commit
+	subtree, err := practical3d.FixtureSubtreeSHA256(context.Background(), fixtureRepo, commit)
+	if err != nil {
+		return err
+	}
+	for i := range m.Tasks {
+		m.Tasks[i].FixtureSubtreeSHA256 = subtree
+	}
 	m.Q4Oracle.RunnerImageOrBinarySHA256 = sha256Hex(selfBytes)
 	if err := practical3d.ValidateManifest(m); err != nil {
 		return err
