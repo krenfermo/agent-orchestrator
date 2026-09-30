@@ -271,7 +271,7 @@ func verdictCall(proxy []ProxyObservation, subject string) (first, submits int) 
 			continue
 		}
 		for _, tu := range p.ToolUses {
-			if tu.Name == "Bash" && isReviewSubmit(tu.Command) {
+			if shellTools[tu.Name] && isReviewSubmit(tu.Command) {
 				submits++
 				if first == 0 || p.CallIndex < first {
 					first = p.CallIndex
@@ -337,17 +337,31 @@ func resolvedPath(p string) string {
 }
 
 func isReviewSubmit(command string) bool {
-	f := strings.Fields(strings.TrimSpace(command))
-	if len(f) < 3 || (f[0] != "ao" && !strings.HasSuffix(f[0], "/ao")) || f[1] != "review" || f[2] != "submit" {
-		return false
-	}
-	for _, a := range f[3:] {
-		if a == "--help" || a == "-h" || a == "help" {
-			return false
+	// AO's reviewer instructions pipe the verdict JSON into the command
+	// (`printf '...' | ao review submit --session S --reviews -`), so any
+	// pipeline/list segment may be the invocation; a segment is one only if
+	// it starts with the program.
+	for _, seg := range strings.FieldsFunc(command, func(r rune) bool { return r == '|' || r == ';' || r == '&' || r == '\n' }) {
+		f := strings.Fields(strings.TrimSpace(seg))
+		if len(f) < 3 || (f[0] != "ao" && !strings.HasSuffix(f[0], "/ao")) || f[1] != "review" || f[2] != "submit" {
+			continue
+		}
+		help := false
+		for _, a := range f[3:] {
+			if a == "--help" || a == "-h" || a == "help" {
+				help = true
+			}
+		}
+		if !help {
+			return true
 		}
 	}
-	return true
+	return false
 }
+
+// shellTools are the tool names under which the harnesses run commands
+// (Claude Code's Bash; Codex's function tools).
+var shellTools = map[string]bool{"Bash": true, "exec_command": true, "shell": true, "local_shell": true, "container.exec": true}
 
 func m3Sources(ctx context.Context, db *sql.DB, kind, subject string) ([]m3Source, error) {
 	rows, err := db.QueryContext(ctx, `SELECT s.id, b.native_root_id, s.kind, s.subagent_id, s.native_session_id, s.byte_offset, b.harness,

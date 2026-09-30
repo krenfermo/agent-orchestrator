@@ -413,3 +413,22 @@ func TestClaudeMessageEventKeyMatchesAOParser(t *testing.T) {
 		t.Fatalf("key=%s", k)
 	}
 }
+
+// AO's reviewer pipes the verdict into `ao review submit`; a mention in a
+// string or a help call is not a submission.
+func TestIsReviewSubmit(t *testing.T) {
+	t.Parallel()
+	for cmd, want := range map[string]bool{
+		"ao review submit --session s --reviews -":                                   true,
+		`printf '%s' '{"reviews":[]}' | ao review submit --session s --reviews -`:    true,
+		"bash -lc printf x | /tmp/hook-bin/ao review submit --session s --reviews -": true,
+		`printf '%s\n' 'ao review submit'`:                                           false,
+		"ao review submit --help":                                                    false,
+		"grep -rn 'ao review submit' .":                                              false,
+		`echo "review" && ao review list --session s`:                                false,
+	} {
+		if got := isReviewSubmit(cmd); got != want {
+			t.Errorf("isReviewSubmit(%q)=%v", cmd, got)
+		}
+	}
+}
