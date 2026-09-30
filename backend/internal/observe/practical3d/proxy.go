@@ -627,6 +627,14 @@ func (a *responseAccumulator) result(status int, stream bool, readErr error) HTT
 		res.Outcome = OutcomeTerminalFailure
 	}
 	if status != http.StatusOK {
+		// Zero input is the provider's own statement, not an assumption:
+		// only a provider error envelope (the request was rejected before
+		// generation) is finalized with explicit zeros. Any other non-200
+		// body (a gateway page, a truncated body) has unknown accounting:
+		// MISSING, so the position is malformed.
+		if a.errType == "" {
+			return res
+		}
 		res.InputTokens, res.CachedInputTokens, res.UncachedInputTokens = &zero, &zero, &zero
 		return res
 	}

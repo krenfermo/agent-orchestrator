@@ -252,6 +252,12 @@ func traceHTTPRequest(m Manifest, spans map[string][][]byte, task string, arm Ar
 		if len(body) != 1 || !bytes.Contains(req.Body, body[0]) {
 			return treatmentTrace{}, errors.New("ASSISTED request does not carry the frozen attachment bytes")
 		}
+		// Every Project Memory marker must belong to a copy of the frozen
+		// attachment: a second, altered memory block (for example returned
+		// by a tool) is untracked memory-labelled content.
+		if err := markersOnlyWithin(req.Body, body[0]); err != nil {
+			return treatmentTrace{}, err
+		}
 		trace.AttachmentSHA256, trace.AttachmentVersion, trace.AttachmentOrigin = want.AttachmentSHA256, want.AttachmentVersion, "PROJECT_MEMORY"
 		return trace, nil
 	}
@@ -260,7 +266,48 @@ func traceHTTPRequest(m Manifest, spans map[string][][]byte, task string, arm Ar
 			return treatmentTrace{}, errors.New("request without attachment contains a Project Memory attachment span")
 		}
 	}
+	if err := markersOnlyWithin(req.Body, nil); err != nil {
+		return treatmentTrace{}, err
+	}
 	return trace, nil
+}
+
+// markersOnlyWithin fails if any Project Memory marker in body lies outside
+// every occurrence of attachment (nil: no marker may occur at all).
+func markersOnlyWithin(body, attachment []byte) error {
+	var covers [][2]int
+	if len(attachment) > 0 {
+		for off := 0; ; {
+			i := bytes.Index(body[off:], attachment)
+			if i < 0 {
+				break
+			}
+			covers = append(covers, [2]int{off + i, off + i + len(attachment)})
+			off += i + 1
+		}
+	}
+	for _, marker := range projectMemoryMarkers {
+		mk := []byte(marker)
+		for off := 0; ; {
+			i := bytes.Index(body[off:], mk)
+			if i < 0 {
+				break
+			}
+			start, end := off+i, off+i+len(mk)
+			inside := false
+			for _, c := range covers {
+				if c[0] <= start && end <= c[1] {
+					inside = true
+					break
+				}
+			}
+			if !inside {
+				return fmt.Errorf("request carries Project Memory marker %q outside the frozen attachment", marker)
+			}
+			off = start + 1
+		}
+	}
+	return nil
 }
 
 // attachmentBodyKey indexes the exact in-request form of a frozen attachment.

@@ -170,6 +170,9 @@ type responsesAccumulator struct {
 	completed       bool
 	status, errType string
 	tools           []ProxyToolUse
+	// errEnvelope: the body is the backend's own error object (OpenAI
+	// `error`, or the ChatGPT backend's `detail`).
+	errEnvelope bool
 }
 
 type responsesUsage struct {
@@ -287,12 +290,18 @@ func (a *responsesAccumulator) jsonBody(b []byte) {
 			Type string `json:"type"`
 			Code string `json:"code"`
 		} `json:"error"`
+		Detail json.RawMessage `json:"detail"`
 	}
 	if json.Unmarshal(b, &body) != nil {
 		return
 	}
+	if body.Error == nil && len(body.Detail) > 0 && string(body.Detail) != "null" {
+		a.errType, a.errEnvelope = "detail", true
+		return
+	}
 	if body.Error != nil {
 		a.errType = firstNonEmptyStr(body.Error.Code, body.Error.Type)
+		a.errEnvelope = true
 		return
 	}
 	a.setResponse(&struct {
@@ -326,6 +335,11 @@ func (a *responsesAccumulator) result(status int, _ bool, readErr error) HTTPAtt
 		res.Outcome = OutcomeTerminalFailure
 	}
 	if status != http.StatusOK {
+		// As for Anthropic: explicit zeros only on the provider's own error
+		// envelope; any other non-200 body is MISSING accounting.
+		if !a.errEnvelope {
+			return res
+		}
 		res.InputTokens, res.CachedInputTokens, res.UncachedInputTokens = &zero, &zero, &zero
 		return res
 	}

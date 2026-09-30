@@ -96,6 +96,22 @@ func submit() m3Tool {
 	return m3Tool{name: "Bash", op: "command", scope: "none", command: "ao review submit --verdict request_changes"}
 }
 
+// verdict records the review verdict AO stores when `ao review submit`
+// reaches the daemon (FK parents are irrelevant to M3, so they are skipped).
+func (f *m3Fixture) verdict(t *testing.T) {
+	t.Helper()
+	conn, err := f.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	for _, q := range []string{`PRAGMA foreign_keys = OFF`, `INSERT INTO review_run (id, review_id, session_id, harness, status, verdict, created_at) VALUES ('rr1', 'r1', 's1', 'codex', 'completed', 'request_changes', '2026-01-01')`} {
+		if _, err := conn.ExecContext(context.Background(), q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+}
+
 func (f *m3Fixture) derive(role Role) (M3Evidence, error) {
 	return DeriveM3(context.Background(), M3Input{DataDir: f.dir, RunID: f.runID, MeasuredRole: role, Proxy: f.proxy})
 }
@@ -162,6 +178,7 @@ func TestM3ReviewerCountsExplorationBeforeVerdict(t *testing.T) {
 	f.message(t, 1, RoleReviewer, read("diff.go"), grep("pricing.go"))
 	f.message(t, 2, RoleReviewer, read("orders.go"), submit())
 	f.message(t, 3, RoleReviewer, read("late.go"))
+	f.verdict(t)
 	ev, err := f.derive(RoleReviewer)
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +191,40 @@ func TestM3ReviewerCountsExplorationBeforeVerdict(t *testing.T) {
 	if _, err := g.derive(RoleReviewer); err == nil || !strings.Contains(err.Error(), "verdict") {
 		t.Fatalf("missing verdict: %v", err)
 	}
+}
+
+// Codex review R1 (P1): a milestone the agent can fake without doing the
+// thing it stands for.
+func TestM3MilestonesCannotBeFaked(t *testing.T) {
+	t.Parallel()
+	t.Run("scratch write outside the project is not the first edit", func(t *testing.T) {
+		f := newM3Fixture(t, "worker")
+		f.message(t, 1, RoleWorker, m3Tool{name: "Bash", op: "command_edit", scope: "none", command: `printf '' > "$TMPDIR/noop"`})
+		f.message(t, 2, RoleWorker, read("a.go"), grep("b.go"))
+		f.message(t, 3, RoleWorker, edit("a.go"))
+		ev, err := f.derive(RoleWorker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Milestone != "first_edit@call_3" || ev.Calls != 2 {
+			t.Fatalf("evidence=%+v", ev)
+		}
+	})
+	t.Run("mentioning ao review submit is not a verdict", func(t *testing.T) {
+		f := newM3Fixture(t, "reviewer")
+		f.message(t, 1, RoleReviewer, m3Tool{name: "Bash", op: "command", scope: "none", command: `printf '%s\n' 'ao review submit'`})
+		f.verdict(t)
+		if _, err := f.derive(RoleReviewer); err == nil || !strings.Contains(err.Error(), "never observed") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("submit that never reached AO is not a verdict", func(t *testing.T) {
+		f := newM3Fixture(t, "reviewer")
+		f.message(t, 1, RoleReviewer, read("diff.go"), submit())
+		if _, err := f.derive(RoleReviewer); err == nil || !strings.Contains(err.Error(), "no review verdict") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestM3RejectsForgedOrMissingObservations(t *testing.T) {

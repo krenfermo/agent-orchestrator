@@ -169,6 +169,15 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 		if call == 0 {
 			return ev, fmt.Errorf("reviewer structured verdict (ao review submit) was never observed")
 		}
+		// The submission must have reached AO: a command that merely
+		// mentions `ao review submit` is not a verdict.
+		var verdicts int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM review_run WHERE verdict <> ''`).Scan(&verdicts); err != nil {
+			return ev, fmt.Errorf("read review verdicts: %w", err)
+		}
+		if verdicts == 0 {
+			return ev, fmt.Errorf("AO recorded no review verdict for the reviewer's submission")
+		}
 		ev.Milestone = fmt.Sprintf("verdict_submission@call_%d", call)
 		for _, o := range obs {
 			if o.call < call || (o.call == call && o.tool != "Bash") {
@@ -178,7 +187,10 @@ func DeriveM3(ctx context.Context, in M3Input) (M3Evidence, error) {
 	default:
 		found := false
 		for _, o := range obs {
-			if o.op == domain.ToolOpEdit || o.op == domain.ToolOpCommandEdit {
+			// Only an edit of a project file is the milestone: a write to
+			// a scratch path outside the working copy is not "the first
+			// edit" and cannot end the exploration window.
+			if (o.op == domain.ToolOpEdit || o.op == domain.ToolOpCommandEdit) && o.scope == domain.ToolPathProject && o.path != "" {
 				found = true
 				ev.Milestone = fmt.Sprintf("first_edit@call_%d", o.call)
 				break
@@ -210,12 +222,20 @@ func verdictCall(proxy []ProxyObservation, subject string) int {
 			continue
 		}
 		for _, tu := range p.ToolUses {
-			if tu.Name == "Bash" && strings.Contains(tu.Command, "ao review submit") && (best == 0 || p.CallIndex < best) {
+			if tu.Name == "Bash" && isReviewSubmit(tu.Command) && (best == 0 || p.CallIndex < best) {
 				best = p.CallIndex
 			}
 		}
 	}
 	return best
+}
+
+// isReviewSubmit reports whether a Bash command is an invocation of
+// `ao review submit` (optionally by path), not a command that merely
+// mentions it (echo, printf, grep, a comment...).
+func isReviewSubmit(command string) bool {
+	f := strings.Fields(strings.TrimSpace(command))
+	return len(f) >= 3 && (f[0] == "ao" || strings.HasSuffix(f[0], "/ao")) && f[1] == "review" && f[2] == "submit"
 }
 
 func m3Sources(ctx context.Context, db *sql.DB, kind, subject string) ([]m3Source, error) {

@@ -291,6 +291,20 @@ func TestProxyMissingUsageIsMalformed(t *testing.T) {
 	}
 }
 
+// Codex review R1 (P1): a non-200 that is not the provider's own error
+// envelope has unknown accounting and must not be finalized as zero.
+func TestProxyNonEnvelopeErrorIsMissingAccounting(t *testing.T) {
+	t.Parallel()
+	rig := newProxyRig(t, ArmOff, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, "<html>bad gateway</html>")
+	}, nil)
+	rig.post(t, requestBody(testPrimaryModel, 1, ""))
+	if m, _ := rig.client.Outcome(); !strings.Contains(m, "MISSING") {
+		t.Fatalf("malformed=%q", m)
+	}
+}
+
 func TestProxyRefusesUnobservableOrOutOfMappingRequests(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {

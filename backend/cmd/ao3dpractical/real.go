@@ -28,6 +28,7 @@ func calibrateCommand(args []string, out io.Writer) error {
 	specPath := fs.String("task-spec", "", "task spec JSON")
 	arm := fs.String("arm", "ASSISTED", "OFF or ASSISTED")
 	dir := fs.String("dir", "", "new directory below ~/.ao/scratch/frente3")
+	oracleDir := fs.String("oracle-dir", "", "Q4 oracle directory (denied to agents)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -47,7 +48,7 @@ func calibrateCommand(args []string, out io.Writer) error {
 		return err
 	}
 	src, _ := filepath.Abs("../..")
-	e := &practical3d.AORealExecutor{Cfg: practical3d.AORealConfig{AOBinary: *aoBinary, RealClaude: *realClaude, ShimExecutable: self, AOSrc: src, ToolsRO: filepath.Dir(*aoBinary), WebRoot: filepath.Join(filepath.Dir(*aoBinary), "webroot"),
+	e := &practical3d.AORealExecutor{Cfg: practical3d.AORealConfig{AOBinary: *aoBinary, RealClaude: *realClaude, ShimExecutable: self, AOSrc: src, OracleDir: *oracleDir, ToolsRO: filepath.Dir(*aoBinary), WebRoot: filepath.Join(filepath.Dir(*aoBinary), "webroot"),
 		DaemonTimeout: 90 * time.Second, SettleTimeout: 5 * time.Minute, Log: os.Stderr}}
 	res, err := e.Calibrate(context.Background(), practical3d.FixtureConfig{Repo: *fixture, Commit: *commit}, spec, practical3d.Arm(*arm), *dir)
 	if err != nil {
@@ -118,7 +119,7 @@ func miniRealCommand(args []string, out io.Writer) error {
 		return err
 	}
 	modelEnv := map[string]string{"ANTHROPIC_MODEL": *primary, "ANTHROPIC_DEFAULT_OPUS_MODEL": *primary, "ANTHROPIC_DEFAULT_SONNET_MODEL": *primary, "ANTHROPIC_DEFAULT_HAIKU_MODEL": *helper, "ANTHROPIC_SMALL_FAST_MODEL": *helper}
-	cfg := practical3d.AORealConfig{AOBinary: aoBin, RealClaude: *realClaude, RealCodex: *realCodex, CodexModel: *codexModel, OpenAIUpstream: *openaiUpstream, ShimExecutable: self, AOSrc: src, ToolsRO: *tools, Upstream: *upstream, FixtureRepo: *fixture, WebRoot: filepath.Join(*tools, "webroot"),
+	cfg := practical3d.AORealConfig{AOBinary: aoBin, RealClaude: *realClaude, RealCodex: *realCodex, CodexModel: *codexModel, OpenAIUpstream: *openaiUpstream, ShimExecutable: self, AOSrc: src, OracleDir: *oracleDir, ToolsRO: *tools, Upstream: *upstream, FixtureRepo: *fixture, WebRoot: filepath.Join(*tools, "webroot"),
 		ModelEnv: modelEnv, DaemonTimeout: 120 * time.Second, SettleTimeout: 8 * time.Minute, Log: out}
 	envTemplate := practical3d.EnvironmentInputs{
 		RuntimeVersions:                     []practical3d.VersionInput{{Component: "go"}},

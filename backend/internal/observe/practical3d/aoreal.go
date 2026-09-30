@@ -70,6 +70,7 @@ type AORealConfig struct {
 	ShimExecutable string // this harness binary; invoked as `claude`/`codex` it is the launch shim
 	AOSrc          string // AO source tree (denied to agents)
 	ToolsRO        string // read-only tools directory agents may exec from
+	OracleDir      string // Q4 oracle script and hidden tests (denied to agents)
 	Upstream       string // provider API origin, e.g. https://api.anthropic.com
 	FixtureRepo    string // git repository holding the frozen fixture commit
 	WebRoot        string // compiled (or placeholder) web assets for `ao server`
@@ -233,7 +234,7 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 	cfg := ShimConfig{RealClaude: r.e.Cfg.RealClaude, RealCodex: r.e.Cfg.RealCodex, CodexArgs: codexArgs, Profile: profile, ControlSocket: filepath.Join(r.ctlDir, "ctl.sock"), ExtraEnv: env,
 		ClaudeArgs: []string{"--strict-mcp-config", "--disallowedTools=RemoteTrigger,SendMessage,ListAgents,WebFetch,WebSearch"},
 		LaunchLog:  filepath.Join(r.ctlDir, "launches.jsonl"),
-		Sandbox: SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: r.e.Cfg.AOSrc, PrivateCtl: r.ctlDir, ToolsRO: r.e.Cfg.ToolsRO,
+		Sandbox: SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: r.e.Cfg.AOSrc, PrivateCtl: r.ctlDir, ToolsRO: r.e.Cfg.ToolsRO, OracleDir: r.e.Cfg.OracleDir,
 			PosWork: r.work, PosWorktrees: filepath.Join(r.dataDir, "worktrees"), PosHome: r.home, PosTmp: r.tmp, PosRunFile: r.runFile, PosPrompts: filepath.Join(r.dataDir, "prompts"), PosHookBin: filepath.Join(r.dataDir, "hook-bin"),
 			ProxyPort: r.proxyPort, DaemonPort: r.daemonPort}}
 	if capture {

@@ -47,6 +47,8 @@ const agentSandboxProfile = `(version 1)
 ; private control directory.
 (deny file-read* file-write* (subpath (param "AO_SRC")))
 (deny file-read* file-write* (subpath (param "PRIVATE_CTL")))
+; The Q4 oracle (script and hidden tests), wherever the operator keeps it.
+(deny file-read* file-write* (subpath (param "ORACLE_DIR")))
 
 ; The operator's provider state (transcripts, history, caches of other work).
 (deny file-read* file-write* (subpath (string-append (param "REAL_HOME") "/.claude")))
@@ -83,14 +85,14 @@ const agentSandboxProfile = `(version 1)
 
 // SandboxParams are the concrete paths/ports of one position.
 type SandboxParams struct {
-	AOHome, RealHome, AOSrc, PrivateCtl, ToolsRO                               string
+	AOHome, RealHome, AOSrc, PrivateCtl, ToolsRO, OracleDir                    string
 	PosWork, PosWorktrees, PosHome, PosTmp, PosRunFile, PosPrompts, PosHookBin string
 	ProxyPort, DaemonPort                                                      int
 }
 
 func (p SandboxParams) args() ([]string, error) {
 	vals := map[string]string{
-		"AO_HOME": p.AOHome, "REAL_HOME": p.RealHome, "AO_SRC": p.AOSrc, "PRIVATE_CTL": p.PrivateCtl, "TOOLS_RO": p.ToolsRO,
+		"AO_HOME": p.AOHome, "REAL_HOME": p.RealHome, "AO_SRC": p.AOSrc, "PRIVATE_CTL": p.PrivateCtl, "TOOLS_RO": p.ToolsRO, "ORACLE_DIR": p.OracleDir,
 		"POS_WORK": p.PosWork, "POS_WORKTREES": p.PosWorktrees, "POS_HOME": p.PosHome, "POS_TMP": p.PosTmp, "POS_RUN_FILE": p.PosRunFile, "POS_PROMPTS": p.PosPrompts, "POS_HOOKBIN": p.PosHookBin,
 		"PROXY_PORT": fmt.Sprint(p.ProxyPort), "DAEMON_PORT": fmt.Sprint(p.DaemonPort),
 	}

@@ -67,7 +67,7 @@ func newSandboxRig(t *testing.T) *sandboxRig {
 		t.Fatal(err)
 	}
 	r := &sandboxRig{profile: profile, secret: secret, ctlSock: filepath.Join(ctlDir, "ctl.sock")}
-	r.p = SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: filepath.Join(root, "aosrc"), PrivateCtl: ctlDir, ToolsRO: filepath.Join(root, "tools"),
+	r.p = SandboxParams{AOHome: aoHome, RealHome: realHome, AOSrc: filepath.Join(root, "aosrc"), PrivateCtl: ctlDir, ToolsRO: filepath.Join(root, "tools"), OracleDir: filepath.Join(root, "oracle"),
 		PosWork: filepath.Join(pos, "work"), PosWorktrees: filepath.Join(pos, "ao-data", "worktrees"), PosHome: filepath.Join(pos, "runtime-home"), PosTmp: filepath.Join(pos, "tmp"), PosRunFile: filepath.Join(pos, "ao-data", "running.json"), PosPrompts: filepath.Join(pos, "ao-data", "prompts"), PosHookBin: filepath.Join(pos, "ao-data", "hook-bin"),
 		ProxyPort: 1, DaemonPort: 2}
 	return r
@@ -123,6 +123,18 @@ func TestSandboxDeniesExperimentPrivatePaths(t *testing.T) {
 		if got := err == nil && strings.Contains(out, "CODEX"); got != allowed {
 			t.Errorf("~/.codex/%s readable=%v, want %v", name, got, allowed)
 		}
+	}
+	// The Q4 oracle is out of reach wherever the operator keeps it (here:
+	// outside ~/.ao, which the broad AO_HOME deny does not cover).
+	hiddenTest := filepath.Join(r.p.OracleDir, "hidden", "A", "lock_test.go")
+	if err := os.MkdirAll(filepath.Dir(hiddenTest), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hiddenTest, []byte("SECRET\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := r.sh(t, "find "+shellQuote(r.p.OracleDir)+" -type f -exec cat {} \\;"); strings.Contains(out, "SECRET") {
+		t.Errorf("hidden Q4 tests readable: %v %q", err, out)
 	}
 	// HOME escape: the operator's provider state.
 	if out, err := r.sh(t, "cat "+shellQuote(filepath.Join(r.p.RealHome, ".claude", "history.jsonl"))); err == nil || strings.Contains(out, "SECRET") {

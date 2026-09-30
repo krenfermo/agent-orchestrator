@@ -34,15 +34,23 @@ func TestResponsesAccumulatorFailuresAndMissingUsage(t *testing.T) {
 		lines  []string
 		want   RequestOutcome
 		zero   bool
+		body   string
 	}{
-		"rate limited":       {429, nil, OutcomeRateLimited, true},
-		"server error":       {502, nil, OutcomeRetryable, true},
-		"stream cut":         {200, []string{`data: {"type":"response.created","response":{"id":"r"}}`}, OutcomeTerminalFailure, false},
-		"completed no usage": {200, []string{`data: {"type":"response.completed","response":{"id":"r","status":"completed"}}`}, OutcomeSuccess, false},
+		"rate limited":   {429, nil, OutcomeRateLimited, true, `{"error":{"type":"rate_limit_exceeded","code":"rate_limit_exceeded"}}`},
+		"chatgpt detail": {429, nil, OutcomeRateLimited, true, `{"detail":{"code":"usage_limit_reached"}}`},
+		"server error":   {502, nil, OutcomeRetryable, true, `{"error":{"type":"server_error"}}`},
+		// Codex review R1 (P1): a non-200 without the backend's own error
+		// envelope has unknown accounting: MISSING, never assumed zero.
+		"gateway page":       {502, nil, OutcomeRetryable, false, `<html>bad gateway</html>`},
+		"stream cut":         {200, []string{`data: {"type":"response.created","response":{"id":"r"}}`}, OutcomeTerminalFailure, false, ""},
+		"completed no usage": {200, []string{`data: {"type":"response.completed","response":{"id":"r","status":"completed"}}`}, OutcomeSuccess, false, ""},
 	} {
 		a := &responsesAccumulator{}
 		for _, l := range tc.lines {
 			a.sseLine([]byte(l))
+		}
+		if tc.body != "" {
+			a.jsonBody([]byte(tc.body))
 		}
 		res := a.result(tc.status, true, nil)
 		if res.Outcome != tc.want {
@@ -51,7 +59,7 @@ func TestResponsesAccumulatorFailuresAndMissingUsage(t *testing.T) {
 		if tc.zero != (res.InputTokens != nil && *res.InputTokens == 0) {
 			t.Errorf("%s accounting=%v", name, res.InputTokens)
 		}
-		if name == "completed no usage" && res.UncachedInputTokens != nil {
+		if (name == "completed no usage" || name == "gateway page") && res.UncachedInputTokens != nil {
 			t.Errorf("missing usage must stay MISSING")
 		}
 	}
