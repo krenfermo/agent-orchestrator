@@ -182,6 +182,13 @@ func (e *AORealExecutor) newRig(w PositionWorkspace) (*positionRig, error) {
 	if err := os.MkdirAll(filepath.Join(r.home, "codex-home"), 0o700); err != nil {
 		return nil, err
 	}
+	// Codex's own login is an API-key login holding the placeholder (the
+	// format `codex login --with-api-key` writes): `codex login status`,
+	// which AO's reviewer-capacity check reads, then reports it usable, and
+	// the only key it can ever send is the placeholder.
+	if err := os.WriteFile(filepath.Join(r.home, "codex-home", "auth.json"), codexPlaceholderLogin(), 0o600); err != nil {
+		return nil, err
+	}
 	if err := os.WriteFile(filepath.Join(r.home, ".claude.json"), []byte(`{"hasCompletedOnboarding":true,"officialMarketplaceAutoInstallAttempted":true}`), 0o600); err != nil {
 		return nil, err
 	}

@@ -1,6 +1,7 @@
 package practical3d
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -102,5 +103,18 @@ func TestProxyInjectsOperatorCredential(t *testing.T) {
 	defer mu.Unlock()
 	if len(got) != 1 || got[0] != "Bearer operator-anthropic|" {
 		t.Fatalf("upstream saw %q", got)
+	}
+}
+
+// The Codex login a position gets is an API-key login holding only the
+// placeholder, which `codex login status` reports as logged in.
+func TestCodexPlaceholderLoginHoldsNoCredential(t *testing.T) {
+	t.Parallel()
+	var login map[string]string
+	if err := json.Unmarshal(codexPlaceholderLogin(), &login); err != nil {
+		t.Fatal(err)
+	}
+	if len(login) != 2 || login["auth_mode"] != "apikey" || login["OPENAI_API_KEY"] != PlaceholderKey {
+		t.Fatalf("placeholder login: %v", login)
 	}
 }

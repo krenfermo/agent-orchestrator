@@ -30,6 +30,12 @@ type ProviderCredentials interface {
 // PlaceholderKey is the only "credential" an agent process ever holds.
 const PlaceholderKey = "ao-3d-practical-proxy-injects-credentials"
 
+// codexPlaceholderLogin is a Codex API-key login whose key is the placeholder.
+func codexPlaceholderLogin() []byte {
+	b, _ := json.Marshal(map[string]string{"auth_mode": "apikey", "OPENAI_API_KEY": PlaceholderKey})
+	return b
+}
+
 // OperatorCredentials reads the operator's logins: Claude Code's OAuth
 // credential from the login keychain, and Codex's ChatGPT tokens from its
 // auth file. Each is re-read at most every refresh interval so a login the
