@@ -554,6 +554,10 @@ func (r *runner) decide() (RunResult, error) {
 	}
 	// The report is published only after the ledger is sealed and its digest
 	// is durably anchored; a failure before that publishes NO_GO instead.
+	staged := filepath.Join(r.root, "report.json.staged")
+	if err := WriteReport(staged, report); err != nil {
+		return RunResult{Root: r.root}, err
+	}
 	digest, err := sealLedger(path)
 	if err != nil {
 		return RunResult{Root: r.root}, err
@@ -562,8 +566,19 @@ func (r *runner) decide() (RunResult, error) {
 	if err := r.reg.Append(RegistryEntry{Type: "RESULT", ExperimentID: r.id, RunRoot: r.root, Kind: kind, Timestamp: r.o.Now().UTC(), Verdict: report.Verdict, ReasonCode: report.ReasonCode, LedgerSHA256: digest}); err != nil {
 		return RunResult{Root: r.root}, err
 	}
-	if err := WriteReport(filepath.Join(r.root, "report.json"), report); err != nil {
-		return RunResult{Root: r.root, Report: report}, err
+	final := filepath.Join(r.root, "report.json")
+	if _, statErr := os.Lstat(final); statErr == nil {
+		err = fmt.Errorf("report.json already exists")
+	} else {
+		err = os.Rename(staged, final)
+	}
+	if err != nil {
+		// Publication failed after anchoring: durably invalidate the result
+		// so it can never be re-decided as the experiment's outcome.
+		invErr := r.reg.Append(RegistryEntry{Type: "INVALIDATED", ExperimentID: r.id, RunRoot: r.root, Kind: kind, Timestamp: r.o.Now().UTC(), Verdict: "NO_GO", ReasonCode: ReasonLineageInvalid, LedgerSHA256: digest})
+		report.Verdict, report.ReasonCode = "NO_GO", ReasonLineageInvalid
+		report.Reason = "report publication failed after anchoring: " + err.Error()
+		return RunResult{Root: r.root, Report: report}, errors.Join(err, invErr)
 	}
 	return RunResult{Root: r.root, Report: report}, nil
 }

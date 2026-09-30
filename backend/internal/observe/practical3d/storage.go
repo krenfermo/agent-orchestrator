@@ -269,6 +269,8 @@ func DecideRun(root string, allowExplicitTemp bool, now time.Time) (Report, erro
 			if e.RunRoot == abs {
 				anchored = e.LedgerSHA256
 			}
+		case "INVALIDATED":
+			return Report{}, fmt.Errorf("%w: experiment %s was invalidated (%s)", ErrInvalidManifest, env.ExperimentID, e.ReasonCode)
 		}
 	}
 	if registered != 1 || results != 1 || !validSHA256(anchored) {

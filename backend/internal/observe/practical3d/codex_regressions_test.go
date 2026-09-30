@@ -225,3 +225,29 @@ func TestDecideRunRequiresAnchoredResult(t *testing.T) {
 		t.Fatal("run without an anchored RESULT decided")
 	}
 }
+
+type plantReport struct {
+	fastWorkspaces
+	at string
+}
+
+func (w plantReport) Finalize(_ context.Context, _ Manifest, p Position, ws PositionWorkspace) error {
+	if p.SampleID == w.at {
+		return os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(ws.Root)), "report.json"), []byte(`{"verdict":"GO"}`), 0o600)
+	}
+	return nil
+}
+
+func TestReportPublicationFailureInvalidatesTheResult(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	o := f.options(t)
+	o.Workspaces = plantReport{at: f.m.Randomization.Schedule[39].SampleID}
+	res, err := Run(context.Background(), f.m, o)
+	if err == nil || res.Report.Verdict != "NO_GO" {
+		t.Fatalf("publication failure hidden: err=%v verdict=%s", err, res.Report.Verdict)
+	}
+	if _, err := DecideRun(res.Root, true, time.Now()); err == nil {
+		t.Fatal("invalidated result re-decided")
+	}
+}

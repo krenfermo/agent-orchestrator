@@ -242,21 +242,17 @@ func runCommand(args []string, out io.Writer) error {
 	if !attested["PATH"] {
 		return errors.New("PATH is passed to every driver, so it must be in the frozen environment allowlist")
 	}
-	// Provider-only names are derived from the frozen manifest, not from the
-	// flag: every allowlisted value frozen as a digest (secrets, account
-	// selectors) is withheld from the position driver.
-	providerOnly := digestedEnv(m)
+	// Every driver receives exactly the allowlisted environment the frozen
+	// digest measures. Provider credentials (--provider-env) must stay OUT of
+	// that allowlist, so they reach only the provider driver; the account
+	// they select is bound by the manifest's account_ref_sha256, which each
+	// finalization must attest.
 	for _, name := range providerEnv {
-		if !providerOnly[name] {
-			return fmt.Errorf("--provider-env %s is not a digest-attested entry of the frozen environment allowlist", name)
+		if attested[name] {
+			return fmt.Errorf("--provider-env %s is in the environment allowlist and would reach the position driver", name)
 		}
 	}
-	var positionNames []string
-	for _, name := range allowlistedEnv(m) {
-		if !providerOnly[name] {
-			positionNames = append(positionNames, name)
-		}
-	}
+	positionNames := allowlistedEnv(m)
 	if err := verifyListedBinary(*positionDriver, append(append([]practical3d.VersionInput{}, m.ExecutionEnvironment.Inputs.TaskToolVersions...), m.ExecutionEnvironment.Inputs.RunnerInstrumentVersions...)); err != nil {
 		return err
 	}
@@ -279,7 +275,7 @@ func runCommand(args []string, out io.Writer) error {
 		Metadata:    env.Metadata,
 		Environment: practical3d.LiveEnvironmentObserver{Expected: m.ExecutionEnvironment.Inputs, AOBinaryPath: *aoBinary},
 		Artifacts:   practical3d.DirArtifactResolver{Root: *artifacts},
-		Transport:   commandTransport{path: *providerDriver, envNames: allowlistedEnv(m)},
+		Transport:   commandTransport{path: *providerDriver, envNames: append(allowlistedEnv(m), providerEnv...)},
 		Executor:    commandExecutor{path: *positionDriver, envNames: positionNames},
 		Oracle:      commandOracle{path: *oracleDriver, manifest: m},
 		Workspaces:  practical3d.GitWorkspaceManager{FixtureRepo: *fixtureRepo},
@@ -378,22 +374,6 @@ func allowlistedEnv(m practical3d.Manifest) []string {
 		names = append(names, c.Name)
 	}
 	return names
-}
-
-func digestedEnv(m practical3d.Manifest) map[string]bool {
-	out := map[string]bool{}
-	in := m.ExecutionEnvironment.Inputs
-	for _, c := range append(append([]practical3d.ConfigInput{}, in.EffectiveEnvironmentConfigAllowlist...), in.AdditionalLocalConfiguration...) {
-		if len(c.EffectiveValueOrSHA256) == 64 && strings.ToLower(c.EffectiveValueOrSHA256) == c.EffectiveValueOrSHA256 && isHexString(c.EffectiveValueOrSHA256) {
-			out[c.Name] = true
-		}
-	}
-	return out
-}
-
-func isHexString(s string) bool {
-	_, err := hex.DecodeString(s)
-	return err == nil
 }
 
 func withEnv(env, names []string) ([]string, error) {
