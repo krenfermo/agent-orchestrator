@@ -28,7 +28,7 @@ type tlClock struct {
 	now time.Time
 }
 
-func (c *tlClock) Now() time.Time       { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
+func (c *tlClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
 func (c *tlClock) Add(d time.Duration) { c.mu.Lock(); c.now = c.now.Add(d); c.mu.Unlock() }
 
 func TestPresentedAgentCredentialsOnTheTrustedLocalDesktop(t *testing.T) {
