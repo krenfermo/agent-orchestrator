@@ -2203,6 +2203,12 @@ func (c *Coordinator) ListRuns(ctx stdctx.Context, projectID string) ([]domain.W
 // CancelRun transitions a run to cancelled and cascades cancellation to every
 // non-terminal step. Cancelling an already-terminal run is a no-op error
 // (ErrAlreadyTerminal), never a silent success, and never mutates the run.
+// workerRuntimeReclaimOnCancelPhase is the informational trail CancelRun leaves
+// on a cancelled work step that had a session. It replaced
+// "worker_left_running_on_cancel" (AR-1a), whose text claimed AO never stops a
+// cancelled worker -- untrue since terminal runtime reclamation.
+const workerRuntimeReclaimOnCancelPhase = "worker_runtime_reclaim_on_cancel"
+
 func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, error) {
 	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
 	if err != nil {
@@ -2281,10 +2287,15 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, domain.WorkflowStepCancelled, now); err != nil {
 			return RunDetail{}, err
 		}
-		// Checkpoint 8B semantic: cancelling a run never stops a worker
-		// session. No kill/stop port is wired here by construction. The left-
-		// running session is only recorded as an informational trail so a
-		// human knows to stop it manually if it should not continue.
+		// The worker session's RUNTIME was already handled above, by
+		// reclaimTerminalRuntimesForRun: AO ends every runtime it can prove is
+		// its own (instance + owner token + launch) and leaves anything it
+		// cannot prove untouched for the runtime GC -- it never kills on a
+		// guess. The session record itself is kept. This trail says exactly
+		// that, so a person reading the run knows what happened and when a
+		// manual stop is still warranted. (AR-1a: it used to claim the session
+		// was always "left running", which stopped being true with P1-C's
+		// terminal runtime reclamation.)
 		if step.Kind == domain.WorkflowStepWork && step.SessionID != nil {
 			stepID := step.ID
 			sessionID := *step.SessionID
@@ -2295,10 +2306,10 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 				ProjectID:      run.ProjectID,
 				SessionID:      &sessionID,
 				NextAction: fmt.Sprintf(
-					"worker session %s left running — AO does not auto-stop it on workflow cancellation; stop it manually (e.g. via the session Kill action) if it should not continue",
+					"workflow cancelled: AO ended worker session %s's runtime if it could prove the runtime was its own; a runtime it could not prove is left untouched for the runtime GC (see the daemon log) -- stop the session manually (e.g. via the session Kill action) if it is still running and should not continue",
 					sessionID,
 				),
-				DurablePhase:   "worker_left_running_on_cancel",
+				DurablePhase:   workerRuntimeReclaimOnCancelPhase,
 				PayloadVersion: "v1",
 				RetryState:     "{}",
 				CreatedAt:      now,

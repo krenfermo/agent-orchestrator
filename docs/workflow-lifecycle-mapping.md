@@ -237,9 +237,12 @@ Each observation appends a checkpoint with
   reachable-but-currently-unwritten state.
 - **Cancelled**: `CancelRun` (`workflow.go`) CAS-moves the run to `cancelled`,
   cancels every non-terminal step, cancels open questions and running
-  resolutions — and deliberately **does not stop the worker session**. It
-  records `durable_phase='worker_left_running_on_cancel'` so a human knows to
-  stop it manually.
+  resolutions, and ends every worker/reviewer runtime it can prove is its own
+  (`reclaimTerminalRuntimesForRun`; ownership-proven only, anything unprovable
+  is left for the runtime GC). The session record is kept. It records
+  `durable_phase='worker_runtime_reclaim_on_cancel'` describing exactly that
+  (before AR-1a the phase was `worker_left_running_on_cancel` and claimed the
+  worker was never stopped).
 
 ### 4.7 Waiting and wake-up
 
@@ -533,10 +536,11 @@ These are real properties of the engine as it stands, not TODOs invented here.
    It exists only in Go and on the integration view (§6.2).
 6. **No CDC events.** Every workflow read is a poll. Non-terminal runs refetch
    on an interval; terminal runs must stop refetching.
-7. **Cancellation does not stop workers.** A cancelled run may still have a
-   live session. The UI must surface the
-   `worker_left_running_on_cancel` checkpoint rather than implying the worker
-   was killed.
+7. **Cancellation stops only ownership-proven runtimes.** A cancelled run may
+   still have a live session when AO could not prove the runtime was its own.
+   The UI must surface the `worker_runtime_reclaim_on_cancel` checkpoint (older
+   runs: `worker_left_running_on_cancel`) rather than implying the worker was
+   always killed.
 8. **A reviewer capacity stall parks the run with no wake row.**
    `handleReviewerCapacityStall` (`review_progress.go:305-353`) records the
    provider health failure, cancels the `review_run`, moves both the review step
