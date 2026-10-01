@@ -314,3 +314,39 @@ func liveAccountRefs(ctx context.Context, f realFlags, creds *practical3d.Operat
 	}
 	return map[string]string{"anthropic": anthropic, "openai": openai}, nil
 }
+
+// m3Command re-derives M3 for any role of a finished position from its AO
+// database and the proxy evidence the executor recorded (audit; read-only).
+func m3Command(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("m3", flag.ContinueOnError)
+	fs.SetOutput(out)
+	position := fs.String("position", "", "position root (contains ao-data/ and m3-evidence.json)")
+	role := fs.String("role", "worker", "role to measure (worker, reviewer)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(filepath.Join(*position, "m3-evidence.json"))
+	if err != nil {
+		return err
+	}
+	var e struct {
+		RunID        string                         `json:"run_id"`
+		Proxy        []practical3d.ProxyObservation `json:"proxy_observations"`
+		ToolResults  map[string]bool                `json:"tool_results"`
+		ProjectRoots []string                       `json:"project_roots"`
+	}
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return err
+	}
+	if e.RunID == "" {
+		// Evidence written before run ids were recorded: the position's
+		// database holds exactly one task run.
+		if e.RunID, err = practical3d.SingleRunID(context.Background(), filepath.Join(*position, "ao-data")); err != nil {
+			return err
+		}
+	}
+	ev, err := practical3d.DeriveM3(context.Background(), practical3d.M3Input{DataDir: filepath.Join(*position, "ao-data"), RunID: e.RunID, MeasuredRole: practical3d.Role(*role), Proxy: e.Proxy, ToolResults: e.ToolResults, ProjectRoots: e.ProjectRoots})
+	b, _ := json.Marshal(ev)
+	_, _ = fmt.Fprintf(out, "role=%s m3=%s error=%v\n", *role, b, err)
+	return err
+}

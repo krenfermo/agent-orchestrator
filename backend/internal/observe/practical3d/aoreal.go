@@ -589,7 +589,7 @@ func (e *AORealExecutor) Execute(ctx context.Context, pc PositionContext, c *Obs
 		measured = m3.Role
 	}
 	ev, err := DeriveM3(ctx, M3Input{DataDir: r.dataDir, RunID: r.runID, MeasuredRole: measured, Proxy: obs, ToolResults: proxy.ToolResults(), ProjectRoots: []string{r.work, filepath.Join(r.dataDir, "worktrees")}})
-	evRaw, _ := json.Marshal(map[string]any{"m3": ev, "error": errString(err), "proxy_observations": obs, "run_state": state})
+	evRaw, _ := json.Marshal(map[string]any{"m3": ev, "error": errString(err), "proxy_observations": obs, "tool_results": proxy.ToolResults(), "run_id": r.runID, "project_roots": []string{r.work, filepath.Join(r.dataDir, "worktrees")}, "run_state": state})
 	_ = writeExclusive(filepath.Join(pc.Workspace.Root, "m3-evidence.json"), evRaw)
 	if err != nil {
 		return res, fmt.Errorf("M3: %w", err)

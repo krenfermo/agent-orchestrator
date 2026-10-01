@@ -456,3 +456,32 @@ func m3Observations(ctx context.Context, db *sql.DB, kind, subject, role, runID 
 	}
 	return out, rows.Err()
 }
+
+// SingleRunID returns the one workflow run of a position's AO database.
+func SingleRunID(ctx context.Context, dataDir string) (string, error) {
+	db, err := sql.Open("sqlite", "file:"+url.PathEscape(dataDir+"/ao.db")+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = db.Close() }()
+	var ids []string
+	rows, err := db.QueryContext(ctx, `SELECT id FROM workflow_runs`)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if len(ids) != 1 {
+		return "", fmt.Errorf("position database has %d workflow runs, want exactly 1", len(ids))
+	}
+	return ids[0], nil
+}
