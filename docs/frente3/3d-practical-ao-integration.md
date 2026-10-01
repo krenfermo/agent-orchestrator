@@ -381,3 +381,48 @@ Realizing C as the norm defines it needs an operator decision, for example:
   - `go clean -cache`
   - `npm cache clean --force`
 - `~/.ao/scratch` (15 GB) is evidence and stays.
+
+### Task C: bounded audit against the real AO surfaces (operator item 4)
+
+Result: **TASK_C = PRACTICALLY_UNIMPLEMENTABLE_UNDER_FROZEN_SPEC.**
+
+Minimal causal chain:
+
+1. **What the frozen spec requires.** C (FIXTURE.md task C; 3d-practical §5)
+   scores Q6 on findings about a *given* diff, the fixture HEAD commit
+   (`REVIEW_TARGET_SHA256`). The findings must:
+   - be ranked;
+   - each carry an exact causal line;
+   - use the frozen defect class, cause and impact codes.
+2. **What AO's reviewer actually reviews.** In real AO the reviewer role
+   exists only as the review step of a task run. Its prompt
+   (`internal/workflow/review_prompt.go`, `buildDeepReviewPrompt`) is AO's
+   own, and makes it inspect `git status` / `git diff` of the *worker's*
+   change against the base commit. For C, that base commit is exactly the
+   target Q6 scores. The reviewer therefore judges the worker's fix, never the
+   given diff.
+3. **What its verdict looks like.** The verdict reaches AO only through
+   `ao review submit` as free markdown (`review_run.body`). AO has no
+   structured-finding primitive (`LatestReviewFindings` is free text).
+   **Q6 (item B) cannot be computed from real AO output** without a new
+   reviewer architecture: a review-only run over a given target, with
+   task-provided output instructions.
+4. **Item A (frozen ASSISTED attachment).** The reviewer's pack withholds
+   summaries of the files the worker changed (`TaskChangedPaths`). It depends
+   on each position's worker output, so it cannot be frozen before
+   SAMPLE_START. No AO primitive pins a pack.
+5. **Item C (observable exploration).** Codex's default code-mode `exec` is
+   JavaScript, which 3C does not classify, so reviewer M3 is not observable.
+   Disabling code mode would be a Codex configuration choice; it does not
+   resolve items 2-4.
+
+What is in place and works:
+
+- reviewer M3 over Codex sources (bound to provider call ids);
+- the structured-verdict milestone (item D);
+- OFF without an attachment (item E);
+- the same reviewer, model and config across arms (item F).
+
+What remains missing are items A and B. Both need a new reviewer
+architecture, which is excluded, so C is not implemented further and the
+experiment is unchanged.
