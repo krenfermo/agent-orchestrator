@@ -250,7 +250,12 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 		"-c", "model_providers.p3d.requires_openai_auth=false", "-c", `model_providers.p3d.env_key="` + CodexKeyEnv + `"`,
 		// No model-upgrade dialog in a fresh CODEX_HOME (it would block the
 		// reviewer's TUI).
-		"-c", `notice.model_migrations={"gpt-5.6-sol"="gpt-6-sol"}`}
+		"-c", `notice.model_migrations={"gpt-5.6-sol"="gpt-6-sol"}`,
+		// No guardian approvals: they judge each planned action on a second
+		// model (gpt-5.6-luna, observed in mini-E2E run 16), and the
+		// manifest freezes one model per role/class cell. The reviewer runs
+		// read-only with approvals off regardless. Declared, not silent.
+		"-c", "features.guardian_approval=false"}
 	if r.e.Cfg.CodexModel != "" {
 		codexArgs = append(codexArgs, "-c", `model="`+r.e.Cfg.CodexModel+`"`)
 	}
