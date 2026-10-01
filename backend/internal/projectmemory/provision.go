@@ -233,6 +233,11 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 		out.Metrics.FallbackBytes = out.Metrics.LegacyBytes
 		return out
 	}
+	if len(p.cfg.Roles) > 0 && !p.cfg.Roles[role] {
+		out.Metrics.FallbackReason = "project memory is not enabled for role " + string(role)
+		out.Metrics.FallbackBytes = out.Metrics.LegacyBytes
+		return out
+	}
 	// 0. Scope. Memory is keyed by (project, repository), and a request that
 	//    pairs a project with a checkout that is not one of its repositories
 	//    would index one codebase's facts under another's id and serve them.

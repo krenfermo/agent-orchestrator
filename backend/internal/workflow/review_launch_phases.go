@@ -540,6 +540,21 @@ func (c *Coordinator) releaseReviewDispatchClaim(
 	entry domain.WorkflowOutboxEntry,
 	why string,
 ) (domain.WorkflowStep, error) {
+	// A holder that is PROVEN superseded releases nothing and spends nothing.
+	// The release below would refuse it anyway, but the budget gate before it
+	// would not: a stale dispatch could park its successor's review as
+	// ambiguous on the successor's own history.
+	if c.reviewClaimSuperseded(ctx, run.ID, entry) {
+		if c.log != nil {
+			c.log.Warn("workflow: not releasing a review claim a newer dispatch generation owns",
+				"run", run.ID, "step", reviewStep.ID, "key", entry.IdempotencyKey,
+				"generation", entry.DispatchGeneration, "why", why)
+		}
+		if fresh, ok, ferr := c.getWorkflowStep(ctx, run.ID, reviewStep.ID); ferr == nil && ok {
+			return fresh, nil
+		}
+		return reviewStep, nil
+	}
 	// THE SINGLE CHOKE POINT FOR dispatched -> pending.
 	//
 	// Releasing a claim is what makes a step dispatchable again, so every
@@ -609,20 +624,17 @@ func (c *Coordinator) reviewLaunchStillAuthorized(
 	if step.State.Terminal() {
 		return false, "the review step reached a terminal state before the reviewer was launched"
 	}
-	// This dispatch must still hold the launch claim it acquired.
-	entries, eerr := c.store.ListWorkflowOutboxByRun(ctx, runID)
-	if eerr != nil {
+	// This dispatch must still hold the launch claim it acquired -- the SAME
+	// claim, not merely a claim. `dispatched` alone is not ownership: the row
+	// is reclaimable, and after a valid release it reads `dispatched` again
+	// under a newer generation. A stale holder that checked only the status
+	// launched a reviewer over work a newer dispatch already owned.
+	owned, oerr := c.reviewClaimOwned(ctx, runID, entry)
+	if oerr != nil {
 		return false, "the dispatch claim could not be re-read before launching"
 	}
-	held := false
-	for _, e := range entries {
-		if e.IdempotencyKey != entry.IdempotencyKey {
-			continue
-		}
-		held = e.Status == domain.WorkflowOutboxDispatched
-	}
-	if !held {
-		return false, "this dispatch no longer holds the launch claim"
+	if !owned {
+		return false, "this dispatch no longer holds the launch claim (its dispatch generation was superseded)"
 	}
 	// And the authority pointer must not have moved under it. An empty expected
 	// pointer means the step was released for a replacement, which stays valid
@@ -635,6 +647,61 @@ func (c *Coordinator) reviewLaunchStillAuthorized(
 		return false, "another review took this step before the reviewer was launched"
 	}
 	return true, ""
+}
+
+// errReviewLaunchFenced is the refusal a launch fence returns: at the last
+// moment before the external act, this dispatch was found no longer authorized
+// to perform it. It is not a launch failure -- nothing was attempted -- so it is
+// never classified, retried or charged to the launch budget.
+var errReviewLaunchFenced = errors.New("review launch fenced")
+
+// reviewClaimOwned reports whether the durable outbox row still names THIS
+// dispatch's claim: the same entry, still `dispatched`, under the exact
+// generation this dispatch stamped when it won the CAS.
+//
+// It is a read of the durable row, never of anything the caller holds, and the
+// comparison is equality on the generation: the claim model makes every
+// generation unique (it is the id of the dispatch's own AUTHORIZED record), so
+// a row naming any other generation belongs to somebody else. An entry that
+// carries no generation owns nothing.
+func (c *Coordinator) reviewClaimOwned(
+	ctx stdctx.Context, runID string, entry domain.WorkflowOutboxEntry,
+) (bool, error) {
+	if entry.DispatchGeneration == "" {
+		return false, nil
+	}
+	entries, err := c.store.ListWorkflowOutboxByRun(ctx, runID)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.ID != entry.ID {
+			continue
+		}
+		return e.Status == domain.WorkflowOutboxDispatched && e.DispatchGeneration == entry.DispatchGeneration, nil
+	}
+	return false, nil
+}
+
+// reviewClaimSuperseded reports whether it is PROVEN that this dispatch's
+// generation no longer owns its claim. Only a readable row that names
+// something else counts: a failed read proves nothing, and the callers fall
+// back to their own generation-conditioned writes, which refuse a stale holder
+// on their own.
+//
+// It is what keeps a fenced dispatch from disturbing its successor. The
+// outbox writes are conditioned on the generation, but the step and budget
+// writes around them are not, so a stale holder closing out its failure used
+// to move the NEW owner's running step back to waiting (or spend its budget)
+// before its own outbox write was refused.
+func (c *Coordinator) reviewClaimSuperseded(
+	ctx stdctx.Context, runID string, entry domain.WorkflowOutboxEntry,
+) bool {
+	if entry.DispatchGeneration == "" {
+		return false
+	}
+	owned, err := c.reviewClaimOwned(ctx, runID, entry)
+	return err == nil && !owned
 }
 
 // ensureReviewerLaunched performs the external launch through the deterministic
@@ -715,6 +782,15 @@ func (c *Coordinator) ensureReviewerLaunched(
 		// state and retries rather than guessing.
 		return ReviewerLaunchResult{}, false, fmt.Errorf(
 			"%w: %s at %s", errReviewerPresenceUnproven, obs.Presence, identity)
+	}
+	// THE LAUNCH FENCE, re-checked after the probe. A launcher that honours
+	// req.LaunchFence checks it again at the very last moment, after whatever
+	// context provisioning it performs (that can take seconds); this call is
+	// what holds the property for a launcher that does not.
+	if req.LaunchFence != nil {
+		if ferr := req.LaunchFence(ctx); ferr != nil {
+			return ReviewerLaunchResult{}, false, ferr
+		}
 	}
 	res, err := c.reviewerLauncher.Launch(ctx, req)
 	if err != nil {

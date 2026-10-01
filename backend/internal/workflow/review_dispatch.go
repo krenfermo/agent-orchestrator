@@ -286,6 +286,16 @@ type ReviewerLaunchRequest struct {
 	WorkflowStepID string
 	OwnerUserID    domain.UserID
 	Generation     int64
+
+	// LaunchFence, when set, is the dispatch's last authorization check. A
+	// launcher calls it immediately before the irreversible act -- after any
+	// context it assembles, right before the runtime creates the reviewer --
+	// and launches nothing if it returns an error, returning that error as-is.
+	// It re-reads durable state (the claim's exact dispatch generation, the
+	// step, the run), so a dispatch whose claim passed to a newer generation
+	// while it was preparing never launches. Decorators pass it through
+	// untouched; nil means the caller asked for no fence.
+	LaunchFence func(stdctx.Context) error
 }
 
 // ReviewerLaunchResult is the runtime handle created for a reviewer launch.
@@ -1097,6 +1107,22 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 	case domain.WorkflowOutboxDispatched, domain.WorkflowOutboxAcknowledged:
 		// Dispatched: a previous attempt got at least as far as "about to
 		// launch," but we don't durably know if the launch itself completed.
+		//
+		// Unless that attempt is still running in THIS process: then it is not
+		// a previous attempt at all, and its launch is not unknown -- it is in
+		// progress. Recovery would probe a reviewer that does not exist yet,
+		// declare it absent and fail a review that is being launched. The live
+		// dispatch finishes the transition itself; this pass concludes nothing.
+		if entry.Status == domain.WorkflowOutboxDispatched && c.reviewInFlight.running(entry.ID, entry.DispatchGeneration) {
+			if c.log != nil {
+				c.log.Info("workflow: review dispatch in progress in this process; leaving it to finish",
+					"run", run.ID, "step", reviewStep.ID, "key", entry.IdempotencyKey)
+			}
+			if fresh, ok, ferr := c.getWorkflowStep(ctx, run.ID, reviewStep.ID); ferr == nil && ok {
+				return fresh, nil
+			}
+			return reviewStep, nil
+		}
 		return c.adoptReviewOrMarkAmbiguous(ctx, run, reviewStep, entry, sessionID, targetSHA, harness)
 	case domain.WorkflowOutboxFailed:
 		// Durably failed. Still no auto-retry — but a human-driven Continue on a
@@ -1436,6 +1462,12 @@ func (c *Coordinator) dispatchReviewFromPending(
 	// one statement, so a dispatched row can never be owned by nobody — and a
 	// dispatch that is later released and reclaimed is a genuinely different
 	// generation, which the stale holder can no longer act on.
+	//
+	// The claim is reserved as live in this process BEFORE the CAS, under its
+	// own generation (see review_dispatch_inflight.go): the row must never read
+	// `dispatched` for this generation while a concurrent pass could take the
+	// dispatch for an abandoned one. Losing the CAS just drops the reservation.
+	defer c.reviewInFlight.reserve(entry.ID, dispatchGeneration)()
 	claimed, err := c.store.ClaimWorkflowOutboxDispatch(ctx, entry.ID, now, dispatchGeneration)
 	if err != nil {
 		return reviewStep, err
@@ -1692,6 +1724,17 @@ func (c *Coordinator) dispatchReviewFromPending(
 		OwnerUserID:    runOwner,
 		Generation:     int64(cycleNumber),
 	}
+	// The last durable check, carried INTO the launch. Context provisioning
+	// runs inside the launcher chain and can take seconds, so a check made
+	// here alone would still leave that whole window between it and the
+	// external act. The launcher calls this immediately before the runtime
+	// creates the reviewer; any refusal launches nothing.
+	launchReq.LaunchFence = func(fctx stdctx.Context) error {
+		if ok, why := c.reviewLaunchStillAuthorized(fctx, run.ID, reviewStep.ID, entry, authorization); !ok {
+			return fmt.Errorf("%w: %s", errReviewLaunchFenced, why)
+		}
+		return nil
+	}
 	// P2-C §7: a Reviewer is entitled to exactly what the Worker it reviews was
 	// entitled to. Reviewing a change against knowledge the author did not have
 	// is how a review reports a "regression" that is actually a decision the
@@ -1710,6 +1753,17 @@ func (c *Coordinator) dispatchReviewFromPending(
 		projectmemory.WithRoleHead(c.withTaskAuthority(ctx, run), targetSHA),
 		c.expectedWriteSetFor(ctx, run))
 	launch, adopted, err := c.ensureReviewerLaunched(reviewCtx, launchReq, authorization.HandleID)
+	if errors.Is(err, errReviewLaunchFenced) {
+		// Refused at the last moment, with nothing attempted: the same close-out
+		// as the READY TO LAUNCH refusal above, never a launch failure.
+		why := strings.TrimPrefix(err.Error(), errReviewLaunchFenced.Error()+": ")
+		if c.log != nil {
+			c.log.Warn("workflow: refusing to launch a reviewer whose authorization no longer holds",
+				"run", run.ID, "step", reviewStep.ID, "reviewRun", reviewRunID, "why", why, "at", "launch fence")
+		}
+		return c.abandonUnlaunchedReviewRun(ctx, run, reviewStep, entry, reviewRunID,
+			"review_dispatch: "+why, why)
+	}
 	if err != nil {
 		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStageLaunch, fmt.Errorf("launch reviewer: %w", err))
 	}

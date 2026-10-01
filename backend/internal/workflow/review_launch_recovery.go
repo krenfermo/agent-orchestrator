@@ -322,6 +322,28 @@ func (c *Coordinator) recordReviewLaunchFailure(
 		deep = deep[:reviewLaunchErrorMaxLen]
 	}
 
+	// A FENCED HOLDER CLOSES OUT ONLY WHAT IS ITS OWN.
+	//
+	// When the durable claim provably names a newer generation, the step, the
+	// run, the retry budget and the outbox row all belong to that newer
+	// dispatch. Every write below would land on them -- the step write is not
+	// conditioned on the claim -- so a stale dispatch failing late moved its
+	// successor's running step back to waiting. The only thing this dispatch
+	// still owns is the review run it created, which is closed out; nothing
+	// else is touched and nothing is retried.
+	if c.reviewClaimSuperseded(ctx, run.ID, entry) {
+		c.failPartialReviewRun(ctx, reviewRunID, cls, stage, deep)
+		if c.log != nil {
+			c.log.Warn("workflow: a superseded review dispatch failed; leaving the newer generation's state alone",
+				"run", run.ID, "step", reviewStep.ID, "key", entry.IdempotencyKey,
+				"generation", entry.DispatchGeneration, "stage", stage, "err", cause)
+		}
+		if fresh, ok, ferr := c.getWorkflowStep(ctx, run.ID, reviewStep.ID); ferr == nil && ok {
+			return fresh, nil
+		}
+		return reviewStep, nil
+	}
+
 	// 0. ATTRIBUTE THE FAILURE BEFORE CAUSING IT.
 	//
 	// Everything below is the same two-write shape the abandon protocol exists

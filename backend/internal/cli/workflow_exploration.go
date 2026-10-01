@@ -117,9 +117,10 @@ type workflowExplorationPayload struct {
 	Quality   runQualityPayload         `json:"quality"`
 
 	ContextSources struct {
-		Recorded      bool   `json:"recorded"`
-		MemoryMode    string `json:"memoryMode"`
-		ContextRouter string `json:"contextRouter"`
+		Recorded        bool   `json:"recorded"`
+		MemoryMode      string `json:"memoryMode"`
+		ContextRouter   string `json:"contextRouter"`
+		ExternalContext string `json:"externalContext"`
 	} `json:"contextSources"`
 	MemoryPacks []struct {
 		Role            string `json:"role"`
@@ -203,7 +204,11 @@ func printWorkflowExploration(w io.Writer, res workflowExplorationPayload) error
 	out := &strings.Builder{}
 	linef(out, "workflow %s  (project %s)\n", res.RunID, res.ProjectID)
 	if res.ContextSources.Recorded {
-		linef(out, "Context sources  memory=%s  router=%s  (frozen at run creation)\n", res.ContextSources.MemoryMode, res.ContextSources.ContextRouter)
+		external := res.ContextSources.ExternalContext
+		if external == "" {
+			external = "unrecorded"
+		}
+		linef(out, "Context sources  memory=%s  router=%s  external=%s  (frozen at run creation)\n", res.ContextSources.MemoryMode, res.ContextSources.ContextRouter, external)
 	} else {
 		line(out, "Context sources  not recorded (run predates 3C)")
 	}

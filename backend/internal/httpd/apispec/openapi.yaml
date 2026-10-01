@@ -16393,6 +16393,8 @@ components:
       properties:
         contextRouter:
           type: string
+        externalContext:
+          type: string
         memoryMode:
           type: string
         recorded:
@@ -16401,6 +16403,7 @@ components:
       - recorded
       - memoryMode
       - contextRouter
+      - externalContext
       type: object
     ControllersRunMemoryPackResponse:
       properties:

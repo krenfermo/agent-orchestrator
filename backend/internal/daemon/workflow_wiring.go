@@ -505,7 +505,8 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		router,
 		memoryProvisionerFor(memoryProvisioning),
 		log)
-	deps.ContextSources = effectiveContextSources(memoryProvisioning != nil, memoryConfig(log).Mode, router != nil)
+	memCfg := memoryConfig(log)
+	deps.ContextSources = effectiveContextSources(memoryProvisioning != nil, memCfg.Mode, router != nil, memCfg.ExternalContext)
 	coordinator := workflowcore.New(deps)
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }
@@ -514,10 +515,14 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 // recorded into every run's policy_snapshot (Frente 3 / 3C). A mode that was
 // requested but produced no provisioner (a rejected budget, no memory service)
 // is recorded as off, because off is what the run's dispatches receive.
-func effectiveContextSources(provisioned bool, mode durablememory.MemoryMode, routing bool) domain.ContextSourcesSnapshot {
-	out := domain.ContextSourcesSnapshot{MemoryMode: string(durablememory.ModeOff), ContextRouter: "off"}
+func effectiveContextSources(provisioned bool, mode durablememory.MemoryMode, routing, external bool) domain.ContextSourcesSnapshot {
+	out := domain.ContextSourcesSnapshot{MemoryMode: string(durablememory.ModeOff), ContextRouter: "off", ExternalContext: "off"}
 	if provisioned && mode.Enabled() {
 		out.MemoryMode = string(mode)
+		// External context rides on memory provisioning only.
+		if external {
+			out.ExternalContext = "github"
+		}
 	}
 	if routing {
 		out.ContextRouter = "on"
@@ -533,6 +538,16 @@ func effectiveContextSources(provisioned bool, mode durablememory.MemoryMode, ro
 // the same reason: an operator who mistyped a setting must get the previous
 // behaviour and a warning, not a dispatch shaped by a guess.
 func memoryConfig(log *slog.Logger) durablememory.Config {
+	if cfg, ok := resolvedMemoryConfig(); ok {
+		return cfg
+	}
+	return readMemoryConfig(log)
+}
+
+// readMemoryConfig is memoryConfig's environment read. RunWithConfig does it
+// once, before any child starts, and then withholds the variables (see
+// resolveAndWithholdDaemonOnlySwitches).
+func readMemoryConfig(log *slog.Logger) durablememory.Config {
 	cfg, err := durablememory.ConfigFromEnv()
 	if err != nil {
 		if log != nil {
@@ -661,7 +676,7 @@ func projectMemoryBaselineRecorder(log *slog.Logger) *projectmemory.Recorder {
 // path (docs/p2-project-memory-audit.md §5, §8). A nil repository keeps the
 // pre-P2-A JSON-backed source, and the flag still gates everything.
 func contextRouterFor(log *slog.Logger, memoryRepo durablememory.Repository, memory *durablememory.Service) *contextrouter.Router {
-	if !contextrouter.Enabled() {
+	if !contextRouterEnabled() {
 		return nil
 	}
 	// P2-B: when the memory mode is enabled, memory reaches the roles through

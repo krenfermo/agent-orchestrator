@@ -80,6 +80,11 @@ const (
 	// exists so an operator diagnosing a suspected staleness can remove the
 	// cache from the picture without disabling memory.
 	CacheEnv = "AO_MEMORY_CACHE"
+	// ExternalEnv switches the EXTERNAL context (GitHub intelligence) that
+	// rides on memory provisioning. On by default; off removes it from every
+	// dispatch while leaving the memory pack itself unchanged -- which is what
+	// lets a memory A/B compare memory alone (Frente 3 / 3D).
+	ExternalEnv = "AO_MEMORY_EXTERNAL"
 	// MaxFilesEnv overrides the initial-index file bound.
 	MaxFilesEnv = "AO_MEMORY_MAX_FILES"
 	// MaxFileBytesEnv overrides the per-file bound.
@@ -87,6 +92,11 @@ const (
 	// BudgetEnv overrides the per-role pack budgets, as
 	// `role=bytes/items[,role=bytes/items]`.
 	BudgetEnv = "AO_MEMORY_BUDGETS"
+	// RolesEnv restricts which dispatch roles receive memory, as a comma list
+	// of roles (`worker,reviewer,...`). Unset means every role. A role left
+	// out gets exactly the ModeOff behaviour, so a controlled comparison can
+	// target the memory treatment at one role.
+	RolesEnv = "AO_MEMORY_ROLES"
 )
 
 // DefaultSyncTimeout bounds a lifecycle-triggered sync.
@@ -106,21 +116,28 @@ type Config struct {
 	SyncTimeout time.Duration
 	// CacheEnabled switches the pack cache on.
 	CacheEnabled bool
+	// ExternalContext attaches external (GitHub) context to provisioned
+	// dispatches. On by default.
+	ExternalContext bool
 	// IndexLimits bounds the initial index.
 	IndexLimits IndexLimits
 	// Budgets are the per-role pack budgets.
 	Budgets BudgetSet
+	// Roles, when non-empty, is the only set of roles memory is provisioned
+	// for (see RolesEnv).
+	Roles map[PackRole]bool
 }
 
 // DefaultConfig is conservative on purpose: memory off, short sync timeout,
 // cache on, documented index bounds and role budgets.
 func DefaultConfig() Config {
 	return Config{
-		Mode:         ModeOff,
-		SyncTimeout:  DefaultSyncTimeout,
-		CacheEnabled: true,
-		IndexLimits:  DefaultIndexLimits(),
-		Budgets:      DefaultBudgets(),
+		Mode:            ModeOff,
+		SyncTimeout:     DefaultSyncTimeout,
+		CacheEnabled:    true,
+		ExternalContext: true,
+		IndexLimits:     DefaultIndexLimits(),
+		Budgets:         DefaultBudgets(),
 	}
 }
 
@@ -151,12 +168,35 @@ func ConfigFromEnv() (Config, error) {
 		}
 		cfg.SyncTimeout = d
 	}
+	if raw, ok := lookupNonEmpty(RolesEnv); ok {
+		cfg.Roles = map[PackRole]bool{}
+		for _, name := range strings.Split(raw, ",") {
+			role := PackRole(strings.ToLower(strings.TrimSpace(name)))
+			if role == "" {
+				continue
+			}
+			if !role.Valid() {
+				return Config{}, fmt.Errorf("%s: unknown role %q", RolesEnv, name)
+			}
+			cfg.Roles[role] = true
+		}
+		if len(cfg.Roles) == 0 {
+			return Config{}, fmt.Errorf("%s: names no role", RolesEnv)
+		}
+	}
 	if raw, ok := lookupNonEmpty(CacheEnv); ok {
 		on, err := strconv.ParseBool(strings.TrimSpace(raw))
 		if err != nil {
 			return Config{}, fmt.Errorf("%s: %w", CacheEnv, err)
 		}
 		cfg.CacheEnabled = on
+	}
+	if raw, ok := lookupNonEmpty(ExternalEnv); ok {
+		on, err := parseOnOff(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", ExternalEnv, err)
+		}
+		cfg.ExternalContext = on
 	}
 	if raw, ok := lookupNonEmpty(MaxFilesEnv); ok {
 		n, err := strconv.Atoi(strings.TrimSpace(raw))
@@ -195,6 +235,17 @@ func lookupNonEmpty(key string) (string, bool) {
 // Describe renders the policy for an operator, so a log line or `ao memory
 // status` can say what is actually in force rather than what the defaults are.
 func (c Config) Describe() string {
-	return fmt.Sprintf("mode=%s syncTimeout=%s cache=%t maxFiles=%d budgets=%s",
-		c.Mode, c.SyncTimeout, c.CacheEnabled, c.IndexLimits.MaxFiles, c.Budgets.Describe())
+	return fmt.Sprintf("mode=%s syncTimeout=%s cache=%t external=%t maxFiles=%d budgets=%s",
+		c.Mode, c.SyncTimeout, c.CacheEnabled, c.ExternalContext, c.IndexLimits.MaxFiles, c.Budgets.Describe())
+}
+
+// parseOnOff accepts on/off as well as Go's boolean spellings.
+func parseOnOff(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	}
+	return strconv.ParseBool(strings.TrimSpace(raw))
 }

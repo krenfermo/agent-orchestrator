@@ -61,6 +61,9 @@ type RunContextSourcesResponse struct {
 	Recorded      bool   `json:"recorded"`
 	MemoryMode    string `json:"memoryMode"`
 	ContextRouter string `json:"contextRouter"`
+	// ExternalContext is "github" or "off"; empty on runs created before it
+	// was recorded.
+	ExternalContext string `json:"externalContext"`
 }
 
 // RunMemoryPackResponse is what one dispatch of the run was handed by project
@@ -234,9 +237,10 @@ func workflowExplorationResponse(v domain.RunExploration) WorkflowExplorationRes
 		Totals:    agentExplorationResponse(v.Totals),
 		Quality:   runQualityResponse(v.Quality),
 		ContextSources: RunContextSourcesResponse{
-			Recorded:      v.ContextSources.Recorded(),
-			MemoryMode:    v.ContextSources.MemoryMode,
-			ContextRouter: v.ContextSources.ContextRouter,
+			Recorded:        v.ContextSources.Recorded(),
+			MemoryMode:      v.ContextSources.MemoryMode,
+			ContextRouter:   v.ContextSources.ContextRouter,
+			ExternalContext: v.ContextSources.ExternalContext,
 		},
 		MemoryPacks: make([]RunMemoryPackResponse, 0, len(v.MemoryPacks)),
 	}

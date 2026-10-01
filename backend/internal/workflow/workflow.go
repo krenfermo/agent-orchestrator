@@ -653,6 +653,10 @@ type Coordinator struct {
 
 	contextSources domain.ContextSourcesSnapshot
 
+	// reviewInFlight is the set of review dispatch claims this process is
+	// executing right now (see review_dispatch_inflight.go).
+	reviewInFlight reviewDispatchInFlight
+
 	// sessions, reviewRuns, and log back Reconcile's best-effort integrity
 	// check (see recovery.go). All optional.
 	sessions   Sessions

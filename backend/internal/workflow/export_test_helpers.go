@@ -235,3 +235,19 @@ func AttentionDispositionForTest(reason string) (AttentionDisposition, bool) {
 	d, ok := attentionDispositions[reason]
 	return d, ok
 }
+
+// ReserveReviewDispatchForTest marks generation gen of a review claim as live
+// in this process -- exactly what a dispatch holding it does before its CAS --
+// so a fixture can stand a live successor N+1 next to a stale N without staging
+// a second concurrent dispatch. The returned func ends the reservation.
+func (c *Coordinator) ReserveReviewDispatchForTest(entryID, gen string) func() {
+	return c.reviewInFlight.reserve(entryID, gen)
+}
+
+// ReviewClaimOwnedForTest exposes the ownership read the launch fence applies:
+// whether the durable row still names entry's exact dispatch generation.
+func (c *Coordinator) ReviewClaimOwnedForTest(
+	ctx stdctx.Context, runID string, entry domain.WorkflowOutboxEntry,
+) (bool, error) {
+	return c.reviewClaimOwned(ctx, runID, entry)
+}

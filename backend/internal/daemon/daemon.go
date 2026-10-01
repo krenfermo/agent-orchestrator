@@ -124,6 +124,9 @@ func RunWithConfig(cfg config.Config) error {
 	ignoreBrokenPipeSignal()
 
 	log := newLogger()
+	// Before anything can start a child: read the memory/router switches once
+	// and drop them from this process's environment.
+	defer resolveAndWithholdDaemonOnlySwitches(log)()
 	log.Info("daemon starting", "data_dir", cfg.DataDir, "listen", cfg.Addr(), "frontend_root", cfg.WebRoot)
 	// P9: the daemon's two identities, resolved before anything can launch or
 	// publish a run-file. A data dir whose installation identity cannot be read
@@ -898,7 +901,13 @@ func RunWithConfig(cfg config.Config) error {
 		// is where every role's context is assembled, budgeted and measured,
 		// and a parallel path would be a second place for the "never fail a
 		// dispatch" rule to be forgotten.
-		memoryProvisioning = memoryProvisioning.WithExternal(githubIntel)
+		//
+		// Frente 3 / 3D: AO_MEMORY_EXTERNAL=off keeps it out, so a memory
+		// A/B varies memory and nothing else. The choice is recorded in every
+		// run's policy_snapshot (contextSources.externalContext).
+		if memoryConfig(log).ExternalContext {
+			memoryProvisioning = memoryProvisioning.WithExternal(githubIntel)
+		}
 	}
 
 	// P4-E: external work management (Plane).

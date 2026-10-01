@@ -5461,6 +5461,7 @@ export interface components {
         };
         ControllersRunContextSourcesResponse: {
             contextRouter: string;
+            externalContext: string;
             memoryMode: string;
             recorded: boolean;
         };

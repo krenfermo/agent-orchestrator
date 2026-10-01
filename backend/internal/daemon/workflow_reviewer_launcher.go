@@ -425,6 +425,16 @@ func (l *workflowReviewerLauncher) Launch(ctx context.Context, req workflowcore.
 	// runtime makes ownership part of the same operation that makes the session
 	// exist, and the runtime destroys anything it cannot stamp rather than
 	// returning a handle to it.
+	// THE LAUNCH FENCE, at the last possible moment: after the context the
+	// decorators assembled and the credential above, immediately before the
+	// runtime makes the reviewer exist. A dispatch whose durable claim passed
+	// to a newer generation while it was preparing launches nothing here.
+	if req.LaunchFence != nil {
+		if ferr := req.LaunchFence(ctx); ferr != nil {
+			l.revokeAgentCredential(ctx, req.RunID, credentialPath)
+			return workflowcore.ReviewerLaunchResult{}, ferr
+		}
+	}
 	handle, err := l.runtime.Create(ctx, ports.RuntimeConfig{
 		SessionID:     domain.SessionID(handleID),
 		WorkspacePath: workingDirectory,
