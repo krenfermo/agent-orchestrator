@@ -260,7 +260,7 @@ type masterPlanStore interface {
 	// describing reality. The write is one transaction over the ledger row and
 	// the task's criteria, because an amendment nobody can account for and an
 	// explanation for a change that never happened are both worse than nothing.
-	AmendWorkflowTaskCriterion(ctx stdctx.Context, amendment domain.WorkflowTaskCriterionAmendment, criteria []string, now time.Time) error
+	AmendWorkflowTaskCriterion(ctx stdctx.Context, amendment domain.WorkflowTaskCriterionAmendment, expectedCriteriaJSON string, criteria []string, now time.Time) error
 	ListWorkflowTaskCriterionAmendments(ctx stdctx.Context, runID string) ([]domain.WorkflowTaskCriterionAmendment, error)
 	SetWorkflowTaskExecutionRun(ctx stdctx.Context, taskID, executionRunID string, now time.Time) (bool, error)
 	FindWorkflowRunByPlannedTask(ctx stdctx.Context, taskID string) (string, bool, error)

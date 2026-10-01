@@ -94,9 +94,10 @@ func newAmendFixture(t *testing.T, criteria []string) *amendFixture {
 func baseRequest() TaskCriterionAmendmentRequest {
 	return TaskCriterionAmendmentRequest{
 		RunID: "wf-amend", TaskID: "task-a", CriterionIndex: 1,
-		Reason:     "the state it describes was committed in 70296042b",
-		Evidence:   []string{"70296042b feat(postrunqa): add QA finding attribution"},
-		ApprovedBy: "joaquin",
+		Reason:           "the state it describes was committed in 70296042b",
+		Evidence:         []string{"70296042b feat(postrunqa): add QA finding attribution"},
+		ApprovedBy:       "joaquin",
+		ApprovedByUserID: "user-joaquin", ApprovedAuthMethod: domain.AuthMethodPassword,
 	}
 }
 
@@ -373,5 +374,127 @@ func (f *amendFixture) assertReviewReopened(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no durable record of the amendment on the run whose verdict it superseded")
+	}
+}
+
+// AR-1a / D-SEC-3: the approver is the authenticated principal.
+
+// An agent principal never approves an amendment of the criteria it is judged
+// against, whatever name it carries.
+func TestAR1aAnAgentCannotApproveAnAmendment(t *testing.T) {
+	f := newAmendFixture(t, []string{"a", "b"})
+	req := baseRequest()
+	req.ApprovedAuthMethod = domain.AuthMethodAgent
+	if _, err := f.coord.AmendTaskAcceptanceCriterion(f.ctx, req); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+	if a, _ := f.coord.ListTaskCriterionAmendments(f.ctx, f.master.ID); len(a) != 0 {
+		t.Fatalf("an agent-approved amendment was recorded")
+	}
+}
+
+// A name with no authenticated principal behind it is refused: that is exactly
+// the free-text approver D-SEC-3 removes.
+func TestAR1aAnAmendmentWithoutAnAuthenticatedPrincipalIsRefused(t *testing.T) {
+	for name, mut := range map[string]func(*TaskCriterionAmendmentRequest){
+		"no user id":     func(r *TaskCriterionAmendmentRequest) { r.ApprovedByUserID = "" },
+		"no auth method": func(r *TaskCriterionAmendmentRequest) { r.ApprovedAuthMethod = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAmendFixture(t, []string{"a", "b"})
+			req := baseRequest()
+			mut(&req)
+			if _, err := f.coord.AmendTaskAcceptanceCriterion(f.ctx, req); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("err = %v, want ErrInvalid", err)
+			}
+			if got := f.currentCriteria(t); len(got) != 2 {
+				t.Fatalf("criteria = %v, want them untouched", got)
+			}
+		})
+	}
+}
+
+// The principal is what the ledger keeps, durably.
+func TestAR1aTheRecordedApproverIsThePrincipal(t *testing.T) {
+	f := newAmendFixture(t, []string{"a", "b"})
+	req := baseRequest()
+	req.ApprovedAuthMethod = domain.AuthMethodTrustedLocal
+	if _, err := f.coord.AmendTaskAcceptanceCriterion(f.ctx, req); err != nil {
+		t.Fatalf("amend: %v", err)
+	}
+	all, err := f.coord.ListTaskCriterionAmendments(f.ctx, f.master.ID)
+	if err != nil || len(all) != 1 {
+		t.Fatalf("amendments = %d, %v; want 1", len(all), err)
+	}
+	if all[0].ApprovedByUserID != "user-joaquin" || all[0].ApprovedAuthMethod != domain.AuthMethodTrustedLocal || all[0].ApprovedBy != "joaquin" {
+		t.Fatalf("recorded approver = %q/%q/%q, want joaquin/user-joaquin/trusted_local",
+			all[0].ApprovedBy, all[0].ApprovedByUserID, all[0].ApprovedAuthMethod)
+	}
+}
+
+// Two amendments racing on the same criterion: exactly one lands, the other is
+// refused, and the ledger and the task agree. Before AR-1a the text check ran
+// outside the write and the criteria update was unconditional, so both could
+// "succeed" with the second silently overwriting the first.
+func TestAR1aConcurrentAmendmentsCannotOverwriteEachOther(t *testing.T) {
+	f := newAmendFixture(t, []string{"a", "b"})
+	results := make(chan error, 2)
+	for _, replacement := range []string{"b amended by one", "b amended by two"} {
+		req := baseRequest()
+		req.OriginalCriterion = "b"
+		req.AmendedCriterion = replacement
+		go func(req TaskCriterionAmendmentRequest) {
+			_, err := f.coord.AmendTaskAcceptanceCriterion(f.ctx, req)
+			results <- err
+		}(req)
+	}
+	var ok, refused int
+	for i := 0; i < 2; i++ {
+		switch err := <-results; {
+		case err == nil:
+			ok++
+		case errors.Is(err, ErrInvalid):
+			refused++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if ok != 1 || refused != 1 {
+		t.Fatalf("ok=%d refused=%d, want exactly one of each", ok, refused)
+	}
+	all, _ := f.coord.ListTaskCriterionAmendments(f.ctx, f.master.ID)
+	if len(all) != 1 {
+		t.Fatalf("ledger rows = %d, want 1", len(all))
+	}
+	if got := f.currentCriteria(t); len(got) != 2 || got[1] != all[0].AmendedCriterion {
+		t.Fatalf("task criteria %v disagree with the recorded amendment %q", got, all[0].AmendedCriterion)
+	}
+}
+
+// The write itself refuses criteria that are no longer the ones the amendment
+// was computed from, and a task that has closed: nothing is written either way.
+func TestAR1aTheStoreRefusesAStaleOrClosedAmendment(t *testing.T) {
+	f := newAmendFixture(t, []string{"a", "b"})
+	amendment := domain.WorkflowTaskCriterionAmendment{
+		ID: "wfca-x", WorkflowRunID: f.master.ID, TaskID: "task-a", CriterionIndex: 1,
+		OriginalCriterion: "b", AmendedCriterion: "c", Disposition: domain.WorkflowTaskCriterionAmended,
+		Reason: "r", Evidence: []string{"e"}, ApprovedBy: "joaquin",
+		ApprovedByUserID: "user-joaquin", ApprovedAuthMethod: domain.AuthMethodPassword, CreatedAt: time.Now().UTC(),
+	}
+	err := f.store.AmendWorkflowTaskCriterion(f.ctx, amendment, `["a","stale"]`, []string{"a", "c"}, time.Now().UTC())
+	if !errors.Is(err, domain.ErrWorkflowTaskCriterionConflict) {
+		t.Fatalf("stale expected criteria err = %v, want conflict", err)
+	}
+	if _, err := f.store.UpdateWorkflowTaskState(f.ctx, "task-a",
+		domain.WorkflowTaskRunning, domain.WorkflowTaskCompleted, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	amendment.ID = "wfca-y"
+	err = f.store.AmendWorkflowTaskCriterion(f.ctx, amendment, f.task.AcceptanceCriteriaJSON, []string{"a", "c"}, time.Now().UTC())
+	if !errors.Is(err, domain.ErrWorkflowTaskCriterionConflict) {
+		t.Fatalf("closed task err = %v, want conflict", err)
+	}
+	if all, _ := f.coord.ListTaskCriterionAmendments(f.ctx, f.master.ID); len(all) != 0 {
+		t.Fatalf("a refused amendment left %d ledger rows", len(all))
 	}
 }

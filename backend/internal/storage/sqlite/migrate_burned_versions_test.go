@@ -179,6 +179,7 @@ var shippedMigrations = map[int64]string{
 	173: "0173_skill_run_audit.sql",
 	174: "0174_skill_pentest_authorizations.sql",
 	175: "0175_agent_tool_observations.sql",
+	176: "0176_workflow_amendment_principal.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

@@ -2262,11 +2262,13 @@ func (c *WorkflowsController) resumeTask(w http.ResponseWriter, r *http.Request)
 // AuthorizeFreshReviewExceptionRequest authorizes ONE additional integration
 // fresh review for a task whose ordinary budget is spent.
 //
-// ApprovedBy and Reason are required for the same reason they are on an
-// amendment: this widens a guard, and a widening nobody can be asked about
-// afterwards is indistinguishable from the guard not being there.
+// The approver is required for the same reason it is on an amendment: this
+// widens a guard, and a widening nobody can be asked about afterwards is
+// indistinguishable from the guard not being there. Since AR-1a (D-SEC-3) it is
+// the authenticated principal; ApprovedBy is optional and, when given, must
+// name that same principal.
 type AuthorizeFreshReviewExceptionRequest struct {
-	ApprovedBy string `json:"approvedBy"`
+	ApprovedBy string `json:"approvedBy,omitempty"`
 	Reason     string `json:"reason"`
 	// Reauthorize authorizes a SECOND grant for a workspace state that already
 	// has one. Without it such a request returns the existing grant unchanged.
@@ -2283,12 +2285,18 @@ func (c *WorkflowsController) authorizeFreshReviewException(w http.ResponseWrite
 		writeWorkflowError(w, r, fmt.Errorf("%w: malformed request body", workflowcore.ErrInvalid))
 		return
 	}
+	approver, ok := requireHumanApprover(w, r, body.ApprovedBy)
+	if !ok {
+		return
+	}
 	exception, err := c.Svc.AuthorizeIntegrationFreshReviewException(r.Context(), workflowcore.IntegrationFreshReviewExceptionRequest{
-		MasterRunID: chi.URLParam(r, "workflowId"),
-		TaskID:      chi.URLParam(r, "taskId"),
-		ApprovedBy:  body.ApprovedBy,
-		Reason:      body.Reason,
-		Reauthorize: body.Reauthorize,
+		MasterRunID:        chi.URLParam(r, "workflowId"),
+		TaskID:             chi.URLParam(r, "taskId"),
+		ApprovedBy:         approver.Name,
+		ApprovedByUserID:   approver.UserID,
+		ApprovedAuthMethod: approver.AuthMethod,
+		Reason:             body.Reason,
+		Reauthorize:        body.Reauthorize,
 	})
 	if err != nil {
 		writeWorkflowError(w, r, err)
@@ -2300,10 +2308,11 @@ func (c *WorkflowsController) authorizeFreshReviewException(w http.ResponseWrite
 // AmendTaskCriterionRequest is one human-approved amendment of one acceptance
 // criterion (migration 0132).
 //
-// ApprovedBy is a required field rather than an inferred identity because the
-// whole legitimacy of the mechanism rests on a person having said yes to THIS
-// change: an amendment attributed to whoever happened to hold the session token
-// is an amendment nobody can be asked about afterwards.
+// The whole legitimacy of the mechanism rests on a person having said yes to
+// THIS change. Since AR-1a (D-SEC-3) that person is the authenticated principal
+// of the request -- never a name the caller typed, which let anyone holding
+// workflow.run attribute an amendment to anybody. ApprovedBy is optional and,
+// when given, must name that same principal.
 type AmendTaskCriterionRequest struct {
 	CriterionIndex int `json:"criterionIndex"`
 	// OriginalCriterion, when given, must match the text currently at that
@@ -2316,7 +2325,7 @@ type AmendTaskCriterionRequest struct {
 	// criterion stopped describing reality and offer something checkable.
 	Reason     string   `json:"reason"`
 	Evidence   []string `json:"evidence"`
-	ApprovedBy string   `json:"approvedBy"`
+	ApprovedBy string   `json:"approvedBy,omitempty"`
 }
 
 // AmendTaskCriterionResponse returns the recorded amendment and the run as it
@@ -2338,6 +2347,8 @@ type WorkflowTaskCriterionAmendmentView struct {
 	Reason                string    `json:"reason"`
 	Evidence              []string  `json:"evidence"`
 	ApprovedBy            string    `json:"approvedBy"`
+	ApprovedByUserID      string    `json:"approvedByUserId,omitempty"`
+	ApprovedAuthMethod    string    `json:"approvedAuthMethod,omitempty"`
 	SupersededReviewRunID string    `json:"supersededReviewRunId,omitempty"`
 	CreatedAt             time.Time `json:"createdAt"`
 }
@@ -2357,15 +2368,21 @@ func (c *WorkflowsController) amendTaskCriterion(w http.ResponseWriter, r *http.
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "WORKFLOW_INVALID", "Malformed amendment body", nil)
 		return
 	}
+	approver, ok := requireHumanApprover(w, r, body.ApprovedBy)
+	if !ok {
+		return
+	}
 	amendment, detail, err := c.Svc.AmendTaskCriterion(r.Context(), workflowsvc.TaskCriterionAmendment{
-		RunID:             chi.URLParam(r, "workflowId"),
-		TaskID:            chi.URLParam(r, "taskId"),
-		CriterionIndex:    body.CriterionIndex,
-		OriginalCriterion: body.OriginalCriterion,
-		AmendedCriterion:  body.AmendedCriterion,
-		Reason:            body.Reason,
-		Evidence:          body.Evidence,
-		ApprovedBy:        body.ApprovedBy,
+		RunID:              chi.URLParam(r, "workflowId"),
+		TaskID:             chi.URLParam(r, "taskId"),
+		CriterionIndex:     body.CriterionIndex,
+		OriginalCriterion:  body.OriginalCriterion,
+		AmendedCriterion:   body.AmendedCriterion,
+		Reason:             body.Reason,
+		Evidence:           body.Evidence,
+		ApprovedBy:         approver.Name,
+		ApprovedByUserID:   approver.UserID,
+		ApprovedAuthMethod: approver.AuthMethod,
 	})
 	if err != nil {
 		writeWorkflowError(w, r, err)
@@ -2377,6 +2394,7 @@ func (c *WorkflowsController) amendTaskCriterion(w http.ResponseWriter, r *http.
 			OriginalCriterion: amendment.OriginalCriterion, AmendedCriterion: amendment.AmendedCriterion,
 			Disposition: string(amendment.Disposition), Reason: amendment.Reason,
 			Evidence: amendment.Evidence, ApprovedBy: amendment.ApprovedBy,
+			ApprovedByUserID: string(amendment.ApprovedByUserID), ApprovedAuthMethod: string(amendment.ApprovedAuthMethod),
 			SupersededReviewRunID: amendment.SupersededReviewRunID, CreatedAt: amendment.CreatedAt,
 		},
 		Workflow: c.workflowRunDetailView(r.Context(), detail),

@@ -1805,6 +1805,8 @@ type WorkflowTaskCriterionAmendment struct {
 	ApprovedBy            string
 	SupersededReviewRunID string
 	CreatedAt             time.Time
+	ApprovedByUserID      string
+	ApprovedAuthMethod    string
 }
 
 type WorkflowTaskDependency struct {

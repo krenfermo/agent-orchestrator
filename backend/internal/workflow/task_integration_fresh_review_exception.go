@@ -60,6 +60,11 @@ type IntegrationFreshReviewException struct {
 	// ApprovedBy names the person. Required: an exception attributed to
 	// whoever held the session token is one nobody can be asked about later.
 	ApprovedBy string `json:"approvedBy"`
+	// ApprovedByUserID and ApprovedAuthMethod identify the authenticated
+	// principal ApprovedBy was derived from (AR-1a D-SEC-3). Empty only on
+	// grants recorded before AR-1a.
+	ApprovedByUserID   domain.UserID     `json:"approvedByUserId,omitempty"`
+	ApprovedAuthMethod domain.AuthMethod `json:"approvedAuthMethod,omitempty"`
 	// Reason is why one more review is the right answer here. Required.
 	Reason string `json:"reason"`
 	// Fingerprint is the workspace state this grant was made for, and the key
@@ -85,7 +90,11 @@ type IntegrationFreshReviewExceptionRequest struct {
 	MasterRunID string
 	TaskID      string
 	ApprovedBy  string
-	Reason      string
+	// ApprovedByUserID and ApprovedAuthMethod are the authenticated principal
+	// the transport derived ApprovedBy from. Required; an agent is refused.
+	ApprovedByUserID   domain.UserID
+	ApprovedAuthMethod domain.AuthMethod
+	Reason             string
 	// Reauthorize is the explicit second decision. Without it a request naming
 	// a workspace state that already has a grant returns that grant unchanged,
 	// which is what makes a poll, a retry or a double-click harmless. With it a
@@ -109,8 +118,11 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 ) (IntegrationFreshReviewException, error) {
 	req.ApprovedBy = strings.TrimSpace(req.ApprovedBy)
 	req.Reason = strings.TrimSpace(req.Reason)
-	if req.ApprovedBy == "" {
-		return IntegrationFreshReviewException{}, fmt.Errorf("%w: an exceptional fresh review requires a named approver", ErrInvalid)
+	if req.ApprovedAuthMethod == domain.AuthMethodAgent {
+		return IntegrationFreshReviewException{}, fmt.Errorf("%w: an agent cannot authorize an exceptional fresh review", ErrInvalid)
+	}
+	if req.ApprovedBy == "" || req.ApprovedByUserID == "" || req.ApprovedAuthMethod == "" {
+		return IntegrationFreshReviewException{}, fmt.Errorf("%w: an exceptional fresh review requires an authenticated approver", ErrInvalid)
 	}
 	if req.Reason == "" {
 		return IntegrationFreshReviewException{}, fmt.Errorf("%w: an exceptional fresh review requires a reason", ErrInvalid)
@@ -184,16 +196,18 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 	}
 
 	exception := IntegrationFreshReviewException{
-		TaskID:        req.TaskID,
-		MasterRunID:   req.MasterRunID,
-		ChildRunID:    childRunID,
-		ApprovedBy:    req.ApprovedBy,
-		Reason:        req.Reason,
-		Fingerprint:   fingerprint,
-		PriorAttempts: prior,
-		Generation:    len(granted) + 1,
-		Reauthorized:  req.Reauthorize && exceptionAlreadyGrantedFor(granted, fingerprint),
-		GrantedAt:     c.clock(),
+		TaskID:             req.TaskID,
+		MasterRunID:        req.MasterRunID,
+		ChildRunID:         childRunID,
+		ApprovedBy:         req.ApprovedBy,
+		ApprovedByUserID:   req.ApprovedByUserID,
+		ApprovedAuthMethod: req.ApprovedAuthMethod,
+		Reason:             req.Reason,
+		Fingerprint:        fingerprint,
+		PriorAttempts:      prior,
+		Generation:         len(granted) + 1,
+		Reauthorized:       req.Reauthorize && exceptionAlreadyGrantedFor(granted, fingerprint),
+		GrantedAt:          c.clock(),
 	}
 	payload, err := json.Marshal(exception)
 	if err != nil {

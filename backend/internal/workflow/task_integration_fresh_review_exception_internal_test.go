@@ -122,6 +122,7 @@ func (fx *exceptionFixture) authorize(by, reason string) (IntegrationFreshReview
 	fx.t.Helper()
 	return fx.coord.AuthorizeIntegrationFreshReviewException(fx.ctx, IntegrationFreshReviewExceptionRequest{
 		MasterRunID: "wf-exc-master", TaskID: fx.taskID, ApprovedBy: by, Reason: reason,
+		ApprovedByUserID: "user-joaquin", ApprovedAuthMethod: domain.AuthMethodPassword,
 	})
 }
 
@@ -355,6 +356,7 @@ func TestReauthorizeGrantsASecondGenerationForTheSameWorkspace(t *testing.T) {
 	second, err := fx.coord.AuthorizeIntegrationFreshReviewException(fx.ctx, IntegrationFreshReviewExceptionRequest{
 		MasterRunID: "wf-exc-master", TaskID: fx.taskID,
 		ApprovedBy: "joaquin", Reason: "the first generation was consumed by a dispatch defect, since fixed",
+		ApprovedByUserID: "user-joaquin", ApprovedAuthMethod: domain.AuthMethodPassword,
 		Reauthorize: true,
 	})
 	if err != nil {
@@ -382,6 +384,7 @@ func TestReauthorizeStillRefusesAnUnjustifiedGrant(t *testing.T) {
 	_, err := fx.coord.AuthorizeIntegrationFreshReviewException(fx.ctx, IntegrationFreshReviewExceptionRequest{
 		MasterRunID: "wf-exc-master", TaskID: fx.taskID,
 		ApprovedBy: "joaquin", Reason: "again", Reauthorize: true,
+		ApprovedByUserID: "user-joaquin", ApprovedAuthMethod: domain.AuthMethodPassword,
 	})
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid: re-authorizing does not bypass the budget check", err)
