@@ -135,3 +135,24 @@ func TestResponsesAccumulatorRecordsCustomToolCalls(t *testing.T) {
 		t.Fatalf("tools=%+v", tools)
 	}
 }
+
+// Codex's thread-title request (observed for real) is a helper call; the
+// same claim with tools offered is not.
+func TestResponsesThreadTitleIsHelper(t *testing.T) {
+	t.Parallel()
+	m, _ := claudeCodeManifest(t)
+	md := `"client_metadata":{"x-codex-turn-metadata":"{\"thread_source\":\"thread_title\"}"}`
+	for body, want := range map[string]bool{
+		`{"model":"` + testPrimaryModel + `","input":[{"type":"message","role":"user","content":[]}],"tools":[],` + md + `}`:                                  true,
+		`{"model":"` + testPrimaryModel + `","input":[{"type":"message","role":"user","content":[]}],"tools":[{"type":"function","name":"exec"}],` + md + `}`: false,
+		`{"model":"` + testPrimaryModel + `","input":[{"type":"message","role":"user","content":[]}],"tools":[]}`:                                             false,
+	} {
+		var r responsesRequest
+		if err := json.Unmarshal([]byte(body), &r); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.baseClass(m, "A", RoleWorker) == CallHelper; got != want {
+			t.Errorf("helper=%v for %s", got, body)
+		}
+	}
+}

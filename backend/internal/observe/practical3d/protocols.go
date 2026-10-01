@@ -131,6 +131,17 @@ type responsesRequest struct {
 		Type string `json:"type"`
 		Name string `json:"name"`
 	} `json:"tools"`
+	ClientMetadata map[string]string `json:"client_metadata"`
+}
+
+// threadTitle reports Codex's thread-title request: a separate, tool-less
+// conversation Codex starts beside every thread (observed in the real
+// mini-E2E; not disableable in 0.157).
+func (r responsesRequest) threadTitle() bool {
+	var md struct {
+		ThreadSource string `json:"thread_source"`
+	}
+	return len(r.Tools) == 0 && json.Unmarshal([]byte(r.ClientMetadata["x-codex-turn-metadata"]), &md) == nil && md.ThreadSource == "thread_title"
 }
 
 func (openaiProtocol) parse(body []byte) (parsedRequest, error) {
@@ -154,7 +165,10 @@ func (openaiProtocol) parse(body []byte) (parsedRequest, error) {
 // frozen primary model is `helper`; no assistant/tool item yet is `initial`;
 // a last item answering a tool call is `tool_result`; else `continuation`.
 func (r responsesRequest) baseClass(m Manifest, task string, role Role) CallClass {
-	if r.Model != primaryModelFor(m, task, role) {
+	// A tool-less title request is auxiliary: `helper`. It can issue no tool
+	// call (the proxy malforms a helper response that does), so claiming it
+	// cannot carry exploration or conversation structure.
+	if r.Model != primaryModelFor(m, task, role) || r.threadTitle() {
 		return CallHelper
 	}
 	prior := false

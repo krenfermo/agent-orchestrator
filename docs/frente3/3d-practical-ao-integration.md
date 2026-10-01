@@ -273,3 +273,111 @@ report, and by the raw request/response evidence the proxy stores next to it.
   every forwarded attempt. A role that stops calling the provider (for
   example a stuck reviewer) is bounded only by `position_seconds` through
   the run timeout.
+
+## Closure round (2026-09-30)
+
+### Credentials (decision 1: supervisor injection)
+
+The proxy injects the operator's credential into each outgoing request
+(`credentials.go`, `OperatorCredentials`):
+
+- Claude Code's OAuth token comes from the login keychain;
+- Codex's ChatGPT tokens come from its auth file.
+
+Both are read only by the supervisor process and never logged. The proxy
+drops whatever credential headers the client sent. Agents hold placeholders
+only:
+
+- Claude: `ANTHROPIC_AUTH_TOKEN`;
+- Codex: a custom provider with `env_key` and `requires_openai_auth=false`,
+  plus a `CODEX_HOME` login of the form `codex login --with-api-key` writes,
+  whose key is the placeholder. AO's reviewer-capacity check
+  (`codex login status`) then reports Codex usable.
+
+The sandbox denies `~/.codex` entirely, the keychain files, the
+`/usr/bin/security` binary, and the keychain services: a copied `security`
+binary gets nothing. Adversarial probes cover the file, the CLI, a copied CLI
+and the Codex login; outputs are only counted. Launches carry no credential
+even when the daemon environment holds some.
+
+### Codex reviewer (decision 2: clean topology, no MITM or egress)
+
+As an external-auth provider, Codex needs no ChatGPT login, and therefore no
+workspace-routing bootstrap. Its traffic is:
+
+  Codex sandbox -> loopback Practical proxy (credential injected) -> chatgpt.com
+
+Verified for real:
+
+- a standalone sandboxed TUI got 429 from the account's usage limit, which
+  proves the injected auth was accepted;
+- mini-E2E run 14: the reviewer's first request was ATTEMPT_DISPATCHED and
+  ATTEMPT_FINALIZED SUCCESS (11,255 input tokens accounted).
+
+Codex's code-mode tools arrive as `custom_tool_call` items; the proxy records
+them as issued calls.
+
+### Official runner (item 5)
+
+`ao3dpractical run` builds its runner options with `realRunnerOptions`, the
+same wiring `mini-e2e-real` uses (limited there to 2 positions):
+
+- AORealExecutor;
+- RealOracle;
+- GitWorkspaceManager;
+- the credential injector.
+
+`run --plan` prints the executor and the frozen schedule without starting
+anything; a test walks all 40 positions through AORealExecutor.
+
+### Task C (item 3): what is implemented, what is blocked
+
+Implemented:
+
+- Reviewer M3 for Codex, bound to the provider's call ids
+  (`usage.CodexToolObservationKey`), with ops recomputed with 3C's Codex rule
+  (`usage.CodexToolOp` on `usage.CodexCallCommand`) and ordered by the proxy.
+- Every provider call must have a 3C row.
+- The milestone is AO's piped `ao review submit`, which must match a
+  recorded verdict.
+- Coverage and cursor are required.
+- Deterministic tests.
+
+Blocked by AO, with evidence:
+
+1. **The reviewer's attachment cannot be frozen.** AO gives the reviewer
+   Project Memory in its system prompt (`wfmemory.reviewerLauncher`):
+   - relevance keywords are the first 12 distinctive words of the review
+     prompt, which carries the per-run session, run id and head SHA;
+   - summaries of the files the worker changed are withheld
+     (`TaskChangedPaths`).
+
+   The pack therefore depends on each position's worker output, and cannot be
+   frozen before SAMPLE_START as the norm requires.
+2. **Q6 cannot be scored as the norm defines it.** AO's reviewer reviews the
+   worker's diff, not the given HEAD commit Q6 is scored on, and its prompt
+   is AO's own (`internal/review/prompt.go`, the workflow review prompt): the
+   frozen findings schema (defect class, cause and impact codes) cannot be
+   given to it.
+3. **Reviewer M3 is not observable in AO's default Codex configuration.**
+   Codex's `code_mode_host` (stable, on by default) runs commands as
+   JavaScript `exec` calls, which 3C does not classify. M3 refuses them
+   ("not observable") instead of reporting zero exploration.
+
+Realizing C as the norm defines it needs an operator decision, for example:
+
+- an AO review-only run over a given target with task-provided reviewer
+  instructions;
+- or a norm-level change of C's measured role.
+
+### Disk (item 7)
+
+- 9.0 GB free; 20 GB are required before the 40 runs.
+- Regenerable caches:
+  - the Go build cache, `~/Library/Caches/go-build`, about 21 GB;
+  - the npm cache, `~/.npm`, about 2.7 GB.
+- Commands, not run because these are shared caches the operator did not ask
+  to clear:
+  - `go clean -cache`
+  - `npm cache clean --force`
+- `~/.ao/scratch` (15 GB) is evidence and stays.

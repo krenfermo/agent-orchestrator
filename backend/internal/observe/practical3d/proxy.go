@@ -428,6 +428,11 @@ func (p *ProviderProxy) serveProvider(w http.ResponseWriter, r *http.Request) {
 	if res.Outcome == OutcomeSuccess && baseClass != CallHelper {
 		p.commitLinear(subject, parsed.turns, obs.ToolUses)
 	}
+	if baseClass == CallHelper && proto.name() == "openai" && len(obs.ToolUses) > 0 {
+		// A Codex helper (thread title) is tool-less by construction; one
+		// that issues a tool call is not what it claimed to be.
+		c.Violation(fmt.Sprintf("helper call %d issued %d tool call(s)", attempt.base.CallIndex, len(obs.ToolUses)))
+	}
 	obs.CallIndex, obs.Subject, obs.Role, obs.At = attempt.base.CallIndex, subject, attempt.base.Role, p.now()
 	if res.InputTokens != nil {
 		obs.InputTokens = *res.InputTokens
