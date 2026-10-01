@@ -133,8 +133,19 @@ posture. A denial is the same 404 the ownership gates report.
 
 Presenting the header is a claim about what the request *is*. Once made, it is
 the only identity considered: a bad agent token resolves to no principal rather
-than to whatever cookie happens to be attached. It still reaches trusted-local
-synthesis, so a desktop install behaves exactly as it did before.
+than to whatever cookie happens to be attached.
+
+Since AR-1a (D-SEC-1) it does **not** reach trusted-local synthesis either: a
+presented agent credential that fails to authenticate -- unknown, malformed,
+expired, revoked, or unevaluable -- is answered `401 AGENT_CREDENTIAL_INVALID`
+on every installation. Before, on a desktop install, such a request resolved
+to the bootstrap owner, so any stale or forged token was a key to every route.
+A request that presents **no** agent credential is unaffected and keeps
+trusted-local synthesis. A reviewer whose run AO already closed out is
+normally unaffected too: the revocation sweep removes its credential file with
+the credential, so its late `ao review submit` arrives header-less and its
+verdict is still preserved; only a submission landing in the instant between
+revocation and file removal is now refused.
 
 The CLI enforces the mirror rule. Inside an AO-launched runtime — detected by
 `AO_AGENT_CREDENTIAL_FILE` or the runtime's own `AO_SESSION_OWNER` — it presents

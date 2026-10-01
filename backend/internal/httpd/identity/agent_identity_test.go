@@ -145,27 +145,90 @@ func TestAFailedAgentClaimNeverFallsBackToABrowserSession(t *testing.T) {
 	}
 }
 
-// On a desktop install the loopback listener is itself the trust boundary, so an
-// agent whose credential expired behaves exactly as it did before this mechanism
-// existed. Regressing this would break every trusted-local reviewer.
-func TestAFailedAgentClaimStillReachesTrustedLocalSynthesis(t *testing.T) {
-	agents := &stubAgents{byToken: map[string]domain.Principal{}}
+// served runs one request through the middleware and reports the status and
+// whether the request reached the handler at all, with which principal.
+func served(t *testing.T, mw func(http.Handler) http.Handler, build func(*http.Request)) (status int, reached bool, got domain.Principal) {
+	t.Helper()
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		got, _ = identity.PrincipalFromContext(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/agent-orchestrator-59/reviews/submit", nil)
+	build(req)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, reached, got
+}
+
+// AR-1a / D-SEC-1, THE MATRIX. On a trusted-local desktop install:
+//
+//   - NO agent credential      -> trusted-local synthesis, exactly as before;
+//   - a VALID agent credential -> that agent, bounded by its own grant;
+//   - an INVALID one (unknown, malformed, expired, revoked: anything the
+//     resolver refuses) -> 401, and the handler is never reached.
+//
+// The third row used to resolve the installation OWNER: a stale or forged
+// token was a key to every route. It is refused now on every installation.
+func TestAgentCredentialMatrixOnATrustedLocalInstall(t *testing.T) {
 	admin := domain.User{ID: "user-admin", Role: domain.UserRoleOwner, Status: domain.UserStatusActive}
+	agents := &stubAgents{byToken: map[string]domain.Principal{"valid-token": agentPrincipal()}}
 	mw := identity.Middleware(nil, agents, true, func(context.Context) (domain.User, bool) { return admin, true })
 
-	got, ok := captured(t, mw, func(r *http.Request) {
-		r.Header.Set(identity.AgentTokenHeader, "expired-token")
-	})
-	if !ok || got.User.ID != admin.ID {
-		t.Fatalf("trusted-local synthesis did not apply after a failed agent claim: %+v (ok=%v)", got, ok)
+	status, reached, got := served(t, mw, func(*http.Request) {})
+	if !reached || got.User.ID != admin.ID || got.AuthMethod != domain.AuthMethodTrustedLocal {
+		t.Fatalf("NO credential: status=%d reached=%v principal=%+v, want trusted-local owner", status, reached, got)
 	}
-	if got.AuthMethod != domain.AuthMethodTrustedLocal {
-		t.Fatalf("auth method = %q, want trusted_local", got.AuthMethod)
+
+	status, reached, got = served(t, mw, func(r *http.Request) { r.Header.Set(identity.AgentTokenHeader, "valid-token") })
+	if !reached || !got.IsAgent() || got.Agent.Role != domain.AgentRoleReviewer {
+		t.Fatalf("VALID credential: status=%d reached=%v principal=%+v, want the agent", status, reached, got)
+	}
+
+	for name, token := range map[string]string{
+		"unknown":           "no-such-token",
+		"malformed":         "%%%not-a-token",
+		"expired/revoked":   "expired-or-revoked-token",
+		"browser session":   "a-real-browser-session-token",
+		"padded whitespace": "  no-such-token  ",
+	} {
+		t.Run("INVALID "+name, func(t *testing.T) {
+			status, reached, got := served(t, mw, func(r *http.Request) { r.Header.Set(identity.AgentTokenHeader, token) })
+			if reached {
+				t.Fatalf("an invalid agent credential reached the handler as %+v", got)
+			}
+			if status != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", status)
+			}
+		})
 	}
 }
 
-// With no agent resolver wired -- every pre-P4-I configuration -- the header is
-// inert, and it still does not open the cookie path to whoever sent it.
+// A resolver that cannot evaluate the credential (a storage failure, say) is
+// not a reason to fall back to anybody: the request is refused.
+func TestAnUnevaluableAgentCredentialIsRefused(t *testing.T) {
+	admin := domain.User{ID: "user-admin", Role: domain.UserRoleOwner, Status: domain.UserStatusActive}
+	mw := identity.Middleware(nil, &stubAgents{byToken: nil}, true, func(context.Context) (domain.User, bool) { return admin, true })
+	if status, reached, _ := served(t, mw, func(r *http.Request) { r.Header.Set(identity.AgentTokenHeader, "t") }); reached || status != http.StatusUnauthorized {
+		t.Fatalf("status=%d reached=%v, want 401 and not reached", status, reached)
+	}
+}
+
+// A non-agent principal returned for an agent token is still not an agent:
+// the claim failed, and the request is refused rather than served as whoever
+// that principal is.
+func TestAnAgentTokenResolvingToANonAgentIsRefused(t *testing.T) {
+	agents := &stubAgents{byToken: map[string]domain.Principal{"odd-token": humanPrincipal()}}
+	mw := identity.Middleware(nil, agents, true, func(context.Context) (domain.User, bool) {
+		return domain.User{ID: "user-admin"}, true
+	})
+	if status, reached, _ := served(t, mw, func(r *http.Request) { r.Header.Set(identity.AgentTokenHeader, "odd-token") }); reached || status != http.StatusUnauthorized {
+		t.Fatalf("status=%d reached=%v, want 401 and not reached", status, reached)
+	}
+}
+
+// With no agent resolver wired the header cannot be evaluated, so it is refused
+// (AR-1a: 401) and it still does not open the cookie path to whoever sent it.
 func TestNoAgentResolverLeavesTheHeaderInert(t *testing.T) {
 	cookies := &stubResolver{principal: humanPrincipal()}
 	mw := identity.Middleware(cookies, nil, false, nil)

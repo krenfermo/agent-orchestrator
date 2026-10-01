@@ -13,6 +13,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 )
 
 // SessionCookieName carries the application-identity session token. Distinct
@@ -137,6 +138,10 @@ type Resolver interface {
 // resolve to whatever bootstrapAdmin returns (when it returns ok) rather
 // than to "no user" — this is what keeps today's single-user desktop flow
 // visibly unchanged: no login screen, every route behaves as it always has.
+//
+// AR-1a (D-SEC-1): that synthesis is for a request that presents NO agent
+// credential. A request that presents one and fails to authenticate with it
+// is answered 401 on every installation; it never becomes the owner.
 func Middleware(resolver Resolver, agents AgentResolver, trustedLocal bool, bootstrapAdmin func(ctx context.Context) (domain.User, bool)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -149,17 +154,29 @@ func Middleware(resolver Resolver, agents AgentResolver, trustedLocal bool, boot
 			// dangerous direction -- it would let a stale agent token quietly
 			// borrow whatever identity happened to be lying around, which is
 			// the escalation this whole mechanism exists to avoid.
-			agentClaimed := false
 			if raw := strings.TrimSpace(r.Header.Get(AgentTokenHeader)); raw != "" {
-				agentClaimed = true
 				if agents != nil {
-					if p, err := agents.ResolveAgentPrincipal(r.Context(), raw); err == nil && p.IsAgent() {
+					p, err := agents.ResolveAgentPrincipal(r.Context(), raw)
+					if err == nil && p.IsAgent() {
 						next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
 						return
 					}
 				}
+				// AR-1a (D-SEC-1): a presented agent credential that does not
+				// authenticate -- unknown, malformed, expired, revoked, or one
+				// this build cannot evaluate at all -- is refused here, on every
+				// installation. It used to fall through to trusted-local
+				// synthesis, which turned any agent holding a stale or forged
+				// token into the installation owner: plan approvals, policy,
+				// amendments, every route. The honest answer is the one a
+				// multi-user install already gave: 401, recoverable by
+				// relaunching the agent, never by borrowing somebody's identity.
+				// A request that presents NO agent credential is unaffected.
+				envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "AGENT_CREDENTIAL_INVALID",
+					"the presented agent credential is not valid (unknown, expired or revoked); it is never replaced by another identity", nil)
+				return
 			}
-			if resolver != nil && !agentClaimed {
+			if resolver != nil {
 				if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
 					if p, err := resolver.ResolvePrincipal(r.Context(), c.Value); err == nil {
 						next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
@@ -167,14 +184,10 @@ func Middleware(resolver Resolver, agents AgentResolver, trustedLocal bool, boot
 					}
 				}
 			}
-			// A failed agent claim falls through to trusted-local synthesis but
-			// NEVER to the cookie. On a desktop install the loopback listener is
-			// itself the trust boundary, so an agent whose credential expired
-			// behaves exactly as it did before this mechanism existed. On a
-			// multi-user install trustedLocal is off by construction, so the
-			// same request resolves no identity at all and is answered 401 --
-			// which is the honest answer, and is recoverable by relaunching the
-			// agent rather than by borrowing somebody's session.
+			// Only a request that presented no agent credential reaches here.
+			// On a desktop install the loopback listener is the trust boundary
+			// for such a request; on a multi-user install trustedLocal is off by
+			// construction and it resolves no identity at all.
 			if trustedLocal && bootstrapAdmin != nil {
 				if u, ok := bootstrapAdmin(r.Context()); ok {
 					// Recorded as trusted_local, not as a login: no credential
