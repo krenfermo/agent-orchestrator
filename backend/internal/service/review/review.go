@@ -23,6 +23,10 @@ var (
 	ErrInvalid             = reviewcore.ErrInvalid
 	ErrNotFound            = reviewcore.ErrNotFound
 	ErrAgentBinaryNotFound = ports.ErrAgentBinaryNotFound
+	// ErrForbidden is a submission whose submitter may not record this verdict:
+	// an agent that is not the reviewer AO launched for the run, or a person
+	// speaking over a running review whose reviewer holds a live identity.
+	ErrForbidden = errors.New("review submission forbidden")
 )
 
 // reviewErrorKind reduces a trigger failure to a safe category. Raw error text
@@ -58,7 +62,7 @@ type Manager interface {
 	SwitchReviewer(ctx context.Context, workerID domain.SessionID, harness domain.ReviewerHarness) (reviewcore.SessionReviews, error)
 	ApplyReviewActivitySignal(ctx context.Context, reviewSessionID string, signal ActivitySignal) error
 	Submit(ctx context.Context, workerID domain.SessionID, runID string, verdict domain.ReviewVerdict, body, githubReviewID string) (domain.ReviewRun, error)
-	SubmitMany(ctx context.Context, workerID domain.SessionID, reviews []SubmittedReview) ([]domain.ReviewRun, error)
+	SubmitMany(ctx context.Context, submitter Submitter, workerID domain.SessionID, reviews []SubmittedReview) ([]domain.ReviewRun, error)
 	List(ctx context.Context, workerID domain.SessionID) (reviewcore.SessionReviews, error)
 }
 
@@ -286,6 +290,76 @@ func (s *Service) ApplyReviewActivitySignal(ctx context.Context, reviewSessionID
 	return nil
 }
 
+// Submitter is WHO is recording a verdict, as the transport authenticated it.
+//
+// AR-1a (D-SEC-2): before this, the only question asked of a submission was
+// whether the review run belonged to the addressed worker session -- which every
+// credential bound to that session satisfies, the worker's own included. So a
+// worker could record the verdict on its own review.
+//
+// Agent is the authenticated agent authority, nil for every non-agent request
+// (a person: a browser/CLI session, an OIDC login, or trusted-local).
+type Submitter struct {
+	Agent *domain.AgentAuthority
+}
+
+// ReviewerCredentialLedger is the read the person-submission rule needs: every
+// credential AO ever minted for one review run. It is discovered on the store
+// rather than wired as an option on purpose -- the production store always
+// carries it, so the rule cannot be lost to a forgotten wiring line, while test
+// fakes that predate it keep their exact behaviour.
+type ReviewerCredentialLedger interface {
+	ListAgentCredentialsForReviewRun(ctx context.Context, reviewRunID string) ([]domain.AgentCredential, error)
+}
+
+// authorizeSubmission decides whether submitter may record a verdict on run.
+//
+//   - An agent may record a verdict only as the reviewer AO launched for exactly
+//     this review run over exactly this worker session. A worker credential, a
+//     reviewer credential minted for another (older or newer) review run, or
+//     one bound to another session is refused.
+//   - A person keeps today's behaviour, with one exception: while the run is
+//     RUNNING and AO handed its reviewer a live credential, that credential is
+//     the only identity allowed to speak for the run. That is the window in
+//     which a header-less call from the worker's own shell would otherwise land
+//     as the owner and approve its own work. Once the run is no longer running
+//     the existing late-verdict and idempotency rules decide, unchanged -- a
+//     reviewer whose credential was swept with its file after AO closed the run
+//     reaches AO header-less, and its real verdict must still be preserved.
+//
+// An unreadable ledger refuses: a rule AO cannot evaluate is not satisfied.
+func (s *Service) authorizeSubmission(ctx context.Context, submitter Submitter, workerID domain.SessionID, run domain.ReviewRun) error {
+	if a := submitter.Agent; a != nil {
+		switch {
+		case a.Role != domain.AgentRoleReviewer:
+			return fmt.Errorf("%w: a %s credential cannot record a review verdict", ErrForbidden, a.Role)
+		case a.ReviewRunID == "" || a.ReviewRunID != run.ID:
+			return fmt.Errorf("%w: this reviewer credential was not minted for review run %q", ErrForbidden, run.ID)
+		case a.SessionID != workerID:
+			return fmt.Errorf("%w: this reviewer credential is not bound to session %q", ErrForbidden, workerID)
+		}
+		return nil
+	}
+	if run.Status != domain.ReviewRunRunning {
+		return nil
+	}
+	ledger, ok := s.store.(ReviewerCredentialLedger)
+	if !ok {
+		return nil
+	}
+	creds, err := ledger.ListAgentCredentialsForReviewRun(ctx, run.ID)
+	if err != nil {
+		return fmt.Errorf("%w: the reviewer credentials of review run %q could not be read: %v", ErrForbidden, run.ID, err)
+	}
+	now := s.clock()
+	for _, c := range creds {
+		if c.Role == domain.AgentRoleReviewer && c.Active(now) {
+			return fmt.Errorf("%w: review run %q is being reviewed by the reviewer AO launched for it; only that reviewer may record its verdict", ErrForbidden, run.ID)
+		}
+	}
+	return nil
+}
+
 // SubmittedReview is one review result supplied by the reviewer CLI.
 type SubmittedReview struct {
 	RunID          string
@@ -294,9 +368,10 @@ type SubmittedReview struct {
 	GithubReviewID string
 }
 
-// Submit records a reviewer's result for a specific worker review pass.
+// Submit records a non-agent submitter's result for a specific worker review
+// pass. Agent submissions go through SubmitMany with their authority.
 func (s *Service) Submit(ctx context.Context, workerID domain.SessionID, runID string, verdict domain.ReviewVerdict, body, githubReviewID string) (domain.ReviewRun, error) {
-	runs, err := s.SubmitMany(ctx, workerID, []SubmittedReview{{
+	runs, err := s.SubmitMany(ctx, Submitter{}, workerID, []SubmittedReview{{
 		RunID:          runID,
 		Verdict:        verdict,
 		Body:           body,
@@ -314,7 +389,7 @@ func (s *Service) Submit(ctx context.Context, workerID domain.SessionID, runID s
 // SubmitMany records one reviewer CLI submission containing results for one or
 // more PR-scoped runs. Delivery is scoped to the runs in this submission, so a
 // missing/stuck result for another PR in the same trigger cannot block feedback.
-func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, reviews []SubmittedReview) ([]domain.ReviewRun, error) {
+func (s *Service) SubmitMany(ctx context.Context, submitter Submitter, workerID domain.SessionID, reviews []SubmittedReview) ([]domain.ReviewRun, error) {
 	if workerID == "" {
 		return nil, fmt.Errorf("%w: worker session id is required", ErrInvalid)
 	}
@@ -326,7 +401,7 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 	}
 	runs := make([]domain.ReviewRun, 0, len(reviews))
 	for _, review := range reviews {
-		run, err := s.submitOne(ctx, workerID, review)
+		run, err := s.submitOne(ctx, submitter, workerID, review)
 		if err != nil {
 			return nil, err
 		}
@@ -384,7 +459,7 @@ func (s *Service) closeAgentCredentials(ctx context.Context, runs []domain.Revie
 	}
 }
 
-func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, review SubmittedReview) (domain.ReviewRun, error) {
+func (s *Service) submitOne(ctx context.Context, submitter Submitter, workerID domain.SessionID, review SubmittedReview) (domain.ReviewRun, error) {
 	runID := review.RunID
 	verdict := review.Verdict
 	body := review.Body
@@ -407,6 +482,9 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 	}
 	if run.SessionID != workerID {
 		return domain.ReviewRun{}, fmt.Errorf("%w: review run %q does not belong to worker %q", ErrInvalid, runID, workerID)
+	}
+	if err := s.authorizeSubmission(ctx, submitter, workerID, run); err != nil {
+		return domain.ReviewRun{}, err
 	}
 
 	switch run.Status {

@@ -11,6 +11,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
 )
@@ -370,7 +371,15 @@ func (c *ReviewsController) submit(w http.ResponseWriter, r *http.Request) {
 			GithubReviewID: in.GithubReviewID,
 		})
 	}
-	runs, err := c.Svc.SubmitMany(r.Context(), sessionID(r), reviews)
+	// AR-1a (D-SEC-2): the service decides whether THIS submitter may record a
+	// verdict, so it is told who the transport authenticated -- an agent's
+	// bounded authority, or nobody-in-particular for a person.
+	var submitter reviewsvc.Submitter
+	if p, ok := identity.PrincipalFromContext(r.Context()); ok && p.IsAgent() {
+		authority := *p.Agent
+		submitter.Agent = &authority
+	}
+	runs, err := c.Svc.SubmitMany(r.Context(), submitter, sessionID(r), reviews)
 	if err != nil {
 		writeReviewError(w, r, err)
 		return
@@ -388,6 +397,8 @@ func writeReviewError(w http.ResponseWriter, r *http.Request, err error) {
 		envelope.WriteAPIError(w, r, http.StatusUnprocessableEntity, "unprocessable", "REVIEW_INVALID", err.Error(), nil)
 	case errors.Is(err, reviewsvc.ErrNotFound):
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "REVIEW_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, reviewsvc.ErrForbidden):
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "REVIEW_SUBMIT_FORBIDDEN", err.Error(), nil)
 	case errors.Is(err, reviewsvc.ErrAgentBinaryNotFound):
 		envelope.WriteAPIError(w, r, http.StatusUnprocessableEntity, "unprocessable", "REVIEWER_BINARY_NOT_FOUND", err.Error(), nil)
 	default:

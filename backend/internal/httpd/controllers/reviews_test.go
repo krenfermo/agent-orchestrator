@@ -27,6 +27,8 @@ type fakeReviewService struct {
 	cancel           reviewcore.CancelResult
 	list             reviewcore.SessionReviews
 	submitted        []reviewsvc.SubmittedReview
+	submitter        reviewsvc.Submitter
+	submitErr        error
 	activityID       string
 	activitySignal   reviewsvc.ActivitySignal
 	activityErr      error
@@ -104,7 +106,11 @@ func (f *fakeReviewService) SwitchReviewer(_ context.Context, _ domain.SessionID
 	return f.list, nil
 }
 
-func (f *fakeReviewService) SubmitMany(_ context.Context, _ domain.SessionID, reviews []reviewsvc.SubmittedReview) ([]domain.ReviewRun, error) {
+func (f *fakeReviewService) SubmitMany(_ context.Context, submitter reviewsvc.Submitter, _ domain.SessionID, reviews []reviewsvc.SubmittedReview) ([]domain.ReviewRun, error) {
+	f.submitter = submitter
+	if f.submitErr != nil {
+		return nil, f.submitErr
+	}
 	f.submitted = append([]reviewsvc.SubmittedReview(nil), reviews...)
 	runs := make([]domain.ReviewRun, 0, len(reviews))
 	for _, review := range reviews {
