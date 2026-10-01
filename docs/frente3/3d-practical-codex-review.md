@@ -1,12 +1,12 @@
 # Evidencia histórica — revisión REAL de Codex de 3D-PRACTICAL
 
-Fecha de registro: 2026-09-29  
+Fecha de registro: 2026-09-29
 Resultado original: `PRECONDITION_3D_PRACTICAL = NEEDS_CHANGES`
 
 La revisión estática original está preservada en
 `~/.ao/scratch/frente3/reviews/3d-practical/codex/review.md`.
 
-SHA-256 del archivo revisado:  
+SHA-256 del archivo revisado:
 `830e5682e89a54f5e00063e4e334d91f8f09fa61141a8b8c58fe92971aac8d94`
 
 ## Hallazgos registrados
