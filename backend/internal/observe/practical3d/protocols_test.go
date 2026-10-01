@@ -123,3 +123,15 @@ func TestAccountRefSetAttestation(t *testing.T) {
 		t.Fatal("a forged account map was accepted")
 	}
 }
+
+// Codex's code-mode calls arrive as custom_tool_call items; they are issued
+// calls (the next request answers them), observed in the real mini-E2E.
+func TestResponsesAccumulatorRecordsCustomToolCalls(t *testing.T) {
+	t.Parallel()
+	a := &responsesAccumulator{}
+	a.sseLine([]byte(`data: {"type":"response.output_item.done","item":{"id":"ctc_1","type":"custom_tool_call","status":"completed","call_id":"call_L8","name":"exec","input":"await tools.shell({cmd: 'ls'})"}}`))
+	tools := a.toolUses()
+	if len(tools) != 1 || tools[0].ID != "call_L8" || tools[0].Name != "exec" || tools[0].Command != "" {
+		t.Fatalf("tools=%+v", tools)
+	}
+}

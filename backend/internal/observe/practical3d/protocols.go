@@ -293,6 +293,11 @@ func (a *responsesAccumulator) addItem(it *responsesItem) {
 			tu.Command = cmd
 		}
 		a.tools = append(a.tools, tu)
+	case "custom_tool_call":
+		// Codex's code-mode tools (e.g. `exec`, JavaScript in `input`): an
+		// issued call the client will answer with custom_tool_call_output.
+		// Its input is not a command 3C can classify (left empty).
+		a.tools = append(a.tools, ProxyToolUse{ID: firstNonEmptyStr(it.CallID, it.ID), Name: it.Name})
 	case "local_shell_call":
 		tu := ProxyToolUse{ID: firstNonEmptyStr(it.CallID, it.ID), Name: "local_shell"}
 		if it.Action != nil {
