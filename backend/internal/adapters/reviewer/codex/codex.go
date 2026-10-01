@@ -32,20 +32,6 @@ var _ ports.Reviewer = (*Reviewer)(nil)
 var _ ports.ReviewerCanceller = (*Reviewer)(nil)
 var _ ports.ReviewerRestorer = (*Reviewer)(nil)
 
-// ReviewerPermissionsEnv overrides the Codex reviewer's permission mode for
-// this daemon. The only accepted override is "bypass-permissions" (AO's
-// trusted mode: no approval escalations, hence no auto-review/guardian
-// model calls), for deployments that confine the reviewer with an outer
-// sandbox of their own; anything else keeps the default auto mode.
-const ReviewerPermissionsEnv = "AO_REVIEWER_PERMISSIONS"
-
-func reviewerPermissions() ports.PermissionMode {
-	if os.Getenv(ReviewerPermissionsEnv) == string(ports.PermissionModeBypassPermissions) {
-		return ports.PermissionModeBypassPermissions
-	}
-	return ports.PermissionModeAuto
-}
-
 // ReviewCommand launches the reviewer with an enforced read-only filesystem
 // sandbox. Auto approval lets the headless session request the narrowly needed
 // network access for posting the review and reporting its result.
@@ -56,7 +42,7 @@ func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation
 		Prompt:           inv.Prompt,
 		SystemPrompt:     inv.SystemPrompt,
 		SystemPromptFile: inv.SystemPromptFile,
-		Permissions:      reviewerPermissions(),
+		Permissions:      ports.PermissionModeAuto,
 	})
 	if err != nil {
 		return ports.ReviewCommandSpec{}, err
@@ -71,7 +57,7 @@ func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation
 // ReviewRestoreCommand resumes the reviewer Codex conversation captured from
 // Codex hooks when AO recreates the reviewer pane after worker restore.
 func (r *Reviewer) ReviewRestoreCommand(ctx context.Context, inv ports.ReviewInvocation) (ports.ReviewCommandSpec, bool, error) {
-	cmd, ok, err := agentrestore.Command(ctx, r.agent, inv, agentrestore.Options{Permissions: reviewerPermissions()})
+	cmd, ok, err := agentrestore.Command(ctx, r.agent, inv, agentrestore.Options{Permissions: ports.PermissionModeAuto})
 	if err != nil || !ok {
 		return cmd, ok, err
 	}

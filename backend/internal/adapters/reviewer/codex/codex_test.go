@@ -154,25 +154,3 @@ func TestReviewRestoreCommandUsesNativeSessionIDAndReadOnlySandbox(t *testing.T)
 		t.Fatalf("restore permissions = %q, want auto", agent.gotRestore.Permissions)
 	}
 }
-
-// AO_REVIEWER_PERMISSIONS=bypass-permissions selects AO's trusted mode for the
-// reviewer (no approval escalations, hence no auto-review model calls); any
-// other value keeps the default auto mode.
-func TestReviewerPermissionsOverride(t *testing.T) {
-	for value, want := range map[string]ports.PermissionMode{
-		"":                   ports.PermissionModeAuto,
-		"bypass-permissions": ports.PermissionModeBypassPermissions,
-		"accept-edits":       ports.PermissionModeAuto,
-		"anything":           ports.PermissionModeAuto,
-	} {
-		t.Setenv(ReviewerPermissionsEnv, value)
-		agent := &captureAgent{}
-		r := &Reviewer{agent: agent}
-		if _, err := r.ReviewCommand(context.Background(), ports.ReviewInvocation{ReviewerID: "review-w1", WorkspacePath: "/ws", Prompt: "p"}); err != nil {
-			t.Fatal(err)
-		}
-		if agent.got.Permissions != want {
-			t.Errorf("%s=%q: permissions %q, want %q", ReviewerPermissionsEnv, value, agent.got.Permissions, want)
-		}
-	}
-}
