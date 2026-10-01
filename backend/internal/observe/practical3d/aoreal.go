@@ -255,7 +255,11 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 		// model (gpt-5.6-luna, observed in mini-E2E run 16), and the
 		// manifest freezes one model per role/class cell. The reviewer runs
 		// read-only with approvals off regardless. Declared, not silent.
-		"-c", "features.guardian_approval=false"}
+		"-c", "features.guardian_approval=false",
+		// ...and approval escalations are not sent to Codex's auto-reviewer
+		// (auto_review_enabled was still true in run 17); with AO's approval
+		// policy they are simply denied.
+		"-c", `approvals_reviewer="user"`}
 	if r.e.Cfg.CodexModel != "" {
 		codexArgs = append(codexArgs, "-c", `model="`+r.e.Cfg.CodexModel+`"`)
 	}
