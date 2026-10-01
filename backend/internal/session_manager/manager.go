@@ -849,6 +849,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: no agent adapter for harness %q", id, cfg.Harness)
 	}
 	agentConfig := applySpawnAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), cfg.AgentConfig)
+	m.auditPermissionBypass("spawn", id, cfg.ProjectID, cfg.Harness, agentConfig)
 	env, browserCapabilityVerifier, err := m.launchRuntimeEnv(id, cfg.ProjectID, cfg.IssueID, project.Config.Env)
 	if err != nil {
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true)
@@ -1211,6 +1212,22 @@ func roleConfigName(kind domain.SessionKind) string {
 		return "orchestrator"
 	}
 	return "worker"
+}
+
+// auditPermissionBypass records every launch that runs an agent with its
+// provider's sandbox and approvals bypassed.
+//
+// AR-1a (D-SEC-4): the bypass is no longer anybody's default -- it exists only
+// as the explicit bypass-permissions policy -- and an explicit, dangerous
+// choice must leave a trace that names the session, project and harness it was
+// applied to, so it can be audited after the fact rather than inferred.
+func (m *Manager) auditPermissionBypass(operation string, id domain.SessionID, projectID domain.ProjectID, harness domain.AgentHarness, cfg ports.AgentConfig) {
+	if ports.NormalizePermissionMode(cfg.Permissions) != ports.PermissionModeBypassPermissions || m.logger == nil {
+		return
+	}
+	m.logger.Warn("agent launched with its sandbox and approvals bypassed (explicit bypass-permissions policy)",
+		"audit", "agent_permission_bypass", "operation", operation,
+		"session", id, "project", projectID, "harness", harness)
 }
 
 // effectiveAgentConfig merges the role override's agent config over the
@@ -1794,6 +1811,7 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 	// Restore re-applies the project's resolved agent config so a configured
 	// model/permissions carry across a restore, matching fresh spawn.
 	agentConfig := effectiveAgentConfig(rec.Kind, project.Config)
+	m.auditPermissionBypass(operation, rec.ID, rec.ProjectID, rec.Harness, agentConfig)
 	env, browserCapabilityVerifier, err := m.launchRuntimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: browser capability: %w", operation, rec.ID, err)

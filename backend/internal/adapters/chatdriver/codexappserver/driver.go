@@ -368,10 +368,12 @@ func (d *Driver) connect(ctx context.Context, workdir string, env map[string]str
 // approvalSettings maps AO's existing per-session permission mode onto Codex's
 // approval policy and sandbox.
 //
-// The default matches what AO already passes a Codex TUI session
-// (--dangerously-bypass-approvals-and-sandbox): AO sessions run in isolated
-// worktrees and are expected to work without prompting. Chat does not quietly
-// become stricter than the terminal path for the same setting.
+// AR-1a (D-SEC-4): the default used to be never/danger-full-access, mirroring
+// the TUI's old --dangerously-bypass-approvals-and-sandbox default. Both paths
+// now default to the workspace-write sandbox with approvals off -- writes stay
+// inside the worktree and nothing waits on a prompt. Chat stays exactly as
+// strict as the terminal path for the same setting, and full access exists only
+// as the explicit bypass-permissions mode.
 func approvalSettings(mode ports.PermissionMode) (policy, sandbox string) {
 	switch ports.NormalizePermissionMode(mode) {
 	case ports.PermissionModeAcceptEdits, ports.PermissionModeAuto:
@@ -380,8 +382,10 @@ func approvalSettings(mode ports.PermissionMode) (policy, sandbox string) {
 		// AO has no tested value for it here, and sending an unknown one would
 		// fail thread/start outright.
 		return "on-request", "workspace-write"
-	default:
+	case ports.PermissionModeBypassPermissions:
 		return "never", "danger-full-access"
+	default:
+		return "never", "workspace-write"
 	}
 }
 

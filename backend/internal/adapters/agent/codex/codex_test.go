@@ -487,9 +487,12 @@ func TestGetLaunchCommandMapsApprovalModes(t *testing.T) {
 		notExpected string
 	}{
 		{
-			name:       "default",
-			permission: ports.PermissionModeDefault,
-			want:       []string{"--dangerously-bypass-approvals-and-sandbox"},
+			// AR-1a (D-SEC-4): the default is the workspace-write sandbox,
+			// never the full bypass.
+			name:        "default",
+			permission:  ports.PermissionModeDefault,
+			want:        []string{"--sandbox", "workspace-write", "--ask-for-approval", "never"},
+			notExpected: "--dangerously-bypass-approvals-and-sandbox",
 		},
 		{
 			name:        "accept-edits",
@@ -509,9 +512,19 @@ func TestGetLaunchCommandMapsApprovalModes(t *testing.T) {
 			want:       []string{"--dangerously-bypass-approvals-and-sandbox"},
 		},
 		{
-			name:       "empty",
-			permission: "",
-			want:       []string{"--dangerously-bypass-approvals-and-sandbox"},
+			name:        "empty",
+			permission:  "",
+			want:        []string{"--sandbox", "workspace-write", "--ask-for-approval", "never"},
+			notExpected: "--dangerously-bypass-approvals-and-sandbox",
+		},
+		{
+			// An unrecognised value -- a typo, a value from another tool, or
+			// one written by something that should not decide this -- never
+			// unlocks the bypass.
+			name:        "unknown",
+			permission:  ports.PermissionMode("danger-full-access"),
+			want:        []string{"--sandbox", "workspace-write", "--ask-for-approval", "never"},
+			notExpected: "--dangerously-bypass-approvals-and-sandbox",
 		},
 	}
 
