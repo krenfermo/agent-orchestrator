@@ -118,3 +118,14 @@ func TestCodexPlaceholderLoginHoldsNoCredential(t *testing.T) {
 		t.Fatalf("placeholder login: %v", login)
 	}
 }
+
+// AO hands the reviewer's shells the daemon's own run file; in a position the
+// shim points them at the gateway's run file instead (and drops AO_PORT).
+func TestGatewayShellEnvRewritesDaemonLocation(t *testing.T) {
+	t.Parallel()
+	got := gatewayShellEnv([]string{"agent", "--sandbox", "read-only", "-c", `shell_environment_policy.set.AO_PORT="3103"`, "-c", `shell_environment_policy.set.AO_DATA_DIR="/d"`, "-c", `shell_environment_policy.set.AO_RUN_FILE="/d/running.json"`, "--", "review it"}, "/home/ao-running.json")
+	want := []string{"agent", "--sandbox", "read-only", "-c", `shell_environment_policy.set.AO_DATA_DIR="/d"`, "-c", `shell_environment_policy.set.AO_RUN_FILE="/home/ao-running.json"`, "--", "review it"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("got %q", got)
+	}
+}

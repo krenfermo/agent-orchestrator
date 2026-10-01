@@ -262,6 +262,11 @@ func buildShimLaunch(harness string, cfg ShimConfig, args, environ []string, tok
 		for _, a := range cfg.CodexArgs {
 			extra = append(extra, strings.ReplaceAll(a, "{BASE}", strings.TrimSuffix(base, "/")+"/backend-api/codex"))
 		}
+		// AO hands the reviewer's shells the daemon's own run file
+		// (shell_environment_policy.set.AO_RUN_FILE / AO_PORT); in a
+		// Practical position the daemon is reachable only through the
+		// gateway, so those point at the gateway's run file instead.
+		args = gatewayShellEnv(args, cfg.ExtraEnv["AO_RUN_FILE"])
 	}
 	finalArgs := args
 	if session || harness == "codex" {
@@ -327,6 +332,33 @@ func ReadShimConfig(path string) (ShimConfig, error) {
 	}
 	err = strictUnmarshal(raw, &c)
 	return c, err
+}
+
+// gatewayShellEnv rewrites Codex's shell-environment overrides of the AO
+// daemon location to the gateway's run file (and drops a pinned AO_PORT).
+func gatewayShellEnv(args []string, runFile string) []string {
+	if runFile == "" {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "-c" && i+1 < len(args) {
+			next := args[i+1]
+			switch {
+			case strings.HasPrefix(next, "shell_environment_policy.set.AO_RUN_FILE="):
+				v, _ := json.Marshal(runFile)
+				out = append(out, a, "shell_environment_policy.set.AO_RUN_FILE="+string(v))
+				i++
+				continue
+			case strings.HasPrefix(next, "shell_environment_policy.set.AO_PORT="):
+				i++
+				continue
+			}
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // CodexKeyEnv is the environment variable Codex's Practical provider reads

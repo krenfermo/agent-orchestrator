@@ -250,16 +250,7 @@ func (r *positionRig) shimConfig(profile string, capture bool) ShimConfig {
 		"-c", "model_providers.p3d.requires_openai_auth=false", "-c", `model_providers.p3d.env_key="` + CodexKeyEnv + `"`,
 		// No model-upgrade dialog in a fresh CODEX_HOME (it would block the
 		// reviewer's TUI).
-		"-c", `notice.model_migrations={"gpt-5.6-sol"="gpt-6-sol"}`,
-		// No guardian approvals: they judge each planned action on a second
-		// model (gpt-5.6-luna, observed in mini-E2E run 16), and the
-		// manifest freezes one model per role/class cell. The reviewer runs
-		// read-only with approvals off regardless. Declared, not silent.
-		"-c", "features.guardian_approval=false",
-		// ...and approval escalations are not sent to Codex's auto-reviewer
-		// (auto_review_enabled was still true in run 17); with AO's approval
-		// policy they are simply denied.
-		"-c", `approvals_reviewer="user"`}
+		"-c", `notice.model_migrations={"gpt-5.6-sol"="gpt-6-sol"}`}
 	if r.e.Cfg.CodexModel != "" {
 		codexArgs = append(codexArgs, "-c", `model="`+r.e.Cfg.CodexModel+`"`)
 	}
@@ -287,7 +278,12 @@ func (r *positionRig) startDaemon(ctx context.Context, arm Arm, task string) err
 		"TMPDIR=" + r.tmp + "/",
 		"PATH=" + filepath.Join(r.ctlDir, "bin") + ":" + filepath.Dir(r.e.Cfg.AOBinary) + ":/opt/homebrew/bin:/usr/local/bin:/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin",
 		"AO_DATA_DIR=" + r.dataDir, "AO_RUN_FILE=" + r.runFile, "AO_TRUSTED_LOCAL_MODE=on", "AO_AUTH_MODE=trusted_local",
-		"AO_TMUX_SOCKET=" + r.socket, "AO_MEMORY_EXTERNAL=off", "AO_MEMORY_ROLES=" + memoryRolesFor(task), "CODEX_HOME=" + filepath.Join(r.home, "codex-home"), "AO_3DP_SHIM_CONFIG=" + filepath.Join(r.ctlDir, "shim.json"),
+		"AO_TMUX_SOCKET=" + r.socket, "AO_MEMORY_EXTERNAL=off", "AO_MEMORY_ROLES=" + memoryRolesFor(task),
+		// AO's trusted mode for the Codex reviewer only (operator decision,
+		// 2026-09-30): no approval escalations, hence no auto-review/guardian
+		// calls on a second model (gpt-5.6-luna). The reviewer stays confined
+		// by the Practical sandbox; the worker keeps AO's default mode.
+		"AO_REVIEWER_PERMISSIONS=bypass-permissions", "CODEX_HOME=" + filepath.Join(r.home, "codex-home"), "AO_3DP_SHIM_CONFIG=" + filepath.Join(r.ctlDir, "shim.json"),
 		"DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "ENABLE_CLAUDEAI_MCP_SERVERS=0", "GOTOOLCHAIN=local"}
 	if arm == ArmAssisted {
 		env = append(env, "AO_MEMORY_MODE=assisted")
