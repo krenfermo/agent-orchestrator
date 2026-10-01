@@ -51,16 +51,25 @@ memoria y router OFF.
 **Siguiente: prerequisitos de 3D** (carrera de review, ruta de review, aislamiento de sesiones, contexto externo). Después, el piloto A/B. Project Memory sigue **desactivada** por defecto. No se ha
 demostrado ningún ahorro de tokens; eso le corresponde al piloto.
 
-## 3D — evaluación práctica (corregida; pendiente nueva revisión REAL; NO-GO para ejecución)
+## 3D — evaluación práctica: **CLOSED / NO-GO** (2026-10-01)
 
-La norma vigente es [3d-practical.md](3d-practical.md), junto con la única
+Cierre: [3d-closure.md](3d-closure.md).
+- TASK_A_REAL = FAIL: la regla del primer edit de M3 es incompatible con las ediciones vía Bash.
+- TASK_C = PRACTICALLY_UNIMPLEMENTABLE_UNDER_FROZEN_SPEC.
+- Las 40 posiciones no se ejecutaron. Project Memory sigue **OFF**. 3E no está autorizado.
+- El código del experimento no se integra en ECC (su último estado es `9554ba761`).
+- Sí se integran el hardening de review, el retiro de los interruptores del entorno, `externalContext` y el determinismo del pack.
+
+La norma (histórica) es [3d-practical.md](3d-practical.md), junto con la única
 función total de [06-benchmark-plan.md](06-benchmark-plan.md). El diseño
 Research-Grade V4 y el preflight previo se conservan como historial
 **NON-NORMATIVE**; sus gates no son prerequisitos de 3D-PRACTICAL.
 
 | Documento | Contenido |
 |---|---|
-| [3d-practical.md](3d-practical.md) | **Única especificación de protocolo vigente.** Comparación controlada OFF/ASSISTED, 40 posiciones, treatment trace, límites y claims |
+| [3d-closure.md](3d-closure.md) | **Cierre NO-GO**: objetivo, metodología, resultado, limitaciones y qué se integra |
+| [3d-practical-ao-integration.md](3d-practical-ao-integration.md) | Integración real con AO: proxy, sandbox, credenciales, M3/3C, rondas de revisión Codex, auditoría de C (código no integrado) |
+| [3d-practical.md](3d-practical.md) | **Especificación de protocolo (congelada).** Comparación controlada OFF/ASSISTED, 40 posiciones, treatment trace, límites y claims |
 | [06-benchmark-plan.md](06-benchmark-plan.md) | **Única función total de decisión.** Estados, caps por rol, normalización, GO/NO-GO y lineage |
 | [3d-practical-codex-review-prompt.md](3d-practical-codex-review-prompt.md) | Prompt actualizado para revalidar los cuatro hallazgos finales y ataques A–F; no ejecutado |
 | [3d-practical-codex-review.md](3d-practical-codex-review.md) | Evidencia histórica de las revisiones REAL: NEEDS_CHANGES (seis hallazgos iniciales y cuatro finales), no normativa |

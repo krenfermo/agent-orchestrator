@@ -1,5 +1,7 @@
 # 3D-PRACTICAL — real AO integration
 
+> **Closed NO-GO (2026-10-01)** — see [3d-closure.md](3d-closure.md). The code described here is not integrated into ECC; its last state is `feat/frente3-3d-prerequisites` @ `9554ba761`.
+
 Status note for the integration of the 3D-PRACTICAL harness with a real AO
 daemon (`backend/internal/observe/practical3d`, `backend/cmd/ao3dpractical`).
 It records how the three P0s are closed, and which items remain open.
