@@ -2,6 +2,7 @@ package workflow_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -23,10 +24,13 @@ type identityIssuingLauncher struct {
 
 func (l identityIssuingLauncher) IssuesReviewerIdentity() bool { return l.issues }
 
-type staticRunOwners struct{ owner *domain.UserID }
+type staticRunOwners struct {
+	owner *domain.UserID
+	err   error
+}
 
 func (s staticRunOwners) GetWorkflowRunOwner(context.Context, string) (*domain.UserID, error) {
-	return s.owner, nil
+	return s.owner, s.err
 }
 
 func dispatchReviewWithIdentity(t *testing.T, issues bool, owner *domain.UserID) (domain.ReviewRun, workflowcore.ReviewerLaunchRequest) {
@@ -90,5 +94,45 @@ func TestALauncherWithoutAnIdentityLayerNeverMarksTheRun(t *testing.T) {
 	run, req := dispatchReviewWithIdentity(t, false, &owner)
 	if run.ReviewerIdentityExpected || req.ReviewerIdentityExpected {
 		t.Fatalf("a launcher that issues no identity marked the run")
+	}
+}
+
+// Codex AR1A-R2-01: an owner lookup that FAILS is not "no owner". The review
+// run must not be created without the identity marker (that would reopen the
+// pre-mint window); the dispatch refuses before inserting anything.
+func TestAFailedOwnerLookupNeverCreatesAnUnmarkedReview(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	fake := &fakeReviewerLauncher{}
+	store := newFakeStore()
+	store.reviewRuns = reviewRuns
+	clk := &fakeClock{t: time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)}
+	var idSeq int
+	c := workflowcore.New(workflowcore.Deps{
+		Store: store, Spawner: spawner, SessionFacts: sessionFacts, WorkspaceFacts: workspaceFacts,
+		ReviewRuns: reviewRuns, ReviewerLauncher: identityIssuingLauncher{fakeReviewerLauncher: fake, issues: true},
+		RunOwners: staticRunOwners{err: errors.New("database is locked")},
+		Clock:     clk.Now,
+		NewID: func() string {
+			idSeq++
+			return fmt.Sprintf("id%d", idSeq)
+		},
+	})
+	ctx := context.Background()
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStep(t, c, store, clk, sessionFacts, workspaceFacts, created.Run.ID)
+	_, _ = c.ContinueRun(ctx, created.Run.ID)
+	if reviewRuns.insertCalls != 0 || fake.launchCalls != 0 {
+		t.Fatalf("a review run was inserted (%d) or launched (%d) after a failed owner lookup", reviewRuns.insertCalls, fake.launchCalls)
+	}
+	for id, r := range reviewRuns.runs {
+		if r.Status == domain.ReviewRunRunning && !r.ReviewerIdentityExpected {
+			t.Fatalf("running review %s exists without the identity marker", id)
+		}
 	}
 }

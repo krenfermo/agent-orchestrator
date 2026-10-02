@@ -151,9 +151,10 @@ func TestReviewerLaunchIsRefusedWhenItsIdentityCannotBeMinted(t *testing.T) {
 	}
 }
 
-// On a trusted-local desktop the reviewer's cookie-less call resolves the
-// bootstrap admin anyway, so a missing credential costs nothing and must not
-// cost a launch.
+// On a trusted-local desktop, for a run that does NOT expect a reviewer
+// identity (an unowned legacy run), the reviewer's cookie-less call resolves the
+// bootstrap admin anyway, so a missing credential must not cost the launch.
+// A run that expects one fails closed instead (AR-1a, see the test below).
 func TestTrustedLocalReviewerLaunchSurvivesAMissingIdentity(t *testing.T) {
 	issuer := &fakeCredentialIssuer{issueErr: errors.New("no owner recorded for this run")}
 	l, rt, _ := newCredentialLauncher(t, issuer, false)

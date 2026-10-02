@@ -241,17 +241,22 @@ type RunOwnerReader interface {
 }
 
 // reviewerIdentityOwner is the account a reviewer credential for this run would
-// be minted for: the run's recorded owner, or empty when it has none (legacy
-// unowned runs) or it cannot be read.
-func (c *Coordinator) reviewerIdentityOwner(ctx stdctx.Context, runID string) domain.UserID {
+// be minted for: the run's recorded owner, or empty when it SUCCESSFULLY reads
+// as having none (a legacy unowned run). A failed read is returned as an error
+// and never treated as "no owner" (Codex AR1A-R2-01): that would create the run
+// without the identity marker and reopen the pre-mint window.
+func (c *Coordinator) reviewerIdentityOwner(ctx stdctx.Context, runID string) (domain.UserID, error) {
 	if c.runOwners == nil {
-		return ""
+		return "", nil
 	}
 	owner, err := c.runOwners.GetWorkflowRunOwner(ctx, runID)
-	if err != nil || owner == nil {
-		return ""
+	if err != nil {
+		return "", err
 	}
-	return *owner
+	if owner == nil {
+		return "", nil
+	}
+	return *owner, nil
 }
 
 type ReviewerEnsurer interface {
@@ -1603,7 +1608,13 @@ func (c *Coordinator) dispatchReviewFromPending(
 	// can record its verdict before the reviewer's credential exists. Only for
 	// a run with an owner: that is the account the credential is minted for,
 	// and an unowned (legacy) run keeps its previous behaviour.
-	identityOwner := c.reviewerIdentityOwner(ctx, run.ID)
+	identityOwner, ownerErr := c.reviewerIdentityOwner(ctx, run.ID)
+	if ownerErr != nil {
+		// Nothing has been inserted yet: refuse before the run exists, through
+		// the ordinary launch-failure path and its bounded retry.
+		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, "", targetSHA, cycleNumber, reviewLaunchStageReviewRun,
+			fmt.Errorf("read the run owner the reviewer's identity is minted for: %w", ownerErr))
+	}
 	identityExpected := false
 	if issuer, ok := c.reviewerLauncher.(ReviewerIdentityIssuer); ok && identityOwner != "" {
 		identityExpected = issuer.IssuesReviewerIdentity()

@@ -156,9 +156,19 @@ than telling a pane with no browser to run `ao auth login`.
 
 Where an identity is required and one cannot be minted, the launch is refused.
 Starting a reviewer that provably cannot record its verdict only moves the dead
-end thirty minutes later, to the staleness threshold. On trusted-local the
-reviewer's cookie-less call resolves the bootstrap admin anyway, so a missing
-credential costs nothing and must not cost a launch.
+end thirty minutes later, to the staleness threshold.
+
+Since AR-1a (D-SEC-2) the same refusal applies on trusted-local for every
+review run created expecting its reviewer's identity -- a workflow review of
+a run with a recorded owner, when the launcher hands out reviewer credentials
+(`review_run.reviewer_identity_expected = 1`, migration 0177). While such a run
+is running only that reviewer's credential may record its verdict, so a
+header-less reviewer would be a dead end: a failed mint or hand-over fails the
+launch and the ordinary reviewer-launch retry takes over. Only a run that does
+not expect an identity (an unowned legacy run, or a build without the identity
+layer) still launches a header-less reviewer on trusted-local, whose call
+resolves the bootstrap admin as before. A failure to READ the run's owner is
+never treated as "unowned": the dispatch refuses before creating the run.
 
 ## Recovering runs already stranded
 
