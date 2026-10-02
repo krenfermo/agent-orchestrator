@@ -280,7 +280,8 @@ func applyTurnSettings(params map[string]any, settings ports.ChatTurnSettings) {
 func turnSandboxPolicy(sandbox string) map[string]any {
 	switch sandbox {
 	case "workspace-write":
-		return map[string]any{"type": "workspaceWrite"}
+		// Network stays on inside the sandbox, as at thread/start (AR1A-04).
+		return map[string]any{"type": "workspaceWrite", "networkAccess": true}
 	case "read-only":
 		return map[string]any{"type": "readOnly"}
 	default:

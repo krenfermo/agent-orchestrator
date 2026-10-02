@@ -251,6 +251,7 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 		"approvalPolicy": policy,
 		"sandbox":        sandbox,
 	}
+	applyWorkspaceWriteNetwork(params, sandbox)
 	if cfg.Model != "" {
 		params["model"] = cfg.Model
 	}
@@ -302,6 +303,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		"approvalPolicy": policy,
 		"sandbox":        sandbox,
 	}
+	applyWorkspaceWriteNetwork(params, sandbox)
 	// Developer instructions are launch context, not durable conversation
 	// history. Reapply AO's current standing role when app-server reconstructs a
 	// native thread, just as the TUI adapter does with its resume command.
@@ -386,6 +388,22 @@ func approvalSettings(mode ports.PermissionMode) (policy, sandbox string) {
 		return "never", "danger-full-access"
 	default:
 		return "never", "workspace-write"
+	}
+}
+
+// workspaceWriteNetworkConfig is the thread-level config override that keeps
+// network access on inside the workspace-write sandbox (Codex AR1A-04), the
+// same posture the TUI path gets from -c sandbox_workspace_write.network_access.
+// AO's agents reach the daemon over loopback, which the sandbox's default
+// network denial would cut. Verified against the installed app-server: without
+// it thread/start reports networkAccess:false, with it networkAccess:true.
+const workspaceWriteNetworkConfigKey = "sandbox_workspace_write.network_access"
+
+// applyWorkspaceWriteNetwork adds the network override to thread/start and
+// thread/resume params whenever the thread runs in the workspace-write sandbox.
+func applyWorkspaceWriteNetwork(params map[string]any, sandbox string) {
+	if sandbox == "workspace-write" {
+		params["config"] = map[string]any{workspaceWriteNetworkConfigKey: true}
 	}
 }
 
