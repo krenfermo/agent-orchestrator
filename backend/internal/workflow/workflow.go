@@ -310,6 +310,11 @@ type Deps struct {
 	// decision (AR-1a D-SEC-2). Optional: nil yields no owner, which keeps the
 	// pre-AR-1a behaviour for every run.
 	RunOwners RunOwnerReader
+	// ReviewerIdentityIssuer reports whether the reviewer launcher hands its
+	// reviewers AO's own credential (AR-1a D-SEC-2). Wired from the UNDECORATED
+	// launcher on purpose: dispatch decorators replace ReviewerLauncher and do
+	// not carry this capability (Codex AR1A-R4-01). Nil means none is issued.
+	ReviewerIdentityIssuer ReviewerIdentityIssuer
 	// Logger receives recovery diagnostics. Optional.
 	Logger *slog.Logger
 
@@ -663,10 +668,11 @@ type Coordinator struct {
 
 	// sessions, reviewRuns, and log back Reconcile's best-effort integrity
 	// check (see recovery.go). All optional.
-	sessions   Sessions
-	reviewRuns ReviewRuns
-	runOwners  RunOwnerReader
-	log        *slog.Logger
+	sessions               Sessions
+	reviewRuns             ReviewRuns
+	runOwners              RunOwnerReader
+	reviewerIdentityIssuer ReviewerIdentityIssuer
+	log                    *slog.Logger
 
 	// spawner, sessionFacts, and workspaceFacts back Checkpoint 8B's work-step
 	// dispatch/observation. All optional.
@@ -900,6 +906,7 @@ func New(d Deps) *Coordinator {
 		sessions:                 d.Sessions,
 		reviewRuns:               d.ReviewRuns,
 		runOwners:                d.RunOwners,
+		reviewerIdentityIssuer:   d.ReviewerIdentityIssuer,
 		log:                      d.Logger,
 		branchLocks:              d.BranchLocks,
 		integrationLocks:         d.IntegrationLocks,

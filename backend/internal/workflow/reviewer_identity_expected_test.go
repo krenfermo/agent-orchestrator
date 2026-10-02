@@ -47,8 +47,9 @@ func dispatchReviewWithIdentity(t *testing.T, issues bool, owner *domain.UserID)
 	c := workflowcore.New(workflowcore.Deps{
 		Store: store, Spawner: spawner, SessionFacts: sessionFacts, WorkspaceFacts: workspaceFacts,
 		ReviewRuns: reviewRuns, ReviewerLauncher: identityIssuingLauncher{fakeReviewerLauncher: fake, issues: issues},
-		RunOwners: staticRunOwners{owner: owner},
-		Clock:     clk.Now,
+		RunOwners:              staticRunOwners{owner: owner},
+		ReviewerIdentityIssuer: identityIssuingLauncher{fakeReviewerLauncher: fake, issues: issues},
+		Clock:                  clk.Now,
 		NewID: func() string {
 			idSeq++
 			return fmt.Sprintf("id%d", idSeq)
@@ -113,8 +114,9 @@ func TestAFailedOwnerLookupNeverCreatesAnUnmarkedReview(t *testing.T) {
 	c := workflowcore.New(workflowcore.Deps{
 		Store: store, Spawner: spawner, SessionFacts: sessionFacts, WorkspaceFacts: workspaceFacts,
 		ReviewRuns: reviewRuns, ReviewerLauncher: identityIssuingLauncher{fakeReviewerLauncher: fake, issues: true},
-		RunOwners: staticRunOwners{err: errors.New("database is locked")},
-		Clock:     clk.Now,
+		RunOwners:              staticRunOwners{err: errors.New("database is locked")},
+		ReviewerIdentityIssuer: identityIssuingLauncher{fakeReviewerLauncher: fake, issues: true},
+		Clock:                  clk.Now,
 		NewID: func() string {
 			idSeq++
 			return fmt.Sprintf("id%d", idSeq)

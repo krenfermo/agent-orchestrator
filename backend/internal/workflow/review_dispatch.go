@@ -224,6 +224,8 @@ func (r ReviewerRef) String() string {
 // than to a guess.
 // ReviewerIdentityIssuer is implemented by a ReviewerLauncher that hands every
 // reviewer it starts AO's own credential and refuses to start one it cannot.
+// It is wired as its own dependency (Deps.ReviewerIdentityIssuer), never
+// discovered on the possibly-decorated ReviewerLauncher.
 // A review run created for such a launcher is marked ReviewerIdentityExpected
 // in the same insert, so a header-less verdict cannot be recorded for it while
 // it is running -- not even before the credential is minted (AR-1a D-SEC-2).
@@ -1616,8 +1618,8 @@ func (c *Coordinator) dispatchReviewFromPending(
 			fmt.Errorf("read the run owner the reviewer's identity is minted for: %w", ownerErr))
 	}
 	identityExpected := false
-	if issuer, ok := c.reviewerLauncher.(ReviewerIdentityIssuer); ok && identityOwner != "" {
-		identityExpected = issuer.IssuesReviewerIdentity()
+	if c.reviewerIdentityIssuer != nil && identityOwner != "" {
+		identityExpected = c.reviewerIdentityIssuer.IssuesReviewerIdentity()
 	}
 	reviewRun := domain.ReviewRun{
 		ReviewerIdentityExpected: identityExpected,

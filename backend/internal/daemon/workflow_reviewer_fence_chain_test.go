@@ -81,3 +81,38 @@ func TestReviewerLaunchFenceSurvivesTheProductionDecoratorChain(t *testing.T) {
 		t.Fatalf("fence saw %d creates before it ran, runtime calls=%d; want 0 then 1", createsBeforeFence, runtime.calls)
 	}
 }
+
+// AR-1a (Codex AR1A-R4-01): the reviewer-identity capability must survive the
+// production decorator chain. The decorators replace ReviewerLauncher and do
+// not forward IssuesReviewerIdentity, so discovering it on the decorated
+// launcher would silently disable the D-SEC-2 marker whenever baseline
+// evidence, context routing or project memory is on. It is wired as its own
+// dependency from the undecorated launcher, which the chain leaves intact.
+func TestReviewerIdentityIssuerSurvivesTheProductionDecoratorChain(t *testing.T) {
+	concrete := &workflowReviewerLauncher{
+		reviewers:   &fakeReviewerResolver{adapter: &fakeReviewerAdapter{cmd: ports.ReviewCommandSpec{Argv: []string{"codex"}}}},
+		runtime:     &fakeWorkflowReviewerRuntime{},
+		dataDir:     t.TempDir(),
+		credentials: &fakeCredentialIssuer{token: "ao_agent_tok"},
+	}
+	router, err := contextrouter.Default(nil)
+	if err != nil {
+		t.Fatalf("router: %v", err)
+	}
+	recorder := baselineevidence.NewRecorder(&fenceChainSink{})
+	deps := instrumentAgentDispatch(workflowcore.Deps{
+		Projects:               wiringProjects{},
+		ReviewerLauncher:       concrete,
+		ReviewerIdentityIssuer: concrete,
+	}, recorder, router, &markerProvisioner{}, nil)
+
+	if deps.ReviewerLauncher == workflowcore.ReviewerLauncher(concrete) {
+		t.Fatal("fixture broken: the decorators are off")
+	}
+	if _, ok := deps.ReviewerLauncher.(workflowcore.ReviewerIdentityIssuer); ok {
+		t.Log("note: the decorated launcher now forwards the capability; the explicit dependency remains the source of truth")
+	}
+	if deps.ReviewerIdentityIssuer == nil || !deps.ReviewerIdentityIssuer.IssuesReviewerIdentity() {
+		t.Fatalf("the reviewer-identity capability was lost through the decorator chain")
+	}
+}
