@@ -2,6 +2,8 @@ package workflow
 
 import (
 	stdctx "context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -221,7 +223,11 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 		return IntegrationFreshReviewException{}, fmt.Errorf("%w: run %s", ErrNotFound, childRunID)
 	}
 	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:            "wfc-" + c.newID(),
+		// AR-1a (Codex AR1A-03): one grant per generation, enforced by the
+		// checkpoint's primary key. Two concurrent requests that both read N
+		// grants compute the same generation and the same id, so exactly one
+		// is written; the other re-reads and answers with the winner below.
+		ID:            freshReviewExceptionCheckpointID(childRunID, req.TaskID, exception.Generation),
 		WorkflowRunID: childRunID,
 		ProjectID:     run.ProjectID,
 		RetryState:    string(payload),
@@ -234,6 +240,21 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 		FingerprintBefore: fingerprint,
 		CreatedAt:         exception.GrantedAt,
 	}); err != nil {
+		after, rerr := c.integrationFreshReviewExceptions(ctx, childRunID)
+		if rerr == nil {
+			for _, g := range after {
+				if g.Generation != exception.Generation {
+					continue
+				}
+				if g.Fingerprint == fingerprint && !req.Reauthorize {
+					// The same decision, recorded by a concurrent request.
+					return g, nil
+				}
+				return IntegrationFreshReviewException{}, fmt.Errorf(
+					"%w: another fresh-review exception for task %s was authorized concurrently; re-read and retry",
+					ErrInvalid, req.TaskID)
+			}
+		}
 		return IntegrationFreshReviewException{}, err
 	}
 	if c.log != nil {
@@ -242,6 +263,13 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 			"generation", exception.Generation, "priorAttempts", exception.PriorAttempts)
 	}
 	return exception, nil
+}
+
+// freshReviewExceptionCheckpointID is the deterministic id of the grant of one
+// generation for one task's child run (AR-1a, Codex AR1A-03).
+func freshReviewExceptionCheckpointID(childRunID, taskID string, generation int) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", childRunID, taskID, generation)))
+	return "wfc-frx-" + hex.EncodeToString(sum[:12])
 }
 
 // integrationFreshReviewExceptions reads the grants from the append-only
