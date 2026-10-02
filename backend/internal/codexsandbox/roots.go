@@ -63,7 +63,7 @@ func (r Resolver) WritableRoots(ctx context.Context, workspace string, additiona
 	}
 	ws, err := resolveDir(workspace)
 	if err != nil {
-		return nil, fmt.Errorf("%w: workspace %q: %v", ErrInvalidRoot, workspace, err)
+		return nil, fmt.Errorf("%w: workspace %q: %w", ErrInvalidRoot, workspace, err)
 	}
 	protected, err := r.protected()
 	if err != nil {
@@ -95,7 +95,7 @@ func (r Resolver) WritableRoots(ctx context.Context, workspace string, additiona
 		}
 		dir, err := resolveDir(raw)
 		if err != nil {
-			return nil, fmt.Errorf("%w: additional directory %q: %v", ErrInvalidRoot, raw, err)
+			return nil, fmt.Errorf("%w: additional directory %q: %w", ErrInvalidRoot, raw, err)
 		}
 		if !within(dir, ws) {
 			return nil, fmt.Errorf("%w: additional directory %q is outside the workspace %q", ErrInvalidRoot, raw, ws)
@@ -119,14 +119,14 @@ func (r Resolver) WritableRoots(ctx context.Context, workspace string, additiona
 	for _, repo := range repos {
 		common, ok, err := gitDir(ctx, repo)
 		if err != nil {
-			return nil, fmt.Errorf("%w: git directory of %q: %v", ErrInvalidRoot, repo, err)
+			return nil, fmt.Errorf("%w: git directory of %q: %w", ErrInvalidRoot, repo, err)
 		}
 		if !ok {
 			continue
 		}
 		resolved, err := resolveDir(common)
 		if err != nil {
-			return nil, fmt.Errorf("%w: git directory %q of %q: %v", ErrInvalidRoot, common, repo, err)
+			return nil, fmt.Errorf("%w: git directory %q of %q: %w", ErrInvalidRoot, common, repo, err)
 		}
 		if err := add(resolved); err != nil {
 			return nil, err
@@ -141,7 +141,7 @@ func (r Resolver) protected() ([]string, error) {
 	if home == "" {
 		h, err := os.UserHomeDir()
 		if err != nil {
-			return nil, fmt.Errorf("%w: home directory: %v", ErrInvalidRoot, err)
+			return nil, fmt.Errorf("%w: home directory: %w", ErrInvalidRoot, err)
 		}
 		home = h
 	}
