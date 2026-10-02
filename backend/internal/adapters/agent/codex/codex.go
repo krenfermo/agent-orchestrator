@@ -9,6 +9,7 @@ package codex
 import (
 	"context"
 	"fmt"
+	"github.com/aoagents/agent-orchestrator/backend/internal/codexsandbox"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -36,6 +37,35 @@ type Plugin struct {
 	agentbase.Base
 	binaryMu       sync.Mutex
 	resolvedBinary string
+	// writableRoots resolves the explicit extra writable roots of the
+	// workspace-write sandbox (AR-1a, Codex AR1A-INT-01). Nil uses
+	// codexsandbox.WritableRoots.
+	writableRoots func(ctx context.Context, workspace string, additional []string) ([]string, error)
+}
+
+// sandboxAddDirArgs returns `--add-dir <root>` for every explicit extra
+// writable root a sandboxed launch needs: the git directories of the
+// workspace's repositories (without them `git add` / `git commit` are denied
+// inside workspace-write) and a workspace project's child roots. An explicit
+// bypass launch has no sandbox and gets none. Fail closed: roots that cannot be
+// established refuse the launch rather than start a session with a guess.
+func (p *Plugin) sandboxAddDirArgs(ctx context.Context, permissions ports.PermissionMode, workspace string, additional []string) ([]string, error) {
+	if ports.NormalizePermissionMode(permissions) == ports.PermissionModeBypassPermissions {
+		return nil, nil
+	}
+	resolve := p.writableRoots
+	if resolve == nil {
+		resolve = codexsandbox.WritableRoots
+	}
+	roots, err := resolve(ctx, workspace, additional)
+	if err != nil {
+		return nil, fmt.Errorf("codex sandbox writable roots: %w", err)
+	}
+	args := make([]string, 0, 2*len(roots))
+	for _, root := range roots {
+		args = append(args, "--add-dir", root)
+	}
+	return args, nil
 }
 
 // New returns a ready-to-register Codex adapter.
@@ -127,6 +157,11 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 		return nil, err
 	}
 	appendTerminalCompatibilityFlags(&providerArgs)
+	addDirs, err := p.sandboxAddDirArgs(ctx, cfg.Permissions, cfg.WorkspacePath, cfg.AdditionalDirectories)
+	if err != nil {
+		return nil, err
+	}
+	providerArgs = append(providerArgs, addDirs...)
 	return agentruntime.BuildLaunchCommand(agentruntime.LaunchConfig{
 		Harness:          agentruntime.HarnessCodex,
 		Binary:           binary,
@@ -165,6 +200,11 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		return nil, false, err
 	}
 	appendTerminalCompatibilityFlags(&providerArgs)
+	addDirs, err := p.sandboxAddDirArgs(ctx, cfg.Permissions, cfg.Session.WorkspacePath, cfg.AdditionalDirectories)
+	if err != nil {
+		return nil, false, err
+	}
+	providerArgs = append(providerArgs, addDirs...)
 	return agentruntime.BuildRestoreCommand(agentruntime.RestoreConfig{
 		Harness:          agentruntime.HarnessCodex,
 		Binary:           binary,

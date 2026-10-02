@@ -399,6 +399,11 @@ type LaunchConfig struct {
 	SystemPrompt     string
 	SystemPromptFile string
 	WorkspacePath    string
+	// AdditionalDirectories are extra absolute workspace roots (a workspace
+	// project's child repositories) the agent may write alongside
+	// WorkspacePath. Adapters running a sandbox use them as explicit writable
+	// roots (AR-1a, Codex AR1A-INT-01); others ignore them.
+	AdditionalDirectories []string
 	// Env is the fully-resolved environment the spawned subprocess will run
 	// with (HOME/CLAUDE_CONFIG_DIR/etc. — see runtimehome.Environment),
 	// wired through for adapters whose PreLaunch step must write into the
@@ -442,6 +447,9 @@ type RestoreConfig struct {
 	// system-prompt flag should re-apply this in their resume command.
 	SystemPrompt     string
 	SystemPromptFile string
+	// AdditionalDirectories mirrors LaunchConfig.AdditionalDirectories for a
+	// resumed session.
+	AdditionalDirectories []string
 }
 
 // SessionRef identifies an AO session whose agent-owned metadata may be read.

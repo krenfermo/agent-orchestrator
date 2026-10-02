@@ -66,13 +66,13 @@ func TestChatThreadResumeKeepsNetworkOnInsideTheSandbox(t *testing.T) {
 
 func TestChatTurnSandboxOverrideKeepsNetworkOn(t *testing.T) {
 	params := map[string]any{}
-	applyTurnSettings(params, ports.ChatTurnSettings{Approval: ports.PermissionModeDefault})
+	applyTurnSettings(params, ports.ChatTurnSettings{Approval: ports.PermissionModeDefault}, nil)
 	policy, _ := params["sandboxPolicy"].(map[string]any)
 	if policy["type"] != "workspaceWrite" || policy["networkAccess"] != true {
 		t.Fatalf("turn sandboxPolicy = %v, want workspaceWrite with networkAccess", policy)
 	}
 	params = map[string]any{}
-	applyTurnSettings(params, ports.ChatTurnSettings{Approval: ports.PermissionModeBypassPermissions})
+	applyTurnSettings(params, ports.ChatTurnSettings{Approval: ports.PermissionModeBypassPermissions}, nil)
 	if policy, _ := params["sandboxPolicy"].(map[string]any); policy["type"] != "dangerFullAccess" {
 		t.Fatalf("explicit bypass turn sandboxPolicy = %v, want dangerFullAccess", policy)
 	}

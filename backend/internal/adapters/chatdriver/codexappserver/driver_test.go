@@ -166,8 +166,9 @@ func newTestDriver(t *testing.T) (*Driver, *scriptedServer) {
 	}()
 
 	d := &Driver{
-		plugin: fakePlugin{bin: "codex", authStatus: ports.AgentAuthStatusAuthorized},
-		log:    slog.New(slog.DiscardHandler),
+		writableRoots: func(context.Context, string, []string) ([]string, error) { return nil, nil },
+		plugin:        fakePlugin{bin: "codex", authStatus: ports.AgentAuthStatusAuthorized},
+		log:           slog.New(slog.DiscardHandler),
 		versionProbe: func(context.Context, string) (string, error) {
 			return "codex-cli 0.146.0", nil
 		},

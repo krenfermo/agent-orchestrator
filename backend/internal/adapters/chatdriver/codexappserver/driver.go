@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/aoagents/agent-orchestrator/backend/internal/codexsandbox"
 	"io"
 	"log/slog"
 	"os"
@@ -65,6 +66,26 @@ type Driver struct {
 	log          *slog.Logger
 	spawn        spawnFunc
 	versionProbe versionProbeFunc
+	// writableRoots resolves the explicit extra writable roots of the
+	// workspace-write sandbox (AR-1a, Codex AR1A-INT-01). Nil uses
+	// codexsandbox.WritableRoots.
+	writableRoots writableRootsFunc
+}
+
+type writableRootsFunc func(ctx context.Context, workspace string, additional []string) ([]string, error)
+
+func (d *Driver) resolveWritableRoots(ctx context.Context, workspace string, additional []string) ([]string, error) {
+	resolve := d.writableRoots
+	if resolve == nil {
+		resolve = codexsandbox.WritableRoots
+	}
+	roots, err := resolve(ctx, workspace, additional)
+	if err != nil {
+		// Fail closed: a session whose sandbox roots cannot be established is
+		// not started with a guess.
+		return nil, fmt.Errorf("codex sandbox writable roots: %w", err)
+	}
+	return roots, nil
 }
 
 // New builds a Chat driver over the existing Codex agent plugin.
@@ -240,10 +261,15 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 		return nil, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
 	}
 
+	roots, err := d.resolveWritableRoots(ctx, cfg.WorkspacePath, cfg.AdditionalDirectories)
+	if err != nil {
+		return nil, err
+	}
 	conv, err := d.connect(ctx, cfg.WorkspacePath, cfg.Env)
 	if err != nil {
 		return nil, err
 	}
+	conv.writableRoots = roots
 
 	policy, sandbox := approvalSettings(cfg.Permissions)
 	params := map[string]any{
@@ -251,7 +277,7 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 		"approvalPolicy": policy,
 		"sandbox":        sandbox,
 	}
-	applyWorkspaceWriteNetwork(params, sandbox)
+	applyWorkspaceWriteSandbox(params, sandbox, roots)
 	if cfg.Model != "" {
 		params["model"] = cfg.Model
 	}
@@ -291,10 +317,15 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		return nil, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
 	}
 
+	roots, err := d.resolveWritableRoots(ctx, cfg.WorkspacePath, cfg.AdditionalDirectories)
+	if err != nil {
+		return nil, err
+	}
 	conv, err := d.connect(ctx, cfg.WorkspacePath, cfg.Env)
 	if err != nil {
 		return nil, err
 	}
+	conv.writableRoots = roots
 
 	policy, sandbox := approvalSettings(cfg.Permissions)
 	params := map[string]any{
@@ -303,7 +334,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		"approvalPolicy": policy,
 		"sandbox":        sandbox,
 	}
-	applyWorkspaceWriteNetwork(params, sandbox)
+	applyWorkspaceWriteSandbox(params, sandbox, roots)
 	// Developer instructions are launch context, not durable conversation
 	// history. Reapply AO's current standing role when app-server reconstructs a
 	// native thread, just as the TUI adapter does with its resume command.
@@ -397,14 +428,28 @@ func approvalSettings(mode ports.PermissionMode) (policy, sandbox string) {
 // AO's agents reach the daemon over loopback, which the sandbox's default
 // network denial would cut. Verified against the installed app-server: without
 // it thread/start reports networkAccess:false, with it networkAccess:true.
-const workspaceWriteNetworkConfigKey = "sandbox_workspace_write.network_access"
+const (
+	workspaceWriteNetworkConfigKey = "sandbox_workspace_write.network_access"
+	// workspaceWriteRootsConfigKey carries the explicit extra writable roots
+	// (AR1A-INT-01): the workspace project's child roots and the git
+	// directories of the workspace's repositories, from codexsandbox. Verified
+	// against the installed app-server, which reports them back as the
+	// effective sandbox policy's writableRoots.
+	workspaceWriteRootsConfigKey = "sandbox_workspace_write.writable_roots"
+)
 
-// applyWorkspaceWriteNetwork adds the network override to thread/start and
-// thread/resume params whenever the thread runs in the workspace-write sandbox.
-func applyWorkspaceWriteNetwork(params map[string]any, sandbox string) {
-	if sandbox == "workspace-write" {
-		params["config"] = map[string]any{workspaceWriteNetworkConfigKey: true}
+// applyWorkspaceWriteSandbox adds the network and writable-root overrides to
+// thread/start and thread/resume params whenever the thread runs in the
+// workspace-write sandbox.
+func applyWorkspaceWriteSandbox(params map[string]any, sandbox string, roots []string) {
+	if sandbox != "workspace-write" {
+		return
 	}
+	config := map[string]any{workspaceWriteNetworkConfigKey: true}
+	if len(roots) > 0 {
+		config[workspaceWriteRootsConfigKey] = append([]string(nil), roots...)
+	}
+	params["config"] = config
 }
 
 // spawnAppServer is the real launcher.

@@ -47,6 +47,9 @@ type conversation struct {
 
 	threadID string
 	events   chan ports.ChatEvent
+	// writableRoots are the explicit extra workspace-write roots resolved at
+	// start/resume, re-sent on every per-turn sandbox override (AR1A-INT-01).
+	writableRoots []string
 	// Effective defaults returned when Codex opened or resumed this thread.
 	threadModel, threadEffort string
 
@@ -232,7 +235,7 @@ func (c *conversation) SendTurn(ctx context.Context, msg ports.ChatUserMessage) 
 		// must not produce a second turn.
 		params["clientUserMessageId"] = msg.ClientMessageID
 	}
-	applyTurnSettings(params, msg.Settings)
+	applyTurnSettings(params, msg.Settings, c.writableRoots)
 
 	var resp struct {
 		Turn struct {
@@ -255,7 +258,7 @@ func (c *conversation) SendTurn(ctx context.Context, msg ports.ChatUserMessage) 
 // Only fields the caller actually chose are sent. An omitted field lets the
 // provider fall back to what the thread was started with, which is why a caller
 // that chooses nothing behaves exactly as it did before per-turn settings existed.
-func applyTurnSettings(params map[string]any, settings ports.ChatTurnSettings) {
+func applyTurnSettings(params map[string]any, settings ports.ChatTurnSettings, roots []string) {
 	if settings.Model != "" {
 		params["model"] = settings.Model
 	}
@@ -271,17 +274,22 @@ func applyTurnSettings(params map[string]any, settings ports.ChatTurnSettings) {
 		// rather than assumed to be interchangeable.
 		policy, sandbox := approvalSettings(settings.Approval)
 		params["approvalPolicy"] = policy
-		params["sandboxPolicy"] = turnSandboxPolicy(sandbox)
+		params["sandboxPolicy"] = turnSandboxPolicy(sandbox, roots)
 	}
 }
 
 // turnSandboxPolicy converts a thread-level sandbox name into the tagged object
 // turn/start expects.
-func turnSandboxPolicy(sandbox string) map[string]any {
+func turnSandboxPolicy(sandbox string, roots []string) map[string]any {
 	switch sandbox {
 	case "workspace-write":
-		// Network stays on inside the sandbox, as at thread/start (AR1A-04).
-		return map[string]any{"type": "workspaceWrite", "networkAccess": true}
+		// Network stays on inside the sandbox, as at thread/start (AR1A-04),
+		// and the same explicit writable roots apply (AR1A-INT-01).
+		policy := map[string]any{"type": "workspaceWrite", "networkAccess": true}
+		if len(roots) > 0 {
+			policy["writableRoots"] = append([]string(nil), roots...)
+		}
+		return policy
 	case "read-only":
 		return map[string]any{"type": "readOnly"}
 	default:
