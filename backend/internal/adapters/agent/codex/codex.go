@@ -49,7 +49,7 @@ type Plugin struct {
 // inside workspace-write) and a workspace project's child roots. An explicit
 // bypass launch has no sandbox and gets none. Fail closed: roots that cannot be
 // established refuse the launch rather than start a session with a guess.
-func (p *Plugin) sandboxAddDirArgs(ctx context.Context, permissions ports.PermissionMode, workspace string, additional []string) ([]string, error) {
+func (p *Plugin) sandboxAddDirArgs(ctx context.Context, permissions ports.PermissionMode, dataDir, workspace string, additional []string) ([]string, error) {
 	// Only for AO's own sandboxed default (workspace-write). An explicit bypass
 	// has no sandbox; auto / accept-edits leave the sandbox to Codex and are
 	// also what AO's read-only launchers (reviewer, decision resolver, incident
@@ -60,7 +60,9 @@ func (p *Plugin) sandboxAddDirArgs(ctx context.Context, permissions ports.Permis
 	}
 	resolve := p.writableRoots
 	if resolve == nil {
-		resolve = codexsandbox.WritableRoots
+		// The EFFECTIVE AO data dir of this launch, so state moved by
+		// --data-dir is protected too (Codex AR1A-FIN-04).
+		resolve = codexsandbox.Resolver{AODataDir: dataDir}.WritableRoots
 	}
 	roots, err := resolve(ctx, workspace, additional)
 	if err != nil {
@@ -162,7 +164,7 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 		return nil, err
 	}
 	appendTerminalCompatibilityFlags(&providerArgs)
-	addDirs, err := p.sandboxAddDirArgs(ctx, cfg.Permissions, cfg.WorkspacePath, cfg.AdditionalDirectories)
+	addDirs, err := p.sandboxAddDirArgs(ctx, cfg.Permissions, cfg.DataDir, cfg.WorkspacePath, cfg.AdditionalDirectories)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +207,7 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		return nil, false, err
 	}
 	appendTerminalCompatibilityFlags(&providerArgs)
-	addDirs, err := p.sandboxAddDirArgs(ctx, cfg.Permissions, cfg.Session.WorkspacePath, cfg.AdditionalDirectories)
+	addDirs, err := p.sandboxAddDirArgs(ctx, cfg.Permissions, cfg.DataDir, cfg.Session.WorkspacePath, cfg.AdditionalDirectories)
 	if err != nil {
 		return nil, false, err
 	}

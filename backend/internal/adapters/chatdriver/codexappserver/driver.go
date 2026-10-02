@@ -74,10 +74,11 @@ type Driver struct {
 
 type writableRootsFunc func(ctx context.Context, workspace string, additional []string) ([]string, error)
 
-func (d *Driver) resolveWritableRoots(ctx context.Context, workspace string, additional []string) ([]string, error) {
+func (d *Driver) resolveWritableRoots(ctx context.Context, dataDir, workspace string, additional []string) ([]string, error) {
 	resolve := d.writableRoots
 	if resolve == nil {
-		resolve = codexsandbox.WritableRoots
+		// The EFFECTIVE AO data dir of this session (Codex AR1A-FIN-04).
+		resolve = codexsandbox.Resolver{AODataDir: dataDir}.WritableRoots
 	}
 	roots, err := resolve(ctx, workspace, additional)
 	if err != nil {
@@ -261,7 +262,7 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 		return nil, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
 	}
 
-	roots, err := d.resolveWritableRoots(ctx, cfg.WorkspacePath, cfg.AdditionalDirectories)
+	roots, err := d.resolveWritableRoots(ctx, cfg.DataDir, cfg.WorkspacePath, cfg.AdditionalDirectories)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +318,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		return nil, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
 	}
 
-	roots, err := d.resolveWritableRoots(ctx, cfg.WorkspacePath, cfg.AdditionalDirectories)
+	roots, err := d.resolveWritableRoots(ctx, cfg.DataDir, cfg.WorkspacePath, cfg.AdditionalDirectories)
 	if err != nil {
 		return nil, err
 	}

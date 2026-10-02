@@ -151,3 +151,26 @@ func TestNonDefaultPoliciesCarryNoWritableRoots(t *testing.T) {
 		}
 	}
 }
+
+// Codex AR1A-FIN-04: the protected AO state is the launch's EFFECTIVE data dir
+// (e.g. moved by --data-dir), not only AO_DATA_DIR or the default. A git
+// directory inside it is refused, except AO's own scratch repository.
+func TestTheEffectiveDataDirIsProtected(t *testing.T) {
+	t.Setenv("AO_DATA_DIR", "")
+	data := canonicalTempDir(t)
+	inside := filepath.Join(data, "some-repo")
+	gitInit(t, inside)
+	plugin := &Plugin{resolvedBinary: "codex"}
+	if _, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{DataDir: data, WorkspacePath: inside, Permissions: ports.PermissionModeDefault}); err == nil {
+		t.Fatalf("a git directory inside the effective AO data dir was granted as a writable root")
+	}
+	scratch := filepath.Join(data, "scratch", "default")
+	gitInit(t, scratch)
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{DataDir: data, WorkspacePath: scratch, Permissions: ports.PermissionModeDefault})
+	if err != nil {
+		t.Fatalf("the AO scratch repository was refused: %v", err)
+	}
+	if got, want := addDirs(cmd), []string{filepath.Join(scratch, ".git")}; !slices.Equal(got, want) {
+		t.Fatalf("scratch --add-dir = %v, want %v", got, want)
+	}
+}
