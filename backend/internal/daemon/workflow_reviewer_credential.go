@@ -32,10 +32,26 @@ func reviewerRunIDFromHandle(handleID string) string {
 //     this run, this step and this launch generation, capped by the reviewer
 //     role -- session read/write and workflow read, and nothing else, whatever
 //     the account it acts for may do elsewhere.
-//   - not issuable on an installation that REQUIRES an identity: the launch is
-//     refused. Starting a reviewer that provably cannot report its verdict is
+//   - not issuable (mint or hand-over fails): the launch is refused on an
+//     installation that requires an identity, and -- since AR-1a (D-SEC-2) --
+//     for every run created expecting its reviewer's identity, trusted-local
+//     included. Only an unowned legacy run on trusted-local still continues
+//     header-less. Starting a reviewer that provably cannot report its verdict is
 //     the exact failure this mechanism exists to end, and doing it anyway would
 //     merely move the dead end thirty minutes later, to the staleness threshold.
+//
+// IssuesReviewerIdentity reports whether this launcher hands reviewers AO's own
+// credential. When it does, an owned run's review run is created with
+// ReviewerIdentityExpected, and a credential that cannot be minted or handed
+// over fails that launch on every installation (AR-1a D-SEC-2): a reviewer that
+// fell back to speaking header-less would be indistinguishable from the
+// worker's own shell, which is exactly the verdict forgery this closes.
+var _ workflowcore.ReviewerIdentityIssuer = (*workflowReviewerLauncher)(nil)
+
+func (l *workflowReviewerLauncher) IssuesReviewerIdentity() bool {
+	return l.credentials != nil
+}
+
 func (l *workflowReviewerLauncher) issueAgentCredential(
 	ctx context.Context, req workflowcore.ReviewerLaunchRequest, handleID string, env map[string]string,
 ) (string, error) {
@@ -62,9 +78,17 @@ func (l *workflowReviewerLauncher) issueAgentCredential(
 				"reviewer identity: this installation requires an authenticated identity and AO could not mint one for review run %s, so the reviewer could not record a verdict: %w",
 				req.RunID, err)
 		}
-		// Trusted-local: the reviewer's cookie-less call resolves the
-		// bootstrap admin anyway, so a missing credential costs nothing and
-		// must not cost a launch.
+		if req.ReviewerIdentityExpected {
+			// AR-1a (D-SEC-2): on trusted-local too. The run was created
+			// expecting its reviewer to hold an identity, so a header-less
+			// reviewer could not record its verdict; failing the launch lets
+			// the ordinary reviewer-launch retry try again instead of
+			// starting a dead end.
+			return "", fmt.Errorf("reviewer identity: AO could not mint a credential for review run %s: %w", req.RunID, err)
+		}
+		// Trusted-local, and a run that does not expect an identity (an
+		// unowned legacy run): the reviewer's header-less call still resolves
+		// the bootstrap owner, exactly as before.
 		return "", nil
 	}
 	path := agentcred.Path(l.dataDir, handleID)
@@ -82,7 +106,8 @@ func (l *workflowReviewerLauncher) issueAgentCredential(
 		// A credential the agent cannot read is the same as none at all, so it
 		// is taken back immediately rather than left live and unreachable.
 		l.revokeAgentCredential(ctx, req.RunID, "")
-		if l.requireAgentIdentity {
+		if l.requireAgentIdentity || req.ReviewerIdentityExpected {
+			// AR-1a (D-SEC-2): see the mint failure above.
 			return "", fmt.Errorf("reviewer identity: hand credential to review run %s: %w", req.RunID, werr)
 		}
 		return "", nil

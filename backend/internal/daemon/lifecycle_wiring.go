@@ -340,6 +340,12 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 // speak over a running review whose reviewer holds a live identity.
 var _ reviewsvc.ReviewerCredentialLedger = (*sqlite.Store)(nil)
 
+// AR-1a (Codex AR1A-02): the guarded header-less verdict write, and the
+// launcher capability that marks a run as expecting its reviewer's identity
+// (asserted in workflow_reviewer_credential.go), must both exist in
+// production -- or the pre-mint window reopens silently.
+var _ reviewsvc.ReviewerIdentityGuardedWriter = (*sqlite.Store)(nil)
+
 // runtimeMessageSender is the narrow part of the concrete runtime needed by
 // ao send. Both tmux.Runtime and conpty.Runtime implement this via SendMessage.
 type runtimeMessageSender interface {

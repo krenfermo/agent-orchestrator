@@ -222,6 +222,38 @@ func (r ReviewerRef) String() string {
 // convention: a launcher that does not implement it keeps today's behaviour,
 // and the protocol degrades to a BOUNDED incident on genuine uncertainty rather
 // than to a guess.
+// ReviewerIdentityIssuer is implemented by a ReviewerLauncher that hands every
+// reviewer it starts AO's own credential and refuses to start one it cannot.
+// A review run created for such a launcher is marked ReviewerIdentityExpected
+// in the same insert, so a header-less verdict cannot be recorded for it while
+// it is running -- not even before the credential is minted (AR-1a D-SEC-2).
+// The production launcher's satisfaction of it is asserted at compile time in
+// the daemon wiring.
+type ReviewerIdentityIssuer interface {
+	IssuesReviewerIdentity() bool
+}
+
+// WorkflowRunOwnerReader is the owner lookup the reviewer-identity decision
+// needs, wired explicitly as Deps.RunOwners (the coordinator's own store may be
+// a decorator that does not carry it).
+type WorkflowRunOwnerReader interface {
+	GetWorkflowRunOwner(ctx stdctx.Context, id string) (*domain.UserID, error)
+}
+
+// reviewerIdentityOwner is the account a reviewer credential for this run would
+// be minted for: the run's recorded owner, or empty when it has none (legacy
+// unowned runs) or it cannot be read.
+func (c *Coordinator) reviewerIdentityOwner(ctx stdctx.Context, runID string) domain.UserID {
+	if c.runOwners == nil {
+		return ""
+	}
+	owner, err := c.runOwners.GetWorkflowRunOwner(ctx, runID)
+	if err != nil || owner == nil {
+		return ""
+	}
+	return *owner
+}
+
 type ReviewerEnsurer interface {
 	// ReviewerIdentity returns the deterministic external handle this request
 	// will launch under. It must be pure and stable: the same request must
@@ -258,14 +290,18 @@ func (c *Coordinator) reviewerEnsurer() (ReviewerEnsurer, bool) {
 // ReviewerLaunchRequest is workflow's request to actually start a reviewer
 // process/pane over a worktree.
 type ReviewerLaunchRequest struct {
-	Harness         domain.ReviewerHarness
-	WorkerSessionID domain.SessionID
-	ProjectID       domain.ProjectID
-	ReviewID        string // the parent domain.Review row id
-	RunID           string // the domain.ReviewRun id
-	WorkspacePath   string
-	Prompt          string
-	SystemPrompt    string
+	// ReviewerIdentityExpected mirrors the review run's marker (AR-1a D-SEC-2):
+	// the launcher must refuse rather than start a reviewer without AO's own
+	// credential for such a run.
+	ReviewerIdentityExpected bool
+	Harness                  domain.ReviewerHarness
+	WorkerSessionID          domain.SessionID
+	ProjectID                domain.ProjectID
+	ReviewID                 string // the parent domain.Review row id
+	RunID                    string // the domain.ReviewRun id
+	WorkspacePath            string
+	Prompt                   string
+	SystemPrompt             string
 	// RuntimeEnv overrides subprocess env for the reviewer process
 	// (Checkpoint 8P-B.1) -- the workflow run owner's isolated
 	// runtime-home, resolved once by Coordinator.resolveRuntimeEnv. Nil
@@ -1562,18 +1598,29 @@ func (c *Coordinator) dispatchReviewFromPending(
 	}
 
 	reviewRunID := plannedReviewRunID
+	// AR-1a (Codex AR1A-02): decided in the SAME insert that makes the run
+	// visible as running, so there is no window in which a header-less caller
+	// can record its verdict before the reviewer's credential exists. Only for
+	// a run with an owner: that is the account the credential is minted for,
+	// and an unowned (legacy) run keeps its previous behaviour.
+	identityOwner := c.reviewerIdentityOwner(ctx, run.ID)
+	identityExpected := false
+	if issuer, ok := c.reviewerLauncher.(ReviewerIdentityIssuer); ok && identityOwner != "" {
+		identityExpected = issuer.IssuesReviewerIdentity()
+	}
 	reviewRun := domain.ReviewRun{
-		ID:            reviewRunID,
-		ReviewID:      reviewRow.ID,
-		SessionID:     sessionID,
-		BatchID:       c.newID(),
-		Harness:       harness,
-		TriggerSource: domain.ReviewTriggerManual,
-		PRURL:         "",
-		TargetSHA:     targetSHA,
-		Status:        domain.ReviewRunRunning,
-		Verdict:       domain.VerdictNone,
-		CreatedAt:     now,
+		ReviewerIdentityExpected: identityExpected,
+		ID:                       reviewRunID,
+		ReviewID:                 reviewRow.ID,
+		SessionID:                sessionID,
+		BatchID:                  c.newID(),
+		Harness:                  harness,
+		TriggerSource:            domain.ReviewTriggerManual,
+		PRURL:                    "",
+		TargetSHA:                targetSHA,
+		Status:                   domain.ReviewRunRunning,
+		Verdict:                  domain.VerdictNone,
+		CreatedAt:                now,
 		// AutoInjectReview is deliberately false, never the session's live
 		// policy default. internal/service/review.Service's delivery path
 		// (deliverSubmitted -> lifecycle.ApplyReviewBatch) auto-injects a
@@ -1723,6 +1770,15 @@ func (c *Coordinator) dispatchReviewFromPending(
 		WorkflowStepID: reviewStep.ID,
 		OwnerUserID:    runOwner,
 		Generation:     int64(cycleNumber),
+		// AR-1a: the launcher must not start a header-less reviewer for a run
+		// created expecting its identity.
+		ReviewerIdentityExpected: identityExpected,
+	}
+	if launchReq.OwnerUserID == "" {
+		// The run's recorded owner, even where runtime isolation resolved
+		// none: the credential the run was marked as expecting is minted for
+		// exactly that account.
+		launchReq.OwnerUserID = identityOwner
 	}
 	// The last durable check, carried INTO the launch. Context provisioning
 	// runs inside the launcher chain and can take seconds, so a check made

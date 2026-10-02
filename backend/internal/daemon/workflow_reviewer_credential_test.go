@@ -281,3 +281,23 @@ func TestCancellingAnAlreadyGoneReviewerIsASuccessfulNoOp(t *testing.T) {
 		t.Fatalf("revocations = %v; a replayed cancellation revoked more than once", issuer.revoked)
 	}
 }
+
+// AR-1a / D-SEC-2 (Codex AR1A-02): a run created expecting its reviewer's
+// identity never gets a header-less reviewer, even on trusted-local. Both a
+// failed mint and a failed hand-over refuse the launch before a pane exists.
+func TestTrustedLocalReviewerLaunchRefusesWhenTheRunExpectsAnIdentity(t *testing.T) {
+	issuer := &fakeCredentialIssuer{issueErr: errors.New("database is locked")}
+	l, rt, _ := newCredentialLauncher(t, issuer, false)
+	req := credentialLaunchRequest()
+	req.ReviewerIdentityExpected = true
+
+	if _, err := l.Launch(context.Background(), req); err == nil {
+		t.Fatalf("Launch succeeded without the identity the run expects")
+	}
+	if rt.calls != 0 {
+		t.Fatalf("a header-less reviewer pane was created (%d calls)", rt.calls)
+	}
+	if !l.IssuesReviewerIdentity() {
+		t.Fatalf("a launcher with an identity layer must report that it issues reviewer identities")
+	}
+}

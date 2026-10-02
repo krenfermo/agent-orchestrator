@@ -312,6 +312,14 @@ type ReviewerCredentialLedger interface {
 	ListAgentCredentialsForReviewRun(ctx context.Context, reviewRunID string) ([]domain.AgentCredential, error)
 }
 
+// ReviewerIdentityGuardedWriter is the verdict write for a submitter that
+// presented no agent credential: it lands only while no reviewer identity
+// speaks for the run, decided in ONE statement (Codex AR1A-02). The production
+// store carries it; discovered on the store for the same reason as the ledger.
+type ReviewerIdentityGuardedWriter interface {
+	UpdateReviewRunResultWithoutReviewerIdentity(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
+}
+
 // authorizeSubmission decides whether submitter may record a verdict on run.
 //
 //   - An agent may record a verdict only as the reviewer AO launched for exactly
@@ -343,6 +351,12 @@ func (s *Service) authorizeSubmission(ctx context.Context, submitter Submitter, 
 	if run.Status != domain.ReviewRunRunning {
 		return nil
 	}
+	if run.ReviewerIdentityExpected {
+		// Created for a launcher that hands its reviewer AO's own credential
+		// and refuses to launch one without it: the reviewer will speak with
+		// that identity, including in the window before it is minted.
+		return fmt.Errorf("%w: review run %q is reviewed by the reviewer AO launched for it; only that reviewer may record its verdict", ErrForbidden, run.ID)
+	}
 	ledger, ok := s.store.(ReviewerCredentialLedger)
 	if !ok {
 		return nil
@@ -351,9 +365,10 @@ func (s *Service) authorizeSubmission(ctx context.Context, submitter Submitter, 
 	if err != nil {
 		return fmt.Errorf("%w: the reviewer credentials of review run %q could not be read: %v", ErrForbidden, run.ID, err)
 	}
-	now := s.clock()
 	for _, c := range creds {
-		if c.Role == domain.AgentRoleReviewer && c.Active(now) {
+		// Any unrevoked reviewer credential counts, expired or not -- the same
+		// conservative predicate the guarded write evaluates in SQL.
+		if c.Role == domain.AgentRoleReviewer && c.RevokedAt == nil {
 			return fmt.Errorf("%w: review run %q is being reviewed by the reviewer AO launched for it; only that reviewer may record its verdict", ErrForbidden, run.ID)
 		}
 	}
@@ -496,9 +511,27 @@ func (s *Service) submitOne(ctx context.Context, submitter Submitter, workerID d
 		if !found {
 			return domain.ReviewRun{}, fmt.Errorf("%w: worker session %q", ErrNotFound, workerID)
 		}
-		updated, err := s.store.UpdateReviewRunResult(ctx, run.ID, domain.ReviewRunComplete, verdict, body, githubReviewID, session.AutoInjectReview)
+		write := s.store.UpdateReviewRunResult
+		if guarded, ok := s.store.(ReviewerIdentityGuardedWriter); ok && submitter.Agent == nil {
+			// AR-1a (Codex AR1A-02): the authorization above read the ledger;
+			// the write re-asserts it atomically, so a reviewer credential
+			// minted in between cannot be raced.
+			write = guarded.UpdateReviewRunResultWithoutReviewerIdentity
+		}
+		updated, err := write(ctx, run.ID, domain.ReviewRunComplete, verdict, body, githubReviewID, session.AutoInjectReview)
 		if err != nil {
 			return domain.ReviewRun{}, err
+		}
+		if !updated && submitter.Agent == nil {
+			latest, found, rerr := s.store.GetReviewRun(ctx, run.ID)
+			if rerr != nil {
+				return domain.ReviewRun{}, rerr
+			}
+			if found && latest.Status == domain.ReviewRunRunning {
+				// Still running, so the guard refused: a reviewer identity
+				// now speaks for this run.
+				return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is reviewed by the reviewer AO launched for it; only that reviewer may record its verdict", ErrForbidden, run.ID)
+			}
 		}
 		if !updated {
 			// The CAS lost. Between this call reading the run as RUNNING and the

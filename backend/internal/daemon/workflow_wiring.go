@@ -296,6 +296,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		PlannerUsage: plannerUsage,
 		Sessions:     store,
 		ReviewRuns:   store,
+		RunOwners:    store,
 		Spawner:      sessionMgr,
 		SessionFacts: store,
 		// P7: the per-session context reading the 8M lifecycle policy declared

@@ -76,6 +76,11 @@ type ReviewRun struct {
 	// SupersededBy names the review run that took authority over this one.
 	// Empty when nothing replaced it.
 	SupersededBy string `json:"supersededBy,omitempty"`
+	// ReviewerIdentityExpected is true when the run was created for a launcher
+	// that hands its reviewer AO's own credential (and refuses to launch one it
+	// cannot). While such a run is running, only that reviewer may record its
+	// verdict (AR-1a D-SEC-2). Internal: not part of the wire shape.
+	ReviewerIdentityExpected bool `json:"-"`
 }
 
 // EffectiveVerdict is THE verdict this review run produced, whichever column it

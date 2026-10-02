@@ -176,12 +176,9 @@ func TestAPersonStillRecordsWhenTheReviewerHoldsNoLiveIdentity(t *testing.T) {
 	revoked := liveReviewerCredential("run-1")
 	at := authorityNow.Add(-time.Minute)
 	revoked.RevokedAt = &at
-	expired := liveReviewerCredential("run-1")
-	expired.ExpiresAt = authorityNow.Add(-time.Second)
 	for name, creds := range map[string][]domain.AgentCredential{
 		"none minted":       nil,
 		"revoked at launch": {revoked},
-		"expired":           {expired},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st := &ledgerStore{fakeStore: &fakeStore{ok: true, run: runningRun(), prs: []domain.PullRequest{{URL: "pr1", HeadSHA: "sha1"}}}, creds: creds}
@@ -213,5 +210,82 @@ func TestAnUnreadableCredentialLedgerRefusesAPersonsSubmission(t *testing.T) {
 	st := &ledgerStore{fakeStore: &fakeStore{ok: true, run: runningRun()}, credErr: errors.New("database is locked")}
 	if _, err := submitAs(t, newAuthorityService(st), Submitter{}, domain.VerdictApproved, ""); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("unreadable ledger err = %v, want ErrForbidden", err)
+	}
+}
+
+// An unrevoked reviewer credential counts even once expired: the same
+// conservative predicate the guarded SQL write evaluates (Codex AR1A-02).
+func TestAnExpiredButUnrevokedReviewerCredentialStillSpeaksForTheRun(t *testing.T) {
+	expired := liveReviewerCredential("run-1")
+	expired.ExpiresAt = authorityNow.Add(-time.Second)
+	st := &ledgerStore{fakeStore: &fakeStore{ok: true, run: runningRun()}, creds: []domain.AgentCredential{expired}}
+	if _, err := submitAs(t, newAuthorityService(st), Submitter{}, domain.VerdictApproved, ""); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+// THE PRE-MINT WINDOW (Codex AR1A-02): the run is already running but its
+// reviewer's credential has not been minted yet. A run created for a launcher
+// that issues reviewer identities refuses a header-less verdict anyway.
+func TestAHeaderlessVerdictIsRefusedBeforeTheReviewerCredentialIsMinted(t *testing.T) {
+	run := runningRun()
+	run.ReviewerIdentityExpected = true
+	st := &guardedStore{ledgerStore: &ledgerStore{fakeStore: &fakeStore{ok: true, run: run}}}
+	if _, err := submitAs(t, newAuthorityService(st), Submitter{}, domain.VerdictApproved, ""); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+	if st.updateCalls != 0 || st.guardedCalls != 0 {
+		t.Fatalf("a verdict write was attempted (plain=%d guarded=%d)", st.updateCalls, st.guardedCalls)
+	}
+	// The reviewer itself, once minted, still records it.
+	st.creds = []domain.AgentCredential{liveReviewerCredential("run-1")}
+	if _, err := submitAs(t, newAuthorityService(st), reviewer("run-1"), domain.VerdictApproved, ""); err != nil {
+		t.Fatalf("the launched reviewer was refused: %v", err)
+	}
+}
+
+// guardedStore adds the production guarded write; refuse simulates a reviewer
+// credential minted between the ledger read and the write.
+type guardedStore struct {
+	*ledgerStore
+	refuse       bool
+	cancelFirst  bool
+	guardedCalls int
+}
+
+func (g *guardedStore) UpdateReviewRunResultWithoutReviewerIdentity(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error) {
+	g.guardedCalls++
+	if g.cancelFirst {
+		g.run.Status = domain.ReviewRunCancelled
+		return false, nil
+	}
+	if g.refuse || g.run.ReviewerIdentityExpected {
+		return false, nil
+	}
+	return g.UpdateReviewRunResult(ctx, id, status, verdict, body, githubReviewID, autoInjectReview)
+}
+
+// THE READ-THEN-WRITE RACE (Codex AR1A-02): the ledger said "no reviewer
+// identity", then one was minted before the write. The guarded write refuses
+// and, the run still running, the submission is forbidden -- never recorded.
+func TestACredentialMintedBetweenCheckAndWriteRefusesTheHeaderlessVerdict(t *testing.T) {
+	st := &guardedStore{ledgerStore: &ledgerStore{fakeStore: &fakeStore{ok: true, run: runningRun()}}, refuse: true}
+	if _, err := submitAs(t, newAuthorityService(st), Submitter{}, domain.VerdictApproved, ""); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+	if st.guardedCalls != 1 || st.updateCalls != 0 || st.lateVerdictCalls != 0 {
+		t.Fatalf("guarded=%d plain=%d late=%d; want exactly one refused guarded write", st.guardedCalls, st.updateCalls, st.lateVerdictCalls)
+	}
+}
+
+// If AO closed the run out between the read and the guarded write, the verdict
+// is a late one and is preserved exactly as before.
+func TestAGuardedWriteLosingToClosureStillPreservesTheLateVerdict(t *testing.T) {
+	st := &guardedStore{ledgerStore: &ledgerStore{fakeStore: &fakeStore{ok: true, run: runningRun()}}, cancelFirst: true}
+	if _, err := submitAs(t, newAuthorityService(st), Submitter{}, domain.VerdictApproved, ""); err != nil {
+		t.Fatalf("late verdict refused: %v", err)
+	}
+	if st.lateVerdictCalls != 1 {
+		t.Fatalf("late verdict not preserved (calls=%d)", st.lateVerdictCalls)
 	}
 }
