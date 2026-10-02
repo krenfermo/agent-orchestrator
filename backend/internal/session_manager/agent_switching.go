@@ -738,6 +738,7 @@ func (m *Manager) prepareTargetActivation(ctx context.Context, store ports.Agent
 		return preparedTargetActivation{}, fmt.Errorf("system prompt file: %w", err)
 	}
 	config := effectiveAgentConfig(rec.Kind, project.Config)
+	m.auditPermissionBypass("agent-switch", rec.ID, rec.ProjectID, harness, config)
 	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
 	// Checkpoint 8P-B.2 §13: a provider switch (Claude<->Codex, ...) keeps
 	// the SAME session row/id (runtimeCfg.SessionID below is the original
