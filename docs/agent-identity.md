@@ -141,11 +141,20 @@ expired, revoked, or unevaluable -- is answered `401 AGENT_CREDENTIAL_INVALID`
 on every installation. Before, on a desktop install, such a request resolved
 to the bootstrap owner, so any stale or forged token was a key to every route.
 A request that presents **no** agent credential is unaffected and keeps
-trusted-local synthesis. A reviewer whose run AO already closed out is
-normally unaffected too: the revocation sweep removes its credential file with
-the credential, so its late `ao review submit` arrives header-less and its
-verdict is still preserved; only a submission landing in the instant between
-revocation and file removal is now refused.
+trusted-local synthesis.
+
+Late verdicts (a review run AO already closed out, e.g. on the stall path):
+- for a run created expecting its reviewer's identity
+  (`reviewer_identity_expected = 1`), only that reviewer's credential may record
+  a verdict, late ones included (Codex AR1A-FIN-02): a header-less late verdict
+  could otherwise be forged by the worker and later adopted. The reviewer's own
+  late verdict still lands while its credential is live -- the revocation
+  sweep follows closure (within its interval), it never anticipates it; a
+  verdict arriving after the credential and its file were swept is not
+  recorded and the workflow's ordinary review relaunch applies;
+- for a run without that marker (an unowned legacy run, or a build without the
+  identity layer) the reviewer's header-less late `ao review submit` is still
+  preserved exactly as before.
 
 The CLI enforces the mirror rule. Inside an AO-launched runtime — detected by
 `AO_AGENT_CREDENTIAL_FILE` or the runtime's own `AO_SESSION_OWNER` — it presents

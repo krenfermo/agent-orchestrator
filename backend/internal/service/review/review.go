@@ -348,14 +348,17 @@ func (s *Service) authorizeSubmission(ctx context.Context, submitter Submitter, 
 		}
 		return nil
 	}
+	if run.ReviewerIdentityExpected {
+		// Whatever the run's status (Codex AR1A-FIN-02): a run created for a
+		// reviewer that holds AO's own credential is spoken for only by that
+		// credential -- including a LATE verdict after AO closed the run, which
+		// could otherwise be forged header-less and later adopted. The
+		// reviewer's own late submission still lands while its credential is
+		// live (the revocation sweep follows closure, it never anticipates it).
+		return fmt.Errorf("%w: review run %q is reviewed by the reviewer AO launched for it; only that reviewer may record its verdict", ErrForbidden, run.ID)
+	}
 	if run.Status != domain.ReviewRunRunning {
 		return nil
-	}
-	if run.ReviewerIdentityExpected {
-		// Created for a launcher that hands its reviewer AO's own credential
-		// and refuses to launch one without it: the reviewer will speak with
-		// that identity, including in the window before it is minted.
-		return fmt.Errorf("%w: review run %q is reviewed by the reviewer AO launched for it; only that reviewer may record its verdict", ErrForbidden, run.ID)
 	}
 	ledger, ok := s.store.(ReviewerCredentialLedger)
 	if !ok {

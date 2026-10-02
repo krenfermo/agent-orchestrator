@@ -26,7 +26,8 @@ On a trusted-local (default desktop) installation, a request that presents **no*
 
 ## Compatibility notes
 
-- Late reviewer verdicts after AO closes a run arrive header-less (credential and file swept together) and are still preserved.
+- Late reviewer verdicts: on identity-bound runs only the reviewer's own (still live) credential may record one; a header-less late verdict is refused (AR1A-FIN-02). On unmarked legacy runs header-less late verdicts are still preserved.
+- Codex read-only launchers (reviewer, decision resolver, incident agent) never receive writable roots; roots apply only to AO's sandboxed default (AR1A-FIN-01). Git directories inside AO state are refused except AO's scratch repository, and `$HOME/.git` is always refused (AR1A-FIN-03).
 - Unowned legacy runs keep their previous review behaviour (no identity marker, header-less reviewer on trusted-local).
 - Inside the sandboxed default, a Codex session's explicit extra writable roots are its workspace project's child roots and the common git directories of its repositories (`internal/codexsandbox`, `--add-dir` / `writable_roots`), so `git add` / `git commit` work in AO worktrees and child repositories (AR1A-INT-01, verified against the installed Codex). Anything else outside the worktree -- `~/.ao`, `$HOME`, the main repository's checkout -- stays denied; a Codex session that genuinely needs it requires the explicit `bypass-permissions` policy.
 - `approvedBy` is no longer required in the amendment / exception request bodies; when present it must name the authenticated principal.

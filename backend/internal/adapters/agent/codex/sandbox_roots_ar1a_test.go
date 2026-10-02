@@ -130,3 +130,24 @@ func TestInvalidRootsRefuseTheLaunch(t *testing.T) {
 		t.Fatalf("default launch is not sandboxed: %v", cmd)
 	}
 }
+
+// Codex AR1A-FIN-01: writable roots belong only to AO's sandboxed default.
+// auto / accept-edits are what AO's read-only launchers use before adding
+// `--sandbox read-only`; they must never carry a writable --add-dir.
+func TestNonDefaultPoliciesCarryNoWritableRoots(t *testing.T) {
+	ws := canonicalTempDir(t)
+	gitInit(t, ws)
+	plugin := &Plugin{resolvedBinary: "codex", writableRoots: func(context.Context, string, []string) ([]string, error) {
+		t.Fatal("writable roots resolved for a non-default policy")
+		return nil, nil
+	}}
+	for _, perm := range []ports.PermissionMode{ports.PermissionModeAuto, ports.PermissionModeAcceptEdits, ports.PermissionModeBypassPermissions} {
+		cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{WorkspacePath: ws, Permissions: perm, AdditionalDirectories: []string{ws}})
+		if err != nil {
+			t.Fatalf("%s: %v", perm, err)
+		}
+		if got := addDirs(cmd); len(got) != 0 {
+			t.Fatalf("%s launch carries --add-dir %v", perm, got)
+		}
+	}
+}

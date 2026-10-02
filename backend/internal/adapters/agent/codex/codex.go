@@ -44,13 +44,18 @@ type Plugin struct {
 }
 
 // sandboxAddDirArgs returns `--add-dir <root>` for every explicit extra
-// writable root a sandboxed launch needs: the git directories of the
+// writable root a launch in AO's sandboxed default (workspace-write) needs: the git directories of the
 // workspace's repositories (without them `git add` / `git commit` are denied
 // inside workspace-write) and a workspace project's child roots. An explicit
 // bypass launch has no sandbox and gets none. Fail closed: roots that cannot be
 // established refuse the launch rather than start a session with a guess.
 func (p *Plugin) sandboxAddDirArgs(ctx context.Context, permissions ports.PermissionMode, workspace string, additional []string) ([]string, error) {
-	if ports.NormalizePermissionMode(permissions) == ports.PermissionModeBypassPermissions {
+	// Only for AO's own sandboxed default (workspace-write). An explicit bypass
+	// has no sandbox; auto / accept-edits leave the sandbox to Codex and are
+	// also what AO's read-only launchers (reviewer, decision resolver, incident
+	// agent) use before adding `--sandbox read-only` -- a writable `--add-dir`
+	// there would contradict the read-only guarantee (Codex AR1A-FIN-01).
+	if ports.NormalizePermissionMode(permissions) != ports.PermissionModeDefault {
 		return nil, nil
 	}
 	resolve := p.writableRoots

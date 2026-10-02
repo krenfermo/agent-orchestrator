@@ -162,3 +162,39 @@ func TestAGitDirectoryExposingProtectedStateIsRefused(t *testing.T) {
 		t.Fatalf("a failing git query err=%v, want ErrInvalidRoot (never 'not a repository')", err)
 	}
 }
+
+// Codex AR1A-FIN-03: git, not AO, decides where a git directory is. It may not
+// be the home directory's own .git, nor lie inside AO's state -- except AO's
+// scratch area, where AO keeps the scratch project's repository.
+func TestGitDirectoryPolicy(t *testing.T) {
+	ws := t.TempDir()
+	home := t.TempDir()
+	data := filepath.Join(home, ".ao", "data")
+	for _, d := range []string{filepath.Join(home, ".git"), filepath.Join(data, "other", ".git"), filepath.Join(data, "scratch", "default", ".git"), filepath.Join(home, ".ao", "x", ".git"), filepath.Join(home, "code", "repo", ".git")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		gitDir string
+		ok     bool
+	}{
+		{"home's own .git", filepath.Join(home, ".git"), false},
+		{"inside AO data", filepath.Join(data, "other", ".git"), false},
+		{"inside ~/.ao", filepath.Join(home, ".ao", "x", ".git"), false},
+		{"AO scratch repository", filepath.Join(data, "scratch", "default", ".git"), true},
+		{"an ordinary repository under home", filepath.Join(home, "code", "repo", ".git"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Resolver{Home: home, AODataDir: data, GitCommonDir: func(context.Context, string) (string, bool, error) { return tc.gitDir, true, nil }}
+			roots, err := r.WritableRoots(context.Background(), ws, nil)
+			if tc.ok && err != nil {
+				t.Fatalf("refused %q: %v", tc.gitDir, err)
+			}
+			if !tc.ok && !errors.Is(err, ErrInvalidRoot) {
+				t.Fatalf("accepted %q as a writable root: %v", tc.gitDir, roots)
+			}
+		})
+	}
+}

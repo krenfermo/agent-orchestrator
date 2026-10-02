@@ -289,3 +289,26 @@ func TestAGuardedWriteLosingToClosureStillPreservesTheLateVerdict(t *testing.T) 
 		t.Fatalf("late verdict not preserved (calls=%d)", st.lateVerdictCalls)
 	}
 }
+
+// Codex AR1A-FIN-02: a run created expecting its reviewer's identity is spoken
+// for only by that credential whatever its status -- a header-less LATE verdict
+// after AO closed it is refused (it could otherwise be forged and adopted),
+// while the reviewer's own late verdict is still preserved.
+func TestAnIdentityBoundClosedRunRefusesAHeaderlessLateVerdict(t *testing.T) {
+	run := runningRun()
+	run.Status = domain.ReviewRunCancelled
+	run.ReviewerIdentityExpected = true
+	st := &ledgerStore{fakeStore: &fakeStore{ok: true, run: run}}
+	if _, err := submitAs(t, newAuthorityService(st), Submitter{}, domain.VerdictApproved, ""); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("header-less late verdict err = %v, want ErrForbidden", err)
+	}
+	if st.lateVerdictCalls != 0 {
+		t.Fatalf("a header-less late verdict was preserved")
+	}
+	if _, err := submitAs(t, newAuthorityService(st), reviewer("run-1"), domain.VerdictApproved, ""); err != nil {
+		t.Fatalf("the reviewer's own late verdict was refused: %v", err)
+	}
+	if st.lateVerdictCalls != 1 {
+		t.Fatalf("the reviewer's late verdict was not preserved (calls=%d)", st.lateVerdictCalls)
+	}
+}

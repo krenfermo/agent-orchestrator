@@ -69,6 +69,10 @@ func (r Resolver) WritableRoots(ctx context.Context, workspace string, additiona
 	if err != nil {
 		return nil, err
 	}
+	gitPolicy, err := r.gitDirPolicy()
+	if err != nil {
+		return nil, err
+	}
 
 	var roots []string
 	seen := map[string]bool{}
@@ -128,11 +132,69 @@ func (r Resolver) WritableRoots(ctx context.Context, workspace string, additiona
 		if err != nil {
 			return nil, fmt.Errorf("%w: git directory %q of %q: %w", ErrInvalidRoot, common, repo, err)
 		}
+		if err := gitPolicy.check(resolved); err != nil {
+			return nil, err
+		}
 		if err := add(resolved); err != nil {
 			return nil, err
 		}
 	}
 	return roots, nil
+}
+
+// gitDirPolicy is the stricter rule for git common directories (Codex
+// AR1A-FIN-03): git, not AO, decides where a repository's git directory is, so
+// a crafted `.git` indirection could point it anywhere. A git directory may not
+// be the home directory's own `.git` (that would make the whole home a
+// repository AO writes into), and may not lie inside AO's own state at all --
+// except under AO's scratch area, where AO itself keeps the scratch project's
+// repository.
+type gitDirPolicy struct {
+	homeGit  string
+	aoState  []string
+	aoAllows []string
+}
+
+func (r Resolver) gitDirPolicy() (gitDirPolicy, error) {
+	home := r.Home
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return gitDirPolicy{}, fmt.Errorf("%w: home directory: %w", ErrInvalidRoot, err)
+		}
+		home = h
+	}
+	home = resolveLoose(home)
+	data := r.AODataDir
+	if data == "" {
+		data = os.Getenv("AO_DATA_DIR")
+	}
+	if data == "" {
+		data = filepath.Join(home, ".ao", "data")
+	}
+	data = resolveLoose(data)
+	return gitDirPolicy{
+		homeGit:  filepath.Join(home, ".git"),
+		aoState:  []string{filepath.Join(home, ".ao"), data},
+		aoAllows: []string{filepath.Join(data, "scratch")},
+	}, nil
+}
+
+func (p gitDirPolicy) check(gitDir string) error {
+	if gitDir == p.homeGit {
+		return fmt.Errorf("%w: git directory %q is the home directory's own repository", ErrInvalidRoot, gitDir)
+	}
+	for _, allowed := range p.aoAllows {
+		if within(gitDir, allowed) {
+			return nil
+		}
+	}
+	for _, state := range p.aoState {
+		if within(gitDir, state) {
+			return fmt.Errorf("%w: git directory %q lies inside AO's own state %q", ErrInvalidRoot, gitDir, state)
+		}
+	}
+	return nil
 }
 
 // protected returns the directories no root may equal or contain.
