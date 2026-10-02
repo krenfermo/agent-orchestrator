@@ -28,5 +28,5 @@ On a trusted-local (default desktop) installation, a request that presents **no*
 
 - Late reviewer verdicts after AO closes a run arrive header-less (credential and file swept together) and are still preserved.
 - Unowned legacy runs keep their previous review behaviour (no identity marker, header-less reviewer on trusted-local).
-- Codex workers that relied on the implicit bypass to write outside their worktree need the explicit `bypass-permissions` policy or a sandbox writable root.
+- Inside the sandboxed default, a Codex session's explicit extra writable roots are its workspace project's child roots and the common git directories of its repositories (`internal/codexsandbox`, `--add-dir` / `writable_roots`), so `git add` / `git commit` work in AO worktrees and child repositories (AR1A-INT-01, verified against the installed Codex). Anything else outside the worktree -- `~/.ao`, `$HOME`, the main repository's checkout -- stays denied; a Codex session that genuinely needs it requires the explicit `bypass-permissions` policy.
 - `approvedBy` is no longer required in the amendment / exception request bodies; when present it must name the authenticated principal.
