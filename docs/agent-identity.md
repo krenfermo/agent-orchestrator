@@ -170,6 +170,13 @@ layer) still launches a header-less reviewer on trusted-local, whose call
 resolves the bootstrap admin as before. A failure to READ the run's owner is
 never treated as "unowned": the dispatch refuses before creating the run.
 
+The reviewer's credential follows that marker: on trusted-local a reviewer is
+minted a credential only for a run created expecting one, so a credential can
+never appear on a running run that was created without the marker (for
+example a run that was unowned at review creation and was assigned an owner a
+moment later). An installation that requires an identity always mints, because
+there a header-less request resolves nobody.
+
 ## Recovering runs already stranded
 
 `review_dispatch.go`'s ambiguous-review recovery previously acted only on

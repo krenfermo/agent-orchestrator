@@ -302,3 +302,38 @@ func TestTrustedLocalReviewerLaunchRefusesWhenTheRunExpectsAnIdentity(t *testing
 		t.Fatalf("a launcher with an identity layer must report that it issues reviewer identities")
 	}
 }
+
+// Codex AR1A-R3-01: the reviewer's credential follows the run's identity
+// marker, so a credential can never appear on a running run that was created
+// without it (for example a run that was unowned when its review was created
+// and was assigned an owner a moment later).
+func TestReviewerCredentialFollowsTheRunsIdentityMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		expected        bool
+		requireIdentity bool
+		wantMint        bool
+	}{
+		{"trusted-local, run not marked: no credential", false, false, false},
+		{"trusted-local, run marked: credential", true, false, true},
+		{"identity required, run not marked: credential", false, true, true},
+		{"identity required, run marked: credential", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issuer := &fakeCredentialIssuer{token: "ao_agent_tok"}
+			l, rt, _ := newCredentialLauncher(t, issuer, tc.requireIdentity)
+			req := credentialLaunchRequest()
+			req.ReviewerIdentityExpected = tc.expected
+			if _, err := l.Launch(context.Background(), req); err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if got := len(issuer.issued) > 0; got != tc.wantMint {
+				t.Fatalf("minted=%v, want %v", got, tc.wantMint)
+			}
+			_, exported := rt.lastCfg.Env[agentcred.EnvCredentialFile]
+			if exported != tc.wantMint {
+				t.Fatalf("credential path exported=%v, want %v", exported, tc.wantMint)
+			}
+		})
+	}
+}

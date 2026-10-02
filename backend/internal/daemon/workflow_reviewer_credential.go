@@ -58,6 +58,17 @@ func (l *workflowReviewerLauncher) issueAgentCredential(
 	if l.credentials == nil {
 		return "", nil
 	}
+	if !req.ReviewerIdentityExpected && !l.requireAgentIdentity {
+		// AR-1a (Codex AR1A-R3-01): the credential follows the run's marker.
+		// A run created WITHOUT the identity expectation (unowned when it was
+		// created, even if an owner was assigned since) gets a header-less
+		// reviewer exactly as before -- minting one now would let a credential
+		// appear on an unmarked running run, reopening the window in which a
+		// header-less verdict is still accepted before the credential exists.
+		// An installation that requires an identity always mints: there a
+		// header-less request resolves nobody, so no such window exists.
+		return "", nil
+	}
 	issued, err := l.credentials.Issue(ctx, agentauth.IssueInput{
 		Role:      domain.AgentRoleReviewer,
 		UserID:    req.OwnerUserID,
