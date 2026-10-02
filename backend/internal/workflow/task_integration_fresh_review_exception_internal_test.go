@@ -122,6 +122,7 @@ func (fx *exceptionFixture) authorize(by, reason string) (IntegrationFreshReview
 	fx.t.Helper()
 	return fx.coord.AuthorizeIntegrationFreshReviewException(fx.ctx, IntegrationFreshReviewExceptionRequest{
 		MasterRunID: "wf-exc-master", TaskID: fx.taskID, ApprovedBy: by, Reason: reason,
+		ApprovedByUserID: "user-joaquin", ApprovedAuthMethod: domain.AuthMethodPassword,
 	})
 }
 
@@ -355,6 +356,7 @@ func TestReauthorizeGrantsASecondGenerationForTheSameWorkspace(t *testing.T) {
 	second, err := fx.coord.AuthorizeIntegrationFreshReviewException(fx.ctx, IntegrationFreshReviewExceptionRequest{
 		MasterRunID: "wf-exc-master", TaskID: fx.taskID,
 		ApprovedBy: "joaquin", Reason: "the first generation was consumed by a dispatch defect, since fixed",
+		ApprovedByUserID: "user-joaquin", ApprovedAuthMethod: domain.AuthMethodPassword,
 		Reauthorize: true,
 	})
 	if err != nil {
@@ -382,6 +384,7 @@ func TestReauthorizeStillRefusesAnUnjustifiedGrant(t *testing.T) {
 	_, err := fx.coord.AuthorizeIntegrationFreshReviewException(fx.ctx, IntegrationFreshReviewExceptionRequest{
 		MasterRunID: "wf-exc-master", TaskID: fx.taskID,
 		ApprovedBy: "joaquin", Reason: "again", Reauthorize: true,
+		ApprovedByUserID: "user-joaquin", ApprovedAuthMethod: domain.AuthMethodPassword,
 	})
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid: re-authorizing does not bypass the budget check", err)
@@ -390,5 +393,35 @@ func TestReauthorizeStillRefusesAnUnjustifiedGrant(t *testing.T) {
 		MasterRunID: "wf-exc-master", TaskID: fx.taskID, ApprovedBy: "", Reason: "x", Reauthorize: true,
 	}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid: re-authorizing still needs a named approver", err)
+	}
+}
+
+// AR-1a (Codex AR1A-03): two identical requests racing must not grant two
+// generations for one decision. Exactly one grant is recorded and both callers
+// see it.
+func TestAR1aConcurrentIdenticalExceptionRequestsGrantOnce(t *testing.T) {
+	fx := newExceptionFixture(t, maxIntegrationFreshReviews)
+	type result struct {
+		g   IntegrationFreshReviewException
+		err error
+	}
+	out := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			g, err := fx.authorize("joaquin", "the dispatch defect consumed the budget")
+			out <- result{g, err}
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		r := <-out
+		if r.err != nil {
+			t.Fatalf("an identical concurrent request failed: %v", r.err)
+		}
+		if r.g.Generation != 1 {
+			t.Fatalf("generation = %d, want 1 for both callers", r.g.Generation)
+		}
+	}
+	if n := len(fx.grants()); n != 1 {
+		t.Fatalf("grants = %d, want exactly 1", n)
 	}
 }

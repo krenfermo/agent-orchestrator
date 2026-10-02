@@ -448,10 +448,14 @@ func (m *Manager) preflightInterfaceTarget(
 		return err
 	}
 	config := effectiveAgentConfig(rec.Kind, project.Config)
+	additional, err := m.restoredWorkspaceProjectDirectories(ctx, rec, project, rec.Metadata.WorkspacePath)
+	if err != nil {
+		return err
+	}
 	var cmd []string
 	if transition.NativeConversationID == "" {
 		cmd, _, _, err = freshLaunchArgv(ctx, agent, rec.ID, rec.Metadata.WorkspacePath,
-			rec.Metadata, systemPrompt, "", config, rec.Kind, m.dataDir, true)
+			rec.Metadata, systemPrompt, "", config, rec.Kind, m.dataDir, true, additional)
 	} else {
 		var resumable bool
 		cmd, resumable, err = agent.GetRestoreCommand(ctx, ports.RestoreConfig{
@@ -460,7 +464,7 @@ func (m *Manager) preflightInterfaceTarget(
 				Metadata: map[string]string{ports.MetadataKeyAgentSessionID: transition.NativeConversationID},
 			},
 			Kind: rec.Kind, DataDir: m.dataDir, SystemPrompt: systemPrompt,
-			Config: config, Permissions: config.Permissions,
+			Config: config, Permissions: config.Permissions, AdditionalDirectories: additional,
 		})
 		if err == nil && !resumable {
 			return ErrNativeConversationMissing

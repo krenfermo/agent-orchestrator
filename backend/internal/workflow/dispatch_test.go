@@ -805,13 +805,16 @@ func TestAmbiguousDispatchedOrphanSessionNoWorkspaceNeedsAttention(t *testing.T)
 	}
 }
 
-// Test 13: cancelling a run with an active work-step session leaves the
-// session untouched (by construction: no stop/kill port is wired) and no
-// further dispatch happens even if GetRun-triggered observation runs after.
+// Test 13: cancelling a run with an active work-step session keeps the session
+// RECORD and its reference, and no further dispatch happens even if a
+// GetRun-triggered observation runs after. (This fixture wires no terminal
+// runtime reclaimer, so nothing is reclaimed here; that CancelRun ends an
+// ownership-proven worker runtime is covered by terminal_runtime_test.go.)
+// AR-1a: the trail it leaves describes that reclamation truthfully.
 func TestCancelRunLeavesWorkerSessionUntouchedAndStopsFurtherDispatch(t *testing.T) {
 	sessionFacts := newFakeSessionFacts()
 	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
-	c, _, _ := newCoordinatorFull(spawner, sessionFacts, &fakeWorkspaceFacts{})
+	c, store, _ := newCoordinatorFull(spawner, sessionFacts, &fakeWorkspaceFacts{})
 	ctx := context.Background()
 
 	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
@@ -850,6 +853,25 @@ func TestCancelRunLeavesWorkerSessionUntouchedAndStopsFurtherDispatch(t *testing
 	}
 	if spawner.calls != 1 {
 		t.Fatalf("spawner calls after cancel+GetRun = %d, want still 1 (no re-dispatch)", spawner.calls)
+	}
+	cps, err := store.ListWorkflowCheckpoints(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ListWorkflowCheckpoints: %v", err)
+	}
+	var trail *domain.WorkflowCheckpoint
+	for i := range cps {
+		switch cps[i].DurablePhase {
+		case "worker_left_running_on_cancel":
+			t.Fatalf("cancel still writes the misleading 'left running' trail: %q", cps[i].NextAction)
+		case "worker_runtime_reclaim_on_cancel":
+			trail = &cps[i]
+		}
+	}
+	if trail == nil {
+		t.Fatalf("cancel left no trail for the work step's session")
+	}
+	if strings.Contains(trail.NextAction, "does not auto-stop") || !strings.Contains(trail.NextAction, "could prove the runtime was its own") {
+		t.Fatalf("trail does not describe the real behaviour: %q", trail.NextAction)
 	}
 }
 

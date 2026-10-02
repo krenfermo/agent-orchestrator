@@ -260,7 +260,7 @@ type masterPlanStore interface {
 	// describing reality. The write is one transaction over the ledger row and
 	// the task's criteria, because an amendment nobody can account for and an
 	// explanation for a change that never happened are both worse than nothing.
-	AmendWorkflowTaskCriterion(ctx stdctx.Context, amendment domain.WorkflowTaskCriterionAmendment, criteria []string, now time.Time) error
+	AmendWorkflowTaskCriterion(ctx stdctx.Context, amendment domain.WorkflowTaskCriterionAmendment, expectedCriteriaJSON string, criteria []string, now time.Time) error
 	ListWorkflowTaskCriterionAmendments(ctx stdctx.Context, runID string) ([]domain.WorkflowTaskCriterionAmendment, error)
 	SetWorkflowTaskExecutionRun(ctx stdctx.Context, taskID, executionRunID string, now time.Time) (bool, error)
 	FindWorkflowRunByPlannedTask(ctx stdctx.Context, taskID string) (string, bool, error)
@@ -306,6 +306,15 @@ type Deps struct {
 	// (see recovery.go). Both optional: a nil dependency simply skips its check.
 	Sessions   Sessions
 	ReviewRuns ReviewRuns
+	// RunOwners reads a run's recorded owner for the reviewer-identity
+	// decision (AR-1a D-SEC-2). Optional: nil yields no owner, which keeps the
+	// pre-AR-1a behaviour for every run.
+	RunOwners RunOwnerReader
+	// ReviewerIdentityIssuer reports whether the reviewer launcher hands its
+	// reviewers AO's own credential (AR-1a D-SEC-2). Wired from the UNDECORATED
+	// launcher on purpose: dispatch decorators replace ReviewerLauncher and do
+	// not carry this capability (Codex AR1A-R4-01). Nil means none is issued.
+	ReviewerIdentityIssuer ReviewerIdentityIssuer
 	// Logger receives recovery diagnostics. Optional.
 	Logger *slog.Logger
 
@@ -659,9 +668,11 @@ type Coordinator struct {
 
 	// sessions, reviewRuns, and log back Reconcile's best-effort integrity
 	// check (see recovery.go). All optional.
-	sessions   Sessions
-	reviewRuns ReviewRuns
-	log        *slog.Logger
+	sessions               Sessions
+	reviewRuns             ReviewRuns
+	runOwners              RunOwnerReader
+	reviewerIdentityIssuer ReviewerIdentityIssuer
+	log                    *slog.Logger
 
 	// spawner, sessionFacts, and workspaceFacts back Checkpoint 8B's work-step
 	// dispatch/observation. All optional.
@@ -894,6 +905,8 @@ func New(d Deps) *Coordinator {
 		contextSources:           d.ContextSources,
 		sessions:                 d.Sessions,
 		reviewRuns:               d.ReviewRuns,
+		runOwners:                d.RunOwners,
+		reviewerIdentityIssuer:   d.ReviewerIdentityIssuer,
 		log:                      d.Logger,
 		branchLocks:              d.BranchLocks,
 		integrationLocks:         d.IntegrationLocks,
@@ -2203,6 +2216,12 @@ func (c *Coordinator) ListRuns(ctx stdctx.Context, projectID string) ([]domain.W
 // CancelRun transitions a run to cancelled and cascades cancellation to every
 // non-terminal step. Cancelling an already-terminal run is a no-op error
 // (ErrAlreadyTerminal), never a silent success, and never mutates the run.
+// workerRuntimeReclaimOnCancelPhase is the informational trail CancelRun leaves
+// on a cancelled work step that had a session. It replaced
+// "worker_left_running_on_cancel" (AR-1a), whose text claimed AO never stops a
+// cancelled worker -- untrue since terminal runtime reclamation.
+const workerRuntimeReclaimOnCancelPhase = "worker_runtime_reclaim_on_cancel"
+
 func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, error) {
 	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
 	if err != nil {
@@ -2281,10 +2300,15 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, domain.WorkflowStepCancelled, now); err != nil {
 			return RunDetail{}, err
 		}
-		// Checkpoint 8B semantic: cancelling a run never stops a worker
-		// session. No kill/stop port is wired here by construction. The left-
-		// running session is only recorded as an informational trail so a
-		// human knows to stop it manually if it should not continue.
+		// The worker session's RUNTIME was already handled above, by
+		// reclaimTerminalRuntimesForRun: AO ends every runtime it can prove is
+		// its own (instance + owner token + launch) and leaves anything it
+		// cannot prove untouched for the runtime GC -- it never kills on a
+		// guess. The session record itself is kept. This trail says exactly
+		// that, so a person reading the run knows what happened and when a
+		// manual stop is still warranted. (AR-1a: it used to claim the session
+		// was always "left running", which stopped being true with P1-C's
+		// terminal runtime reclamation.)
 		if step.Kind == domain.WorkflowStepWork && step.SessionID != nil {
 			stepID := step.ID
 			sessionID := *step.SessionID
@@ -2295,10 +2319,10 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 				ProjectID:      run.ProjectID,
 				SessionID:      &sessionID,
 				NextAction: fmt.Sprintf(
-					"worker session %s left running — AO does not auto-stop it on workflow cancellation; stop it manually (e.g. via the session Kill action) if it should not continue",
+					"workflow cancelled: AO ended worker session %s's runtime if it could prove the runtime was its own; a runtime it could not prove is left untouched for the runtime GC (see the daemon log) -- stop the session manually (e.g. via the session Kill action) if it is still running and should not continue",
 					sessionID,
 				),
-				DurablePhase:   "worker_left_running_on_cancel",
+				DurablePhase:   workerRuntimeReclaimOnCancelPhase,
 				PayloadVersion: "v1",
 				RetryState:     "{}",
 				CreatedAt:      now,

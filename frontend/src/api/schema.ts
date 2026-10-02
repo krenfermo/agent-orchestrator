@@ -4481,7 +4481,7 @@ export interface components {
         };
         ControllersAmendTaskCriterionRequest: {
             amendedCriterion?: string;
-            approvedBy: string;
+            approvedBy?: string;
             criterionIndex: number;
             evidence: string[];
             originalCriterion?: string;
@@ -4498,7 +4498,7 @@ export interface components {
             passwordEnabled: boolean;
         };
         ControllersAuthorizeFreshReviewExceptionRequest: {
-            approvedBy: string;
+            approvedBy?: string;
             reason: string;
             reauthorize?: boolean;
         };
@@ -6070,7 +6070,9 @@ export interface components {
         };
         ControllersWorkflowTaskCriterionAmendmentView: {
             amendedCriterion?: string;
+            approvedAuthMethod?: string;
             approvedBy: string;
+            approvedByUserId?: string;
             /** Format: date-time */
             createdAt: string;
             /** Format: int64 */
@@ -8947,7 +8949,9 @@ export interface components {
             totals: components["schemas"]["AgentExplorationResponse"];
         };
         WorkflowIntegrationFreshReviewException: {
+            approvedAuthMethod?: string;
             approvedBy: string;
+            approvedByUserId?: string;
             childRunId?: string;
             fingerprint: string;
             generation: number;

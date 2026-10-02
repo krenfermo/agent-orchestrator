@@ -34,11 +34,26 @@ UPDATE review SET reviewer_handle_id = '', updated_at = CURRENT_TIMESTAMP WHERE 
 UPDATE review SET agent_session_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;
 
 -- name: InsertReviewRun :exec
-INSERT INTO review_run (id, review_id, session_id, batch_id, harness, trigger_source, pr_url, target_sha, status, verdict, body, github_review_id, created_at, auto_inject_review)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+INSERT INTO review_run (id, review_id, session_id, batch_id, harness, trigger_source, pr_url, target_sha, status, verdict, body, github_review_id, created_at, auto_inject_review, reviewer_identity_expected)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: UpdateReviewRunResult :execrows
 UPDATE review_run SET status = ?, verdict = ?, body = ?, github_review_id = ?, auto_inject_review = ? WHERE id = ? AND status = 'running';
+
+-- AR-1a / D-SEC-2: the verdict write for a submitter that presented NO agent
+-- credential. It lands only while no reviewer identity speaks for the run:
+-- the run was not created expecting one, and no unrevoked reviewer credential
+-- exists for it -- decided in this one statement, so neither the pre-mint
+-- window nor a read-then-write race can let a header-less caller record it.
+-- name: UpdateReviewRunResultWithoutReviewerIdentity :execrows
+UPDATE review_run SET status = sqlc.arg(status), verdict = sqlc.arg(verdict), body = sqlc.arg(body),
+    github_review_id = sqlc.arg(github_review_id), auto_inject_review = sqlc.arg(auto_inject_review)
+WHERE review_run.id = sqlc.arg(id) AND review_run.status = 'running'
+  AND review_run.reviewer_identity_expected = 0
+  AND NOT EXISTS (
+    SELECT 1 FROM agent_credentials c
+    WHERE c.review_run_id = review_run.id AND c.role = 'reviewer' AND c.revoked_at IS NULL
+  );
 
 -- name: SupersedeStaleRunningReviewRuns :execrows
 UPDATE review_run SET status = 'failed', body = ? WHERE session_id = ? AND pr_url = ? AND target_sha != ? AND status = 'running' AND verdict = '';
@@ -53,27 +68,27 @@ UPDATE review_run SET status = 'cancelled', body = ? WHERE session_id = ? AND ha
 UPDATE review_run SET status = 'delivered', delivered_at = ? WHERE id = ? AND status = 'complete' AND delivered_at IS NULL;
 
 -- name: GetReviewRun :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE id = ?;
 
 -- name: GetReviewRunBySessionPRAndSHA :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? ORDER BY created_at DESC LIMIT 1;
 
 -- name: GetReviewRunBySessionPRSHAAndHarness :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? AND harness = ? ORDER BY created_at DESC LIMIT 1;
 
 -- name: ListReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? ORDER BY created_at DESC;
 
 -- name: ListRunningReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? AND status = 'running' AND verdict = '' ORDER BY created_at DESC;
 
 -- name: ListReviewRunsByBatch :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? AND batch_id = ? ORDER BY created_at ASC, id ASC;
 
 -- name: RecordLateReviewVerdict :execrows

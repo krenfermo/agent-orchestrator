@@ -111,6 +111,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		effectiveAgentConfig(in.cfg.Kind, in.project.Config),
 		in.cfg.AgentConfig,
 	)
+	m.auditPermissionBypass("chat-spawn", id, in.cfg.ProjectID, in.cfg.Harness, agentConfig)
 
 	// The same env the terminal path builds, including the HookPATH pin. The
 	// provider passes its environment through to the shell commands it runs, so
@@ -288,6 +289,7 @@ func (m *Manager) resumeChatController(
 	}
 
 	agentConfig := effectiveAgentConfig(rec.Kind, project.Config)
+	m.auditPermissionBypass("chat-"+operation, rec.ID, rec.ProjectID, rec.Harness, agentConfig)
 	additionalDirectories, err := m.restoredWorkspaceProjectDirectories(ctx, rec, project, ws.Path)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: workspace roots: %w", operation, rec.ID, err)

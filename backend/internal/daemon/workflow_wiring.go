@@ -224,7 +224,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 // it, at runtime, on every run. Pinning it here makes that a compile error.
 var _ workflowcore.DispatchRecorder = (*sqlite.Store)(nil)
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, workItemSync workItemSyncer, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, reviewerIdentity workflowcore.ReviewerIdentityLedger, workerCredentials workerCredentialAdopter, workerCredentialCloser workflowcore.WorkerCredentialCloser, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, reviewerIdentityIssuer workflowcore.ReviewerIdentityIssuer, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, workItemSync workItemSyncer, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, reviewerIdentity workflowcore.ReviewerIdentityLedger, workerCredentials workerCredentialAdopter, workerCredentialCloser workflowcore.WorkerCredentialCloser, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -296,6 +296,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		PlannerUsage: plannerUsage,
 		Sessions:     store,
 		ReviewRuns:   store,
+		RunOwners:    store,
 		Spawner:      sessionMgr,
 		SessionFacts: store,
 		// P7: the per-session context reading the 8M lifecycle policy declared
@@ -304,6 +305,9 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		SessionContextFacts: store,
 		WorkspaceFacts:      workspace,
 		ReviewerLauncher:    reviewerLauncher,
+		// AR-1a (Codex AR1A-R4-01): from the undecorated launcher, so the
+		// dispatch decorators applied below cannot silently drop it.
+		ReviewerIdentityIssuer: reviewerIdentityIssuer,
 		// P5-A phase 2C: and a finished worker's identity ends with its turn,
 		// rather than waiting out a reconciliation interval during which it
 		// could still reach the session writes its role permits.

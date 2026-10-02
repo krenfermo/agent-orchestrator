@@ -135,8 +135,18 @@ UPDATE workflow_tasks SET acceptance_criteria_json = ?, updated_at = ? WHERE id 
 -- name: InsertWorkflowTaskCriterionAmendment :exec
 INSERT INTO workflow_task_criterion_amendments (id, workflow_run_id, task_id, criterion_index,
     original_criterion, amended_criterion, disposition, reason, evidence_json, approved_by,
-    superseded_review_run_id, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    approved_by_user_id, approved_auth_method, superseded_review_run_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- AR-1a / D-SEC-3: apply an amendment only to the criteria it was computed
+-- from, and only while the task is still open. Two amendments racing on one
+-- task, or an amendment racing the task's completion, must not silently
+-- overwrite each other; zero rows means the caller lost and must re-read.
+-- name: CASWorkflowTaskAcceptanceCriteria :execrows
+UPDATE workflow_tasks SET acceptance_criteria_json = sqlc.arg(acceptance_criteria_json), updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id)
+  AND acceptance_criteria_json = sqlc.arg(expected_criteria_json)
+  AND state NOT IN ('completed', 'failed', 'cancelled');
 
 -- name: ListWorkflowTaskCriterionAmendments :many
 SELECT * FROM workflow_task_criterion_amendments WHERE workflow_run_id = ?

@@ -24,6 +24,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agentbase"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/binaryutil"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/terminalui"
+	"github.com/aoagents/agent-orchestrator/backend/internal/codexsandbox"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
@@ -36,6 +37,42 @@ type Plugin struct {
 	agentbase.Base
 	binaryMu       sync.Mutex
 	resolvedBinary string
+	// writableRoots resolves the explicit extra writable roots of the
+	// workspace-write sandbox (AR-1a, Codex AR1A-INT-01). Nil uses
+	// codexsandbox.WritableRoots.
+	writableRoots func(ctx context.Context, workspace string, additional []string) ([]string, error)
+}
+
+// sandboxAddDirArgs returns `--add-dir <root>` for every explicit extra
+// writable root a launch in AO's sandboxed default (workspace-write) needs: the git directories of the
+// workspace's repositories (without them `git add` / `git commit` are denied
+// inside workspace-write) and a workspace project's child roots. An explicit
+// bypass launch has no sandbox and gets none. Fail closed: roots that cannot be
+// established refuse the launch rather than start a session with a guess.
+func (p *Plugin) sandboxAddDirArgs(ctx context.Context, permissions ports.PermissionMode, dataDir, workspace string, additional []string) ([]string, error) {
+	// Only for AO's own sandboxed default (workspace-write). An explicit bypass
+	// has no sandbox; auto / accept-edits leave the sandbox to Codex and are
+	// also what AO's read-only launchers (reviewer, decision resolver, incident
+	// agent) use before adding `--sandbox read-only` -- a writable `--add-dir`
+	// there would contradict the read-only guarantee (Codex AR1A-FIN-01).
+	if ports.NormalizePermissionMode(permissions) != ports.PermissionModeDefault {
+		return nil, nil
+	}
+	resolve := p.writableRoots
+	if resolve == nil {
+		// The EFFECTIVE AO data dir of this launch, so state moved by
+		// --data-dir is protected too (Codex AR1A-FIN-04).
+		resolve = codexsandbox.Resolver{AODataDir: dataDir}.WritableRoots
+	}
+	roots, err := resolve(ctx, workspace, additional)
+	if err != nil {
+		return nil, fmt.Errorf("codex sandbox writable roots: %w", err)
+	}
+	args := make([]string, 0, 2*len(roots))
+	for _, root := range roots {
+		args = append(args, "--add-dir", root)
+	}
+	return args, nil
 }
 
 // New returns a ready-to-register Codex adapter.
@@ -127,6 +164,11 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 		return nil, err
 	}
 	appendTerminalCompatibilityFlags(&providerArgs)
+	addDirs, err := p.sandboxAddDirArgs(ctx, cfg.Permissions, cfg.DataDir, cfg.WorkspacePath, cfg.AdditionalDirectories)
+	if err != nil {
+		return nil, err
+	}
+	providerArgs = append(providerArgs, addDirs...)
 	return agentruntime.BuildLaunchCommand(agentruntime.LaunchConfig{
 		Harness:          agentruntime.HarnessCodex,
 		Binary:           binary,
@@ -165,6 +207,11 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		return nil, false, err
 	}
 	appendTerminalCompatibilityFlags(&providerArgs)
+	addDirs, err := p.sandboxAddDirArgs(ctx, cfg.Permissions, cfg.DataDir, cfg.Session.WorkspacePath, cfg.AdditionalDirectories)
+	if err != nil {
+		return nil, false, err
+	}
+	providerArgs = append(providerArgs, addDirs...)
 	return agentruntime.BuildRestoreCommand(agentruntime.RestoreConfig{
 		Harness:          agentruntime.HarnessCodex,
 		Binary:           binary,

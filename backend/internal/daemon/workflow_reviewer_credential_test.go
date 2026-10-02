@@ -151,9 +151,10 @@ func TestReviewerLaunchIsRefusedWhenItsIdentityCannotBeMinted(t *testing.T) {
 	}
 }
 
-// On a trusted-local desktop the reviewer's cookie-less call resolves the
-// bootstrap admin anyway, so a missing credential costs nothing and must not
-// cost a launch.
+// On a trusted-local desktop, for a run that does NOT expect a reviewer
+// identity (an unowned legacy run), the reviewer's cookie-less call resolves the
+// bootstrap admin anyway, so a missing credential must not cost the launch.
+// A run that expects one fails closed instead (AR-1a, see the test below).
 func TestTrustedLocalReviewerLaunchSurvivesAMissingIdentity(t *testing.T) {
 	issuer := &fakeCredentialIssuer{issueErr: errors.New("no owner recorded for this run")}
 	l, rt, _ := newCredentialLauncher(t, issuer, false)
@@ -279,5 +280,60 @@ func TestCancellingAnAlreadyGoneReviewerIsASuccessfulNoOp(t *testing.T) {
 	}
 	if len(issuer.revoked) != 1 {
 		t.Fatalf("revocations = %v; a replayed cancellation revoked more than once", issuer.revoked)
+	}
+}
+
+// AR-1a / D-SEC-2 (Codex AR1A-02): a run created expecting its reviewer's
+// identity never gets a header-less reviewer, even on trusted-local. Both a
+// failed mint and a failed hand-over refuse the launch before a pane exists.
+func TestTrustedLocalReviewerLaunchRefusesWhenTheRunExpectsAnIdentity(t *testing.T) {
+	issuer := &fakeCredentialIssuer{issueErr: errors.New("database is locked")}
+	l, rt, _ := newCredentialLauncher(t, issuer, false)
+	req := credentialLaunchRequest()
+	req.ReviewerIdentityExpected = true
+
+	if _, err := l.Launch(context.Background(), req); err == nil {
+		t.Fatalf("Launch succeeded without the identity the run expects")
+	}
+	if rt.calls != 0 {
+		t.Fatalf("a header-less reviewer pane was created (%d calls)", rt.calls)
+	}
+	if !l.IssuesReviewerIdentity() {
+		t.Fatalf("a launcher with an identity layer must report that it issues reviewer identities")
+	}
+}
+
+// Codex AR1A-R3-01: the reviewer's credential follows the run's identity
+// marker, so a credential can never appear on a running run that was created
+// without it (for example a run that was unowned when its review was created
+// and was assigned an owner a moment later).
+func TestReviewerCredentialFollowsTheRunsIdentityMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		expected        bool
+		requireIdentity bool
+		wantMint        bool
+	}{
+		{"trusted-local, run not marked: no credential", false, false, false},
+		{"trusted-local, run marked: credential", true, false, true},
+		{"identity required, run not marked: credential", false, true, true},
+		{"identity required, run marked: credential", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issuer := &fakeCredentialIssuer{token: "ao_agent_tok"}
+			l, rt, _ := newCredentialLauncher(t, issuer, tc.requireIdentity)
+			req := credentialLaunchRequest()
+			req.ReviewerIdentityExpected = tc.expected
+			if _, err := l.Launch(context.Background(), req); err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if got := len(issuer.issued) > 0; got != tc.wantMint {
+				t.Fatalf("minted=%v, want %v", got, tc.wantMint)
+			}
+			_, exported := rt.lastCfg.Env[agentcred.EnvCredentialFile]
+			if exported != tc.wantMint {
+				t.Fatalf("credential path exported=%v, want %v", exported, tc.wantMint)
+			}
+		})
 	}
 }

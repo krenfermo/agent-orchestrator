@@ -184,15 +184,38 @@ func ClaudePermissionArgs(policy PermissionPolicy) []string {
 	}
 }
 
+// CodexDefaultSandboxArgs is the posture an unconfigured Codex launch gets.
+//
+// AR-1a (D-SEC-4): the default used to be
+// --dangerously-bypass-approvals-and-sandbox, so every Codex worker whose
+// project set no permission policy ran with no sandbox and no approvals at all
+// -- free to write ~/.ao, the daemon's database, or any file of the user's.
+// The default is now Codex's workspace-write sandbox, which confines writes to
+// the session's own worktree (plus temp), with approvals off so an unattended
+// AO pane is never left waiting on a prompt nobody will answer. Network access
+// stays on inside the sandbox because AO's own agents must reach the daemon
+// over loopback (`ao work report`, `ao review submit`). Full bypass now exists
+// only as the explicit bypass-permissions policy.
+var CodexDefaultSandboxArgs = []string{
+	"--sandbox", "workspace-write",
+	"--ask-for-approval", "never",
+	"-c", "sandbox_workspace_write.network_access=true",
+}
+
 // CodexPermissionArgs maps AO policy onto Codex approval flags.
+//
+// Unknown or empty policies fall back to the sandboxed default, never to the
+// bypass: only an explicit bypass-permissions policy unlocks it.
 func CodexPermissionArgs(policy PermissionPolicy) []string {
 	switch NormalizePermissionPolicy(policy) {
 	case PermissionAcceptEdits:
 		return []string{"--ask-for-approval", "on-request"}
 	case PermissionAuto:
 		return []string{"--ask-for-approval", "on-request", "-c", `approvals_reviewer="auto_review"`}
-	default:
+	case PermissionBypassPermissions:
 		return []string{"--dangerously-bypass-approvals-and-sandbox"}
+	default:
+		return append([]string(nil), CodexDefaultSandboxArgs...)
 	}
 }
 

@@ -143,7 +143,7 @@ func (q *Queries) GetReviewBySessionAndHarness(ctx context.Context, arg GetRevie
 }
 
 const getReviewRun = `-- name: GetReviewRun :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE id = ?
 `
 
@@ -170,12 +170,13 @@ func (q *Queries) GetReviewRun(ctx context.Context, id string) (ReviewRun, error
 		&i.LateVerdictBody,
 		&i.LateVerdictAt,
 		&i.SupersededBy,
+		&i.ReviewerIdentityExpected,
 	)
 	return i, err
 }
 
 const getReviewRunBySessionPRAndSHA = `-- name: GetReviewRunBySessionPRAndSHA :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? ORDER BY created_at DESC LIMIT 1
 `
 
@@ -208,12 +209,13 @@ func (q *Queries) GetReviewRunBySessionPRAndSHA(ctx context.Context, arg GetRevi
 		&i.LateVerdictBody,
 		&i.LateVerdictAt,
 		&i.SupersededBy,
+		&i.ReviewerIdentityExpected,
 	)
 	return i, err
 }
 
 const getReviewRunBySessionPRSHAAndHarness = `-- name: GetReviewRunBySessionPRSHAAndHarness :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? AND harness = ? ORDER BY created_at DESC LIMIT 1
 `
 
@@ -252,30 +254,32 @@ func (q *Queries) GetReviewRunBySessionPRSHAAndHarness(ctx context.Context, arg 
 		&i.LateVerdictBody,
 		&i.LateVerdictAt,
 		&i.SupersededBy,
+		&i.ReviewerIdentityExpected,
 	)
 	return i, err
 }
 
 const insertReviewRun = `-- name: InsertReviewRun :exec
-INSERT INTO review_run (id, review_id, session_id, batch_id, harness, trigger_source, pr_url, target_sha, status, verdict, body, github_review_id, created_at, auto_inject_review)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO review_run (id, review_id, session_id, batch_id, harness, trigger_source, pr_url, target_sha, status, verdict, body, github_review_id, created_at, auto_inject_review, reviewer_identity_expected)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertReviewRunParams struct {
-	ID               string
-	ReviewID         string
-	SessionID        domain.SessionID
-	BatchID          string
-	Harness          domain.ReviewerHarness
-	TriggerSource    domain.ReviewTriggerSource
-	PRURL            string
-	TargetSha        string
-	Status           domain.ReviewRunStatus
-	Verdict          domain.ReviewVerdict
-	Body             string
-	GithubReviewID   string
-	CreatedAt        time.Time
-	AutoInjectReview bool
+	ID                       string
+	ReviewID                 string
+	SessionID                domain.SessionID
+	BatchID                  string
+	Harness                  domain.ReviewerHarness
+	TriggerSource            domain.ReviewTriggerSource
+	PRURL                    string
+	TargetSha                string
+	Status                   domain.ReviewRunStatus
+	Verdict                  domain.ReviewVerdict
+	Body                     string
+	GithubReviewID           string
+	CreatedAt                time.Time
+	AutoInjectReview         bool
+	ReviewerIdentityExpected int64
 }
 
 func (q *Queries) InsertReviewRun(ctx context.Context, arg InsertReviewRunParams) error {
@@ -294,12 +298,13 @@ func (q *Queries) InsertReviewRun(ctx context.Context, arg InsertReviewRunParams
 		arg.GithubReviewID,
 		arg.CreatedAt,
 		arg.AutoInjectReview,
+		arg.ReviewerIdentityExpected,
 	)
 	return err
 }
 
 const listReviewRunsByBatch = `-- name: ListReviewRunsByBatch :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? AND batch_id = ? ORDER BY created_at ASC, id ASC
 `
 
@@ -337,6 +342,7 @@ func (q *Queries) ListReviewRunsByBatch(ctx context.Context, arg ListReviewRunsB
 			&i.LateVerdictBody,
 			&i.LateVerdictAt,
 			&i.SupersededBy,
+			&i.ReviewerIdentityExpected,
 		); err != nil {
 			return nil, err
 		}
@@ -352,7 +358,7 @@ func (q *Queries) ListReviewRunsByBatch(ctx context.Context, arg ListReviewRunsB
 }
 
 const listReviewRunsBySession = `-- name: ListReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? ORDER BY created_at DESC
 `
 
@@ -385,6 +391,7 @@ func (q *Queries) ListReviewRunsBySession(ctx context.Context, sessionID domain.
 			&i.LateVerdictBody,
 			&i.LateVerdictAt,
 			&i.SupersededBy,
+			&i.ReviewerIdentityExpected,
 		); err != nil {
 			return nil, err
 		}
@@ -438,7 +445,7 @@ func (q *Queries) ListReviewsBySession(ctx context.Context, sessionID domain.Ses
 }
 
 const listRunningReviewRunsBySession = `-- name: ListRunningReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by, reviewer_identity_expected
 FROM review_run WHERE session_id = ? AND status = 'running' AND verdict = '' ORDER BY created_at DESC
 `
 
@@ -471,6 +478,7 @@ func (q *Queries) ListRunningReviewRunsBySession(ctx context.Context, sessionID 
 			&i.LateVerdictBody,
 			&i.LateVerdictAt,
 			&i.SupersededBy,
+			&i.ReviewerIdentityExpected,
 		); err != nil {
 			return nil, err
 		}
@@ -629,6 +637,46 @@ type UpdateReviewRunResultParams struct {
 
 func (q *Queries) UpdateReviewRunResult(ctx context.Context, arg UpdateReviewRunResultParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, updateReviewRunResult,
+		arg.Status,
+		arg.Verdict,
+		arg.Body,
+		arg.GithubReviewID,
+		arg.AutoInjectReview,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateReviewRunResultWithoutReviewerIdentity = `-- name: UpdateReviewRunResultWithoutReviewerIdentity :execrows
+UPDATE review_run SET status = ?1, verdict = ?2, body = ?3,
+    github_review_id = ?4, auto_inject_review = ?5
+WHERE review_run.id = ?6 AND review_run.status = 'running'
+  AND review_run.reviewer_identity_expected = 0
+  AND NOT EXISTS (
+    SELECT 1 FROM agent_credentials c
+    WHERE c.review_run_id = review_run.id AND c.role = 'reviewer' AND c.revoked_at IS NULL
+  )
+`
+
+type UpdateReviewRunResultWithoutReviewerIdentityParams struct {
+	Status           domain.ReviewRunStatus
+	Verdict          domain.ReviewVerdict
+	Body             string
+	GithubReviewID   string
+	AutoInjectReview bool
+	ID               string
+}
+
+// AR-1a / D-SEC-2: the verdict write for a submitter that presented NO agent
+// credential. It lands only while no reviewer identity speaks for the run:
+// the run was not created expecting one, and no unrevoked reviewer credential
+// exists for it -- decided in this one statement, so neither the pre-mint
+// window nor a read-then-write race can let a header-less caller record it.
+func (q *Queries) UpdateReviewRunResultWithoutReviewerIdentity(ctx context.Context, arg UpdateReviewRunResultWithoutReviewerIdentityParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateReviewRunResultWithoutReviewerIdentity,
 		arg.Status,
 		arg.Verdict,
 		arg.Body,

@@ -658,6 +658,14 @@ func (c *Controller) SetSettings(ctx context.Context, settings domain.Conversati
 	if err := c.store.SetConversationSettings(ctx, c.conversation.ID, settings, c.now()); err != nil {
 		return fmt.Errorf("record conversation settings: %w", err)
 	}
+	// AR-1a (D-SEC-4, Codex AR1A-05): escalating the per-turn approval mode to
+	// the full bypass is the same explicit, dangerous choice as launching with
+	// it, and is audited the same way.
+	if ports.NormalizePermissionMode(settings.ApprovalMode) == ports.PermissionModeBypassPermissions && c.log != nil {
+		c.log.Warn("conversation turn approval escalated to the sandbox/approval bypass (explicit bypass-permissions)",
+			"audit", "agent_permission_bypass", "operation", "chat-turn-settings",
+			"conversation", c.conversation.ID, "session", c.conversation.SessionID)
+	}
 	c.mu.Lock()
 	c.settings = settings
 	c.mu.Unlock()

@@ -603,6 +603,10 @@ type TaskCriterionAmendment struct {
 	Reason            string
 	Evidence          []string
 	ApprovedBy        string
+	// ApprovedByUserID and ApprovedAuthMethod identify the authenticated
+	// principal the transport derived ApprovedBy from (AR-1a D-SEC-3).
+	ApprovedByUserID   domain.UserID
+	ApprovedAuthMethod domain.AuthMethod
 }
 
 // AmendTaskCriterion records the amendment, applies it, and returns the run
@@ -612,6 +616,7 @@ func (s *Service) AmendTaskCriterion(ctx context.Context, req TaskCriterionAmend
 		RunID: req.RunID, TaskID: req.TaskID, CriterionIndex: req.CriterionIndex,
 		OriginalCriterion: req.OriginalCriterion, AmendedCriterion: req.AmendedCriterion,
 		Reason: req.Reason, Evidence: req.Evidence, ApprovedBy: req.ApprovedBy,
+		ApprovedByUserID: req.ApprovedByUserID, ApprovedAuthMethod: req.ApprovedAuthMethod,
 	})
 	if err != nil {
 		return domain.WorkflowTaskCriterionAmendment{}, workflowcore.RunDetail{}, err

@@ -119,20 +119,21 @@ func (s *Store) InsertReviewRun(ctx context.Context, r domain.ReviewRun) error {
 		r.TriggerSource = domain.ReviewTriggerManual
 	}
 	err := s.qw.InsertReviewRun(ctx, gen.InsertReviewRunParams{
-		ID:               r.ID,
-		ReviewID:         r.ReviewID,
-		SessionID:        r.SessionID,
-		BatchID:          r.BatchID,
-		Harness:          r.Harness,
-		TriggerSource:    r.TriggerSource,
-		PRURL:            r.PRURL,
-		TargetSha:        r.TargetSHA,
-		Status:           r.Status,
-		Verdict:          r.Verdict,
-		Body:             r.Body,
-		GithubReviewID:   r.GithubReviewID,
-		CreatedAt:        r.CreatedAt,
-		AutoInjectReview: r.AutoInjectReview,
+		ID:                       r.ID,
+		ReviewID:                 r.ReviewID,
+		SessionID:                r.SessionID,
+		BatchID:                  r.BatchID,
+		Harness:                  r.Harness,
+		TriggerSource:            r.TriggerSource,
+		PRURL:                    r.PRURL,
+		TargetSha:                r.TargetSHA,
+		Status:                   r.Status,
+		Verdict:                  r.Verdict,
+		Body:                     r.Body,
+		GithubReviewID:           r.GithubReviewID,
+		CreatedAt:                r.CreatedAt,
+		AutoInjectReview:         r.AutoInjectReview,
+		ReviewerIdentityExpected: boolToInt64(r.ReviewerIdentityExpected),
 	})
 	if isSQLiteUnique(err) {
 		return fmt.Errorf("insert review run for session %s pr %s sha %s: %w", r.SessionID, r.PRURL, r.TargetSHA, domain.ErrDuplicateReviewRun)
@@ -146,6 +147,28 @@ func (s *Store) UpdateReviewRunResult(ctx context.Context, id string, status dom
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	n, err := s.qw.UpdateReviewRunResult(ctx, gen.UpdateReviewRunResultParams{
+		Status:           status,
+		Verdict:          verdict,
+		Body:             body,
+		GithubReviewID:   githubReviewID,
+		AutoInjectReview: autoInjectReview,
+		ID:               id,
+	})
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// UpdateReviewRunResultWithoutReviewerIdentity records a verdict submitted with
+// no agent credential. It lands only while no reviewer identity speaks for the
+// run (AR-1a D-SEC-2): the run was not created expecting one and no unrevoked
+// reviewer credential exists -- decided in one statement. false means it did
+// not land; the caller re-reads to learn why.
+func (s *Store) UpdateReviewRunResultWithoutReviewerIdentity(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.UpdateReviewRunResultWithoutReviewerIdentity(ctx, gen.UpdateReviewRunResultWithoutReviewerIdentityParams{
 		Status:           status,
 		Verdict:          verdict,
 		Body:             body,
@@ -394,24 +417,25 @@ func reviewRunFromRow(r gen.ReviewRun) domain.ReviewRun {
 		lateVerdictAt = &t
 	}
 	return domain.ReviewRun{
-		ID:               r.ID,
-		ReviewID:         r.ReviewID,
-		SessionID:        r.SessionID,
-		BatchID:          r.BatchID,
-		Harness:          r.Harness,
-		TriggerSource:    r.TriggerSource,
-		PRURL:            r.PRURL,
-		TargetSHA:        r.TargetSha,
-		Status:           r.Status,
-		Verdict:          r.Verdict,
-		Body:             r.Body,
-		GithubReviewID:   r.GithubReviewID,
-		CreatedAt:        r.CreatedAt,
-		DeliveredAt:      deliveredAt,
-		AutoInjectReview: r.AutoInjectReview,
-		LateVerdict:      domain.ReviewVerdict(r.LateVerdict),
-		LateVerdictBody:  r.LateVerdictBody,
-		LateVerdictAt:    lateVerdictAt,
-		SupersededBy:     r.SupersededBy,
+		ID:                       r.ID,
+		ReviewID:                 r.ReviewID,
+		SessionID:                r.SessionID,
+		BatchID:                  r.BatchID,
+		Harness:                  r.Harness,
+		TriggerSource:            r.TriggerSource,
+		PRURL:                    r.PRURL,
+		TargetSHA:                r.TargetSha,
+		Status:                   r.Status,
+		Verdict:                  r.Verdict,
+		Body:                     r.Body,
+		GithubReviewID:           r.GithubReviewID,
+		CreatedAt:                r.CreatedAt,
+		DeliveredAt:              deliveredAt,
+		AutoInjectReview:         r.AutoInjectReview,
+		LateVerdict:              domain.ReviewVerdict(r.LateVerdict),
+		LateVerdictBody:          r.LateVerdictBody,
+		LateVerdictAt:            lateVerdictAt,
+		SupersededBy:             r.SupersededBy,
+		ReviewerIdentityExpected: r.ReviewerIdentityExpected != 0,
 	}
 }

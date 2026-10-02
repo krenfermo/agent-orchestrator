@@ -104,6 +104,7 @@ func (fx *specFixture) amend(replacement string) {
 		Reason:            "The criterion asserted a precondition of the environment, not a property of the work.",
 		Evidence:          []string{"those changes were committed in full as 70296042b"},
 		ApprovedBy:        "joaquin (repository owner)",
+		ApprovedByUserID:  "user-joaquin", ApprovedAuthMethod: domain.AuthMethodPassword,
 	}); err != nil {
 		fx.t.Fatalf("AmendTaskAcceptanceCriterion: %v", err)
 	}

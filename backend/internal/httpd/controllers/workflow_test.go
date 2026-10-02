@@ -459,3 +459,20 @@ func TestWorkflowGetRunSurfacesCheckpointAndNextActionFields(t *testing.T) {
 		}
 	}
 }
+
+// AR-1a / D-SEC-3: with nobody authenticated, the human-approval routes refuse
+// before the coordinator is reached -- a body approvedBy no longer suffices.
+func TestHumanApprovalRoutesRefuseWithoutAnAuthenticatedPrincipal(t *testing.T) {
+	svc := &fakeWorkflowService{}
+	srv := newWorkflowTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/workflows/wf-1/tasks/task-1/criteria/amend",
+		`{"criterionIndex":0,"reason":"r","evidence":["e"],"approvedBy":"joaquin"}`)
+	assertErrorCode(t, body, status, http.StatusUnauthorized, "NOT_AUTHENTICATED")
+	body, status, _ = doRequest(t, srv, "POST", "/api/v1/workflows/wf-1/tasks/task-1/fresh-review-exception",
+		`{"approvedBy":"joaquin","reason":"r"}`)
+	assertErrorCode(t, body, status, http.StatusUnauthorized, "NOT_AUTHENTICATED")
+	if svc.amendCalls != 0 || svc.exceptionCalls != 0 {
+		t.Fatalf("coordinator reached: amend=%d exception=%d", svc.amendCalls, svc.exceptionCalls)
+	}
+}

@@ -2,6 +2,8 @@ package workflow
 
 import (
 	stdctx "context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -60,6 +62,11 @@ type IntegrationFreshReviewException struct {
 	// ApprovedBy names the person. Required: an exception attributed to
 	// whoever held the session token is one nobody can be asked about later.
 	ApprovedBy string `json:"approvedBy"`
+	// ApprovedByUserID and ApprovedAuthMethod identify the authenticated
+	// principal ApprovedBy was derived from (AR-1a D-SEC-3). Empty only on
+	// grants recorded before AR-1a.
+	ApprovedByUserID   domain.UserID     `json:"approvedByUserId,omitempty"`
+	ApprovedAuthMethod domain.AuthMethod `json:"approvedAuthMethod,omitempty"`
 	// Reason is why one more review is the right answer here. Required.
 	Reason string `json:"reason"`
 	// Fingerprint is the workspace state this grant was made for, and the key
@@ -85,7 +92,11 @@ type IntegrationFreshReviewExceptionRequest struct {
 	MasterRunID string
 	TaskID      string
 	ApprovedBy  string
-	Reason      string
+	// ApprovedByUserID and ApprovedAuthMethod are the authenticated principal
+	// the transport derived ApprovedBy from. Required; an agent is refused.
+	ApprovedByUserID   domain.UserID
+	ApprovedAuthMethod domain.AuthMethod
+	Reason             string
 	// Reauthorize is the explicit second decision. Without it a request naming
 	// a workspace state that already has a grant returns that grant unchanged,
 	// which is what makes a poll, a retry or a double-click harmless. With it a
@@ -109,8 +120,11 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 ) (IntegrationFreshReviewException, error) {
 	req.ApprovedBy = strings.TrimSpace(req.ApprovedBy)
 	req.Reason = strings.TrimSpace(req.Reason)
-	if req.ApprovedBy == "" {
-		return IntegrationFreshReviewException{}, fmt.Errorf("%w: an exceptional fresh review requires a named approver", ErrInvalid)
+	if req.ApprovedAuthMethod == domain.AuthMethodAgent {
+		return IntegrationFreshReviewException{}, fmt.Errorf("%w: an agent cannot authorize an exceptional fresh review", ErrInvalid)
+	}
+	if req.ApprovedBy == "" || req.ApprovedByUserID == "" || req.ApprovedAuthMethod == "" {
+		return IntegrationFreshReviewException{}, fmt.Errorf("%w: an exceptional fresh review requires an authenticated approver", ErrInvalid)
 	}
 	if req.Reason == "" {
 		return IntegrationFreshReviewException{}, fmt.Errorf("%w: an exceptional fresh review requires a reason", ErrInvalid)
@@ -184,16 +198,18 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 	}
 
 	exception := IntegrationFreshReviewException{
-		TaskID:        req.TaskID,
-		MasterRunID:   req.MasterRunID,
-		ChildRunID:    childRunID,
-		ApprovedBy:    req.ApprovedBy,
-		Reason:        req.Reason,
-		Fingerprint:   fingerprint,
-		PriorAttempts: prior,
-		Generation:    len(granted) + 1,
-		Reauthorized:  req.Reauthorize && exceptionAlreadyGrantedFor(granted, fingerprint),
-		GrantedAt:     c.clock(),
+		TaskID:             req.TaskID,
+		MasterRunID:        req.MasterRunID,
+		ChildRunID:         childRunID,
+		ApprovedBy:         req.ApprovedBy,
+		ApprovedByUserID:   req.ApprovedByUserID,
+		ApprovedAuthMethod: req.ApprovedAuthMethod,
+		Reason:             req.Reason,
+		Fingerprint:        fingerprint,
+		PriorAttempts:      prior,
+		Generation:         len(granted) + 1,
+		Reauthorized:       req.Reauthorize && exceptionAlreadyGrantedFor(granted, fingerprint),
+		GrantedAt:          c.clock(),
 	}
 	payload, err := json.Marshal(exception)
 	if err != nil {
@@ -207,7 +223,11 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 		return IntegrationFreshReviewException{}, fmt.Errorf("%w: run %s", ErrNotFound, childRunID)
 	}
 	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:            "wfc-" + c.newID(),
+		// AR-1a (Codex AR1A-03): one grant per generation, enforced by the
+		// checkpoint's primary key. Two concurrent requests that both read N
+		// grants compute the same generation and the same id, so exactly one
+		// is written; the other re-reads and answers with the winner below.
+		ID:            freshReviewExceptionCheckpointID(childRunID, req.TaskID, exception.Generation),
 		WorkflowRunID: childRunID,
 		ProjectID:     run.ProjectID,
 		RetryState:    string(payload),
@@ -220,6 +240,21 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 		FingerprintBefore: fingerprint,
 		CreatedAt:         exception.GrantedAt,
 	}); err != nil {
+		after, rerr := c.integrationFreshReviewExceptions(ctx, childRunID)
+		if rerr == nil {
+			for _, g := range after {
+				if g.Generation != exception.Generation {
+					continue
+				}
+				if g.Fingerprint == fingerprint && !req.Reauthorize {
+					// The same decision, recorded by a concurrent request.
+					return g, nil
+				}
+				return IntegrationFreshReviewException{}, fmt.Errorf(
+					"%w: another fresh-review exception for task %s was authorized concurrently; re-read and retry",
+					ErrInvalid, req.TaskID)
+			}
+		}
 		return IntegrationFreshReviewException{}, err
 	}
 	if c.log != nil {
@@ -228,6 +263,13 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 			"generation", exception.Generation, "priorAttempts", exception.PriorAttempts)
 	}
 	return exception, nil
+}
+
+// freshReviewExceptionCheckpointID is the deterministic id of the grant of one
+// generation for one task's child run (AR-1a, Codex AR1A-03).
+func freshReviewExceptionCheckpointID(childRunID, taskID string, generation int) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", childRunID, taskID, generation)))
+	return "wfc-frx-" + hex.EncodeToString(sum[:12])
 }
 
 // integrationFreshReviewExceptions reads the grants from the append-only

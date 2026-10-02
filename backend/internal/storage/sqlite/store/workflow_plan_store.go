@@ -398,8 +398,14 @@ func (s *Store) UpdateWorkflowTaskState(ctx context.Context, id string, expected
 // task row is the change; a crash that separated them would leave either a
 // criterion nobody can account for, or an explanation for something that never
 // happened. Both are worse than the operation simply not having occurred.
-func (s *Store) AmendWorkflowTaskCriterion(ctx context.Context, a domain.WorkflowTaskCriterionAmendment, criteria []string, now time.Time) error {
-	if len(a.Evidence) == 0 || a.ApprovedBy == "" || a.Reason == "" {
+//
+// AR-1a (D-SEC-3): the criteria are replaced only if they are still exactly the
+// ones the amendment was computed from (expectedCriteriaJSON) and the task is
+// still open. Otherwise nothing is written and
+// domain.ErrWorkflowTaskCriterionConflict is returned, so a racing amendment or
+// a task that completed meanwhile can never be silently overwritten.
+func (s *Store) AmendWorkflowTaskCriterion(ctx context.Context, a domain.WorkflowTaskCriterionAmendment, expectedCriteriaJSON string, criteria []string, now time.Time) error {
+	if len(a.Evidence) == 0 || a.ApprovedBy == "" || a.Reason == "" || a.ApprovedByUserID == "" {
 		// The schema refuses these too; failing here names the caller rather
 		// than surfacing a CHECK violation from three layers down.
 		return errors.New("amend workflow task criterion: reason, evidence and an approving human are all required")
@@ -420,14 +426,22 @@ func (s *Store) AmendWorkflowTaskCriterion(ctx context.Context, a domain.Workflo
 			CriterionIndex: a.CriterionIndex, OriginalCriterion: a.OriginalCriterion,
 			AmendedCriterion: a.AmendedCriterion, Disposition: string(a.Disposition),
 			Reason: a.Reason, EvidenceJson: string(evidence), ApprovedBy: a.ApprovedBy,
+			ApprovedByUserID: string(a.ApprovedByUserID), ApprovedAuthMethod: string(a.ApprovedAuthMethod),
 			SupersededReviewRunID: a.SupersededReviewRunID, CreatedAt: a.CreatedAt,
 		}); err != nil {
 			return err
 		}
-		_, err := q.UpdateWorkflowTaskAcceptanceCriteria(ctx, gen.UpdateWorkflowTaskAcceptanceCriteriaParams{
+		n, err := q.CASWorkflowTaskAcceptanceCriteria(ctx, gen.CASWorkflowTaskAcceptanceCriteriaParams{
 			AcceptanceCriteriaJson: string(applied), UpdatedAt: now, ID: a.TaskID,
+			ExpectedCriteriaJson: expectedCriteriaJSON,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return domain.ErrWorkflowTaskCriterionConflict
+		}
+		return nil
 	})
 }
 
@@ -448,6 +462,8 @@ func (s *Store) ListWorkflowTaskCriterionAmendments(ctx context.Context, runID s
 			AmendedCriterion: r.AmendedCriterion,
 			Disposition:      domain.WorkflowTaskCriterionDisposition(r.Disposition),
 			Reason:           r.Reason, Evidence: evidence, ApprovedBy: r.ApprovedBy,
+			ApprovedByUserID:      domain.UserID(r.ApprovedByUserID),
+			ApprovedAuthMethod:    domain.AuthMethod(r.ApprovedAuthMethod),
 			SupersededReviewRunID: r.SupersededReviewRunID, CreatedAt: r.CreatedAt,
 		})
 	}

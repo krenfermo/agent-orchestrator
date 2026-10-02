@@ -30,6 +30,37 @@ func (q *Queries) ApproveWorkflowPlan(ctx context.Context, arg ApproveWorkflowPl
 	return result.RowsAffected()
 }
 
+const cASWorkflowTaskAcceptanceCriteria = `-- name: CASWorkflowTaskAcceptanceCriteria :execrows
+UPDATE workflow_tasks SET acceptance_criteria_json = ?1, updated_at = ?2
+WHERE id = ?3
+  AND acceptance_criteria_json = ?4
+  AND state NOT IN ('completed', 'failed', 'cancelled')
+`
+
+type CASWorkflowTaskAcceptanceCriteriaParams struct {
+	AcceptanceCriteriaJson string
+	UpdatedAt              time.Time
+	ID                     string
+	ExpectedCriteriaJson   string
+}
+
+// AR-1a / D-SEC-3: apply an amendment only to the criteria it was computed
+// from, and only while the task is still open. Two amendments racing on one
+// task, or an amendment racing the task's completion, must not silently
+// overwrite each other; zero rows means the caller lost and must re-read.
+func (q *Queries) CASWorkflowTaskAcceptanceCriteria(ctx context.Context, arg CASWorkflowTaskAcceptanceCriteriaParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, cASWorkflowTaskAcceptanceCriteria,
+		arg.AcceptanceCriteriaJson,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.ExpectedCriteriaJson,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const findWorkflowRunByPlannedTask = `-- name: FindWorkflowRunByPlannedTask :one
 SELECT id FROM workflow_runs WHERE planned_task_id = ?
 `
@@ -256,8 +287,8 @@ func (q *Queries) InsertWorkflowTask(ctx context.Context, arg InsertWorkflowTask
 const insertWorkflowTaskCriterionAmendment = `-- name: InsertWorkflowTaskCriterionAmendment :exec
 INSERT INTO workflow_task_criterion_amendments (id, workflow_run_id, task_id, criterion_index,
     original_criterion, amended_criterion, disposition, reason, evidence_json, approved_by,
-    superseded_review_run_id, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    approved_by_user_id, approved_auth_method, superseded_review_run_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertWorkflowTaskCriterionAmendmentParams struct {
@@ -271,6 +302,8 @@ type InsertWorkflowTaskCriterionAmendmentParams struct {
 	Reason                string
 	EvidenceJson          string
 	ApprovedBy            string
+	ApprovedByUserID      string
+	ApprovedAuthMethod    string
 	SupersededReviewRunID string
 	CreatedAt             time.Time
 }
@@ -287,6 +320,8 @@ func (q *Queries) InsertWorkflowTaskCriterionAmendment(ctx context.Context, arg 
 		arg.Reason,
 		arg.EvidenceJson,
 		arg.ApprovedBy,
+		arg.ApprovedByUserID,
+		arg.ApprovedAuthMethod,
 		arg.SupersededReviewRunID,
 		arg.CreatedAt,
 	)
@@ -308,7 +343,7 @@ func (q *Queries) InsertWorkflowTaskDependency(ctx context.Context, arg InsertWo
 }
 
 const listWorkflowTaskCriterionAmendments = `-- name: ListWorkflowTaskCriterionAmendments :many
-SELECT id, workflow_run_id, task_id, criterion_index, original_criterion, amended_criterion, disposition, reason, evidence_json, approved_by, superseded_review_run_id, created_at FROM workflow_task_criterion_amendments WHERE workflow_run_id = ?
+SELECT id, workflow_run_id, task_id, criterion_index, original_criterion, amended_criterion, disposition, reason, evidence_json, approved_by, superseded_review_run_id, created_at, approved_by_user_id, approved_auth_method FROM workflow_task_criterion_amendments WHERE workflow_run_id = ?
 ORDER BY created_at, id
 `
 
@@ -334,6 +369,8 @@ func (q *Queries) ListWorkflowTaskCriterionAmendments(ctx context.Context, workf
 			&i.ApprovedBy,
 			&i.SupersededReviewRunID,
 			&i.CreatedAt,
+			&i.ApprovedByUserID,
+			&i.ApprovedAuthMethod,
 		); err != nil {
 			return nil, err
 		}

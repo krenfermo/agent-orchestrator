@@ -738,6 +738,7 @@ func (m *Manager) prepareTargetActivation(ctx context.Context, store ports.Agent
 		return preparedTargetActivation{}, fmt.Errorf("system prompt file: %w", err)
 	}
 	config := effectiveAgentConfig(rec.Kind, project.Config)
+	m.auditPermissionBypass("agent-switch", rec.ID, rec.ProjectID, harness, config)
 	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
 	// Checkpoint 8P-B.2 §13: a provider switch (Claude<->Codex, ...) keeps
 	// the SAME session row/id (runtimeCfg.SessionID below is the original
@@ -769,10 +770,14 @@ func (m *Manager) prepareTargetActivation(ctx context.Context, store ports.Agent
 	if err != nil {
 		return preparedTargetActivation{}, err
 	}
+	additional, err := m.restoredWorkspaceProjectDirectories(ctx, rec, project, rec.Metadata.WorkspacePath)
+	if err != nil {
+		return preparedTargetActivation{}, fmt.Errorf("workspace project roots: %w", err)
+	}
 	launch := ports.LaunchConfig{
 		DataDir: m.dataDir, SessionID: string(rec.ID), WorkspacePath: rec.Metadata.WorkspacePath,
 		Kind: rec.Kind, SystemPrompt: systemPrompt, SystemPromptFile: systemFile,
-		Config: config, Permissions: config.Permissions,
+		Config: config, Permissions: config.Permissions, AdditionalDirectories: additional,
 	}
 	promptDelivery, err := agent.GetPromptDeliveryStrategy(ctx, launch)
 	if err != nil {
@@ -787,7 +792,7 @@ func (m *Manager) prepareTargetActivation(ctx context.Context, store ports.Agent
 		cmd, ok, restoreErr := agent.GetRestoreCommand(ctx, ports.RestoreConfig{
 			Session: ports.SessionRef{ID: string(rec.ID), WorkspacePath: rec.Metadata.WorkspacePath, Metadata: map[string]string{ports.MetadataKeyAgentSessionID: candidate.NativeSessionID}},
 			Kind:    rec.Kind, DataDir: m.dataDir, SystemPrompt: systemPrompt, SystemPromptFile: systemFile,
-			Config: config, Permissions: config.Permissions,
+			Config: config, Permissions: config.Permissions, AdditionalDirectories: additional,
 		})
 		if restoreErr != nil {
 			return preparedTargetActivation{}, fmt.Errorf("restore command: %w", restoreErr)
@@ -929,7 +934,7 @@ func (m *Manager) prepareTargetLaunchPrompt(ctx context.Context, rec domain.Sess
 			},
 			Kind: rec.Kind, DataDir: m.dataDir, Prompt: prompt,
 			SystemPrompt: launch.SystemPrompt, SystemPromptFile: launch.SystemPromptFile,
-			Config: launch.Config, Permissions: launch.Config.Permissions,
+			Config: launch.Config, Permissions: launch.Config.Permissions, AdditionalDirectories: launch.AdditionalDirectories,
 		})
 		if buildErr != nil {
 			return fmt.Errorf("restore command: %w", buildErr)

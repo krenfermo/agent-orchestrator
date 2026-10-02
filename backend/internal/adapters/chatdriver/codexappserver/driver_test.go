@@ -166,8 +166,9 @@ func newTestDriver(t *testing.T) (*Driver, *scriptedServer) {
 	}()
 
 	d := &Driver{
-		plugin: fakePlugin{bin: "codex", authStatus: ports.AgentAuthStatusAuthorized},
-		log:    slog.New(slog.DiscardHandler),
+		writableRoots: func(context.Context, string, []string) ([]string, error) { return nil, nil },
+		plugin:        fakePlugin{bin: "codex", authStatus: ports.AgentAuthStatusAuthorized},
+		log:           slog.New(slog.DiscardHandler),
 		versionProbe: func(context.Context, string) (string, error) {
 			return "codex-cli 0.146.0", nil
 		},
@@ -241,9 +242,10 @@ func TestStartCompletesHandshakeAndOpensThread(t *testing.T) {
 	if params.DeveloperInstructions != "standing rules" {
 		t.Errorf("developerInstructions = %q", params.DeveloperInstructions)
 	}
-	// Default permissions must match what AO already gives a Codex TUI session.
-	if params.ApprovalPolicy != "never" || params.Sandbox != "danger-full-access" {
-		t.Errorf("default posture = %q/%q, want never/danger-full-access", params.ApprovalPolicy, params.Sandbox)
+	// Default permissions match the Codex TUI default: since AR-1a (D-SEC-4)
+	// the workspace-write sandbox with approvals off, never full access.
+	if params.ApprovalPolicy != "never" || params.Sandbox != "workspace-write" {
+		t.Errorf("default posture = %q/%q, want never/workspace-write", params.ApprovalPolicy, params.Sandbox)
 	}
 }
 
@@ -663,11 +665,12 @@ func TestApprovalSettingsMirrorTUIPosture(t *testing.T) {
 		mode            ports.PermissionMode
 		policy, sandbox string
 	}{
-		{ports.PermissionModeDefault, "never", "danger-full-access"},
+		{ports.PermissionModeDefault, "never", "workspace-write"},
 		{ports.PermissionModeBypassPermissions, "never", "danger-full-access"},
 		{ports.PermissionModeAcceptEdits, "on-request", "workspace-write"},
 		{ports.PermissionModeAuto, "on-request", "workspace-write"},
-		{ports.PermissionMode("nonsense"), "never", "danger-full-access"},
+		{ports.PermissionMode("nonsense"), "never", "workspace-write"},
+		{ports.PermissionMode(""), "never", "workspace-write"},
 	} {
 		policy, sandbox := approvalSettings(tc.mode)
 		if policy != tc.policy || sandbox != tc.sandbox {

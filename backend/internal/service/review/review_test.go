@@ -311,7 +311,7 @@ func TestSubmitManySendsCombinedChangesRequested(t *testing.T) {
 	reducer := &fakeReducer{outcome: lifecycle.ReviewDeliverySent}
 	svc := New(nil, st, WithLifecycleReducer(reducer), WithClock(func() time.Time { return now }))
 
-	runs, err := svc.SubmitMany(context.Background(), "mer-1", []SubmittedReview{
+	runs, err := svc.SubmitMany(context.Background(), Submitter{}, "mer-1", []SubmittedReview{
 		{RunID: "run-1", Verdict: domain.VerdictChangesRequested, Body: "fix pr1", GithubReviewID: "101"},
 		{RunID: "run-2", Verdict: domain.VerdictChangesRequested, Body: "fix pr2", GithubReviewID: "102"},
 		{RunID: "run-3", Verdict: domain.VerdictApproved},

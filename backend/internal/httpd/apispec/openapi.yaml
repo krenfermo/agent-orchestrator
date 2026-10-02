@@ -13843,7 +13843,6 @@ components:
       - criterionIndex
       - reason
       - evidence
-      - approvedBy
       type: object
     ControllersAmendTaskCriterionResponse:
       properties:
@@ -13879,7 +13878,6 @@ components:
         reauthorize:
           type: boolean
       required:
-      - approvedBy
       - reason
       type: object
     ControllersCapacitySnapshotResponse:
@@ -17983,7 +17981,11 @@ components:
       properties:
         amendedCriterion:
           type: string
+        approvedAuthMethod:
+          type: string
         approvedBy:
+          type: string
+        approvedByUserId:
           type: string
         createdAt:
           format: date-time
@@ -25697,7 +25699,11 @@ components:
       type: object
     WorkflowIntegrationFreshReviewException:
       properties:
+        approvedAuthMethod:
+          type: string
         approvedBy:
+          type: string
+        approvedByUserId:
           type: string
         childRunId:
           type: string

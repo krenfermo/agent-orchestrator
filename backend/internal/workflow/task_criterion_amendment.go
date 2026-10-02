@@ -3,6 +3,7 @@ package workflow
 import (
 	stdctx "context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -57,8 +58,15 @@ type TaskCriterionAmendmentRequest struct {
 	// Evidence is what proves the reason — commit ids, observations, anything a
 	// later reader can check. At least one is required.
 	Evidence []string
-	// ApprovedBy names the human who authorized this. Required.
+	// ApprovedBy names the human who authorized this. Required. Since AR-1a
+	// (D-SEC-3) the transport derives it from the authenticated principal.
 	ApprovedBy string
+	// ApprovedByUserID is that principal's user id. Required: an amendment no
+	// authenticated person can be held to is refused.
+	ApprovedByUserID domain.UserID
+	// ApprovedAuthMethod is how the principal was identified. An agent may
+	// never approve an amendment of the criteria it is judged against.
+	ApprovedAuthMethod domain.AuthMethod
 }
 
 // taskCriterionAmendedPhase is the durable record on the CHILD run, where the
@@ -84,6 +92,12 @@ func (c *Coordinator) AmendTaskAcceptanceCriterion(ctx stdctx.Context, req TaskC
 	}
 
 	switch {
+	case req.ApprovedAuthMethod == domain.AuthMethodAgent:
+		return domain.WorkflowTaskCriterionAmendment{},
+			fmt.Errorf("%w: an agent cannot approve an amendment of acceptance criteria", ErrInvalid)
+	case req.ApprovedByUserID == "" || req.ApprovedAuthMethod == "":
+		return domain.WorkflowTaskCriterionAmendment{},
+			fmt.Errorf("%w: an acceptance criterion may only be amended by an authenticated person", ErrInvalid)
 	case req.ApprovedBy == "":
 		// The single most important refusal in this file. Without it the
 		// mechanism is "an agent may rewrite the bar it is judged against".
@@ -158,17 +172,26 @@ func (c *Coordinator) AmendTaskAcceptanceCriterion(ctx stdctx.Context, req TaskC
 		Reason:                req.Reason,
 		Evidence:              evidence,
 		ApprovedBy:            req.ApprovedBy,
+		ApprovedByUserID:      req.ApprovedByUserID,
+		ApprovedAuthMethod:    req.ApprovedAuthMethod,
 		SupersededReviewRunID: latestReviewRunID(child),
 		CreatedAt:             c.clock(),
 	}
 	// The ledger row and the new criteria land together or not at all.
-	if err := c.planStore.AmendWorkflowTaskCriterion(ctx, amendment, applied, c.clock()); err != nil {
+	if err := c.planStore.AmendWorkflowTaskCriterion(ctx, amendment, task.AcceptanceCriteriaJSON, applied, c.clock()); err != nil {
+		if errors.Is(err, domain.ErrWorkflowTaskCriterionConflict) {
+			// Optimistic concurrency, enforced where it cannot be raced: the
+			// criteria (or the task's openness) changed after they were read.
+			return domain.WorkflowTaskCriterionAmendment{},
+				fmt.Errorf("%w: task %s was amended or closed concurrently; re-read its criteria and retry", ErrInvalid, req.TaskID)
+		}
 		return domain.WorkflowTaskCriterionAmendment{}, err
 	}
 	if c.log != nil {
 		c.log.Info("workflow: a task's acceptance criterion was amended by a person",
 			"run", req.RunID, "task", req.TaskID, "index", req.CriterionIndex,
-			"disposition", disposition, "approvedBy", req.ApprovedBy)
+			"disposition", disposition, "approvedBy", req.ApprovedBy,
+			"approvedByUserId", req.ApprovedByUserID, "authMethod", req.ApprovedAuthMethod)
 	}
 
 	if !hasChild {

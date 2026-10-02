@@ -133,8 +133,28 @@ posture. A denial is the same 404 the ownership gates report.
 
 Presenting the header is a claim about what the request *is*. Once made, it is
 the only identity considered: a bad agent token resolves to no principal rather
-than to whatever cookie happens to be attached. It still reaches trusted-local
-synthesis, so a desktop install behaves exactly as it did before.
+than to whatever cookie happens to be attached.
+
+Since AR-1a (D-SEC-1) it does **not** reach trusted-local synthesis either: a
+presented agent credential that fails to authenticate -- unknown, malformed,
+expired, revoked, or unevaluable -- is answered `401 AGENT_CREDENTIAL_INVALID`
+on every installation. Before, on a desktop install, such a request resolved
+to the bootstrap owner, so any stale or forged token was a key to every route.
+A request that presents **no** agent credential is unaffected and keeps
+trusted-local synthesis.
+
+Late verdicts (a review run AO already closed out, e.g. on the stall path):
+- for a run created expecting its reviewer's identity
+  (`reviewer_identity_expected = 1`), only that reviewer's credential may record
+  a verdict, late ones included (Codex AR1A-FIN-02): a header-less late verdict
+  could otherwise be forged by the worker and later adopted. The reviewer's own
+  late verdict still lands while its credential is live -- the revocation
+  sweep follows closure (within its interval), it never anticipates it; a
+  verdict arriving after the credential and its file were swept is not
+  recorded and the workflow's ordinary review relaunch applies;
+- for a run without that marker (an unowned legacy run, or a build without the
+  identity layer) the reviewer's header-less late `ao review submit` is still
+  preserved exactly as before.
 
 The CLI enforces the mirror rule. Inside an AO-launched runtime — detected by
 `AO_AGENT_CREDENTIAL_FILE` or the runtime's own `AO_SESSION_OWNER` — it presents
@@ -145,9 +165,26 @@ than telling a pane with no browser to run `ao auth login`.
 
 Where an identity is required and one cannot be minted, the launch is refused.
 Starting a reviewer that provably cannot record its verdict only moves the dead
-end thirty minutes later, to the staleness threshold. On trusted-local the
-reviewer's cookie-less call resolves the bootstrap admin anyway, so a missing
-credential costs nothing and must not cost a launch.
+end thirty minutes later, to the staleness threshold.
+
+Since AR-1a (D-SEC-2) the same refusal applies on trusted-local for every
+review run created expecting its reviewer's identity -- a workflow review of
+a run with a recorded owner, when the launcher hands out reviewer credentials
+(`review_run.reviewer_identity_expected = 1`, migration 0177). While such a run
+is running only that reviewer's credential may record its verdict, so a
+header-less reviewer would be a dead end: a failed mint or hand-over fails the
+launch and the ordinary reviewer-launch retry takes over. Only a run that does
+not expect an identity (an unowned legacy run, or a build without the identity
+layer) still launches a header-less reviewer on trusted-local, whose call
+resolves the bootstrap admin as before. A failure to READ the run's owner is
+never treated as "unowned": the dispatch refuses before creating the run.
+
+The reviewer's credential follows that marker: on trusted-local a reviewer is
+minted a credential only for a run created expecting one, so a credential can
+never appear on a running run that was created without the marker (for
+example a run that was unowned at review creation and was assigned an owner a
+moment later). An installation that requires an identity always mints, because
+there a header-less request resolves nobody.
 
 ## Recovering runs already stranded
 
@@ -177,6 +214,15 @@ above. Every uncertain answer is false: a probe that errored, a launch that was
 never confirmed, a presence AO cannot correlate to its own launch (`foreign`), one
 it could not read (`unknown`), a trusted-local installation, and an unreadable
 ledger all decline.
+
+## Known residual (AR1A-01, accepted until AR-5)
+
+A request presenting **no** agent credential still resolves to the bootstrap
+owner on a trusted-local installation, so an AO-launched agent that omits its
+own header acts as the owner. This predates AR-1a, is accepted as an explicit
+P1 residual, and is closed only by the human-presence mechanism of AR-5 (D1);
+AR-5 cannot be declared closed while it is exploitable. See
+[autonomous-roadmap/ar1a-closure.md](autonomous-roadmap/ar1a-closure.md).
 
 ## What is never done
 

@@ -65,7 +65,7 @@ func TestSubmitManyEndsEveryRunsCredentialAfterAllOfThemAreRecorded(t *testing.T
 		WithClock(func() time.Time { return now }),
 		WithAgentCredentials(creds))
 
-	if _, err := svc.SubmitMany(context.Background(), "mer-1", []SubmittedReview{
+	if _, err := svc.SubmitMany(context.Background(), Submitter{}, "mer-1", []SubmittedReview{
 		{RunID: "run-a", Verdict: domain.VerdictApproved},
 		{RunID: "run-b", Verdict: domain.VerdictApproved},
 	}); err != nil {

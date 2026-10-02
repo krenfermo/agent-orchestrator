@@ -883,25 +883,26 @@ type Review struct {
 }
 
 type ReviewRun struct {
-	ID               string
-	ReviewID         string
-	SessionID        domain.SessionID
-	Harness          domain.ReviewerHarness
-	PRURL            string
-	TargetSha        string
-	Status           domain.ReviewRunStatus
-	Verdict          domain.ReviewVerdict
-	Body             string
-	CreatedAt        time.Time
-	GithubReviewID   string
-	DeliveredAt      sql.NullTime
-	BatchID          string
-	AutoInjectReview bool
-	TriggerSource    domain.ReviewTriggerSource
-	LateVerdict      string
-	LateVerdictBody  string
-	LateVerdictAt    sql.NullTime
-	SupersededBy     string
+	ID                       string
+	ReviewID                 string
+	SessionID                domain.SessionID
+	Harness                  domain.ReviewerHarness
+	PRURL                    string
+	TargetSha                string
+	Status                   domain.ReviewRunStatus
+	Verdict                  domain.ReviewVerdict
+	Body                     string
+	CreatedAt                time.Time
+	GithubReviewID           string
+	DeliveredAt              sql.NullTime
+	BatchID                  string
+	AutoInjectReview         bool
+	TriggerSource            domain.ReviewTriggerSource
+	LateVerdict              string
+	LateVerdictBody          string
+	LateVerdictAt            sql.NullTime
+	SupersededBy             string
+	ReviewerIdentityExpected int64
 }
 
 type Session struct {
@@ -1805,6 +1806,8 @@ type WorkflowTaskCriterionAmendment struct {
 	ApprovedBy            string
 	SupersededReviewRunID string
 	CreatedAt             time.Time
+	ApprovedByUserID      string
+	ApprovedAuthMethod    string
 }
 
 type WorkflowTaskDependency struct {
