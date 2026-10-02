@@ -363,7 +363,7 @@ func (s *Service) authorizeSubmission(ctx context.Context, submitter Submitter, 
 	}
 	creds, err := ledger.ListAgentCredentialsForReviewRun(ctx, run.ID)
 	if err != nil {
-		return fmt.Errorf("%w: the reviewer credentials of review run %q could not be read: %v", ErrForbidden, run.ID, err)
+		return fmt.Errorf("%w: the reviewer credentials of review run %q could not be read: %w", ErrForbidden, run.ID, err)
 	}
 	for _, c := range creds {
 		// Any unrevoked reviewer credential counts, expired or not -- the same

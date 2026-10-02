@@ -233,10 +233,10 @@ type ReviewerIdentityIssuer interface {
 	IssuesReviewerIdentity() bool
 }
 
-// WorkflowRunOwnerReader is the owner lookup the reviewer-identity decision
+// RunOwnerReader is the owner lookup the reviewer-identity decision
 // needs, wired explicitly as Deps.RunOwners (the coordinator's own store may be
 // a decorator that does not carry it).
-type WorkflowRunOwnerReader interface {
+type RunOwnerReader interface {
 	GetWorkflowRunOwner(ctx stdctx.Context, id string) (*domain.UserID, error)
 }
 

@@ -309,7 +309,7 @@ type Deps struct {
 	// RunOwners reads a run's recorded owner for the reviewer-identity
 	// decision (AR-1a D-SEC-2). Optional: nil yields no owner, which keeps the
 	// pre-AR-1a behaviour for every run.
-	RunOwners WorkflowRunOwnerReader
+	RunOwners RunOwnerReader
 	// Logger receives recovery diagnostics. Optional.
 	Logger *slog.Logger
 
@@ -665,7 +665,7 @@ type Coordinator struct {
 	// check (see recovery.go). All optional.
 	sessions   Sessions
 	reviewRuns ReviewRuns
-	runOwners  WorkflowRunOwnerReader
+	runOwners  RunOwnerReader
 	log        *slog.Logger
 
 	// spawner, sessionFacts, and workspaceFacts back Checkpoint 8B's work-step

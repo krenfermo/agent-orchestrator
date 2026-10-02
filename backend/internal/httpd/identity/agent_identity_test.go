@@ -187,7 +187,7 @@ func TestAgentCredentialMatrixOnATrustedLocalInstall(t *testing.T) {
 
 	for name, token := range map[string]string{
 		"unknown":           "no-such-token",
-		"malformed":         "%%%not-a-token",
+		"malformed":         "%%%not-a-token\x01",
 		"expired/revoked":   "expired-or-revoked-token",
 		"browser session":   "a-real-browser-session-token",
 		"padded whitespace": "  no-such-token  ",
