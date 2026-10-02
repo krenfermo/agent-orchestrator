@@ -206,6 +206,15 @@ never confirmed, a presence AO cannot correlate to its own launch (`foreign`), o
 it could not read (`unknown`), a trusted-local installation, and an unreadable
 ledger all decline.
 
+## Known residual (AR1A-01, accepted until AR-5)
+
+A request presenting **no** agent credential still resolves to the bootstrap
+owner on a trusted-local installation, so an AO-launched agent that omits its
+own header acts as the owner. This predates AR-1a, is accepted as an explicit
+P1 residual, and is closed only by the human-presence mechanism of AR-5 (D1);
+AR-5 cannot be declared closed while it is exploitable. See
+[autonomous-roadmap/ar1a-closure.md](autonomous-roadmap/ar1a-closure.md).
+
 ## What is never done
 
 - No verdict is ever fabricated. A closed-out review run carries no verdict, and
