@@ -185,13 +185,15 @@ func TestWiring_StartSessionBuildsSessionService(t *testing.T) {
 	lcm := lifecycle.New(store, nil)
 	cfg := config.Config{DataDir: t.TempDir()}
 
-	rt := runtimeselect.New(nil)
+	rt := runtimeselect.New(nil, "", t.TempDir(), runtimeselect.Identity{})
 	messenger := newSessionMessenger(store, rt, log)
 	agents, err := buildAgentResolver(config.DefaultAgent, log)
 	if err != nil {
 		t.Fatalf("buildAgentResolver: %v", err)
 	}
-	svc, reviewSvc, lc, err := startSession(context.Background(), cfg, rt, store, lcm, messenger, telemetryadapter.NoopSink{}, agents, nil, nil, nil, nil, nil, log)
+	stack, err := startSession(context.Background(), cfg, rt, store, lcm, messenger, telemetryadapter.NoopSink{}, agents, nil, nil, nil, nil, nil, nil, nil, log)
+	svc, reviewSvc, lc := stack.Service, stack.Review, stack.Lifecycle
+	_, _ = reviewSvc, lc
 	if err != nil {
 		t.Fatalf("startSession: %v", err)
 	}
@@ -252,7 +254,9 @@ func TestWiring_StartSessionSpawnsScratchWithoutGitRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildAgentResolver: %v", err)
 	}
-	svc, _, _, err := startSession(context.Background(), cfg, runtime, store, lcm, messenger, telemetryadapter.NoopSink{}, agents, nil, nil, nil, nil, nil, log)
+	stack, err := startSession(context.Background(), cfg, runtime, store, lcm, messenger, telemetryadapter.NoopSink{}, agents, nil, nil, nil, nil, nil, nil, nil, log)
+	svc, reviewSvc, lc := stack.Service, stack.Review, stack.Lifecycle
+	_, _ = reviewSvc, lc
 	if err != nil {
 		t.Fatalf("startSession: %v", err)
 	}
@@ -301,13 +305,15 @@ func TestStartSession_SpawnDoesNotPanicWhenNoTrackerToken(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	lcm := lifecycle.New(store, nil)
 	cfg := config.Config{DataDir: t.TempDir()}
-	rt := runtimeselect.New(nil)
+	rt := runtimeselect.New(nil, "", t.TempDir(), runtimeselect.Identity{})
 	messenger := newSessionMessenger(store, rt, log)
 	agents, agentsErr := buildAgentResolver(config.DefaultAgent, log)
 	if agentsErr != nil {
 		t.Fatalf("buildAgentResolver: %v", agentsErr)
 	}
-	svc, _, _, err := startSession(context.Background(), cfg, rt, store, lcm, messenger, telemetryadapter.NoopSink{}, agents, nil, nil, nil, nil, nil, log)
+	stack, err := startSession(context.Background(), cfg, rt, store, lcm, messenger, telemetryadapter.NoopSink{}, agents, nil, nil, nil, nil, nil, nil, nil, log)
+	svc, reviewSvc, lc := stack.Service, stack.Review, stack.Lifecycle
+	_, _ = reviewSvc, lc
 	if err != nil {
 		t.Fatalf("startSession: %v", err)
 	}
@@ -360,13 +366,15 @@ func TestStartTrackerIntake_RunsEvenWithoutEnabledProjects(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	lcm := lifecycle.New(store, nil)
 	cfg := config.Config{DataDir: t.TempDir()}
-	rt := runtimeselect.New(nil)
+	rt := runtimeselect.New(nil, "", t.TempDir(), runtimeselect.Identity{})
 	messenger := newSessionMessenger(store, rt, log)
 	agents, agentsErr := buildAgentResolver(config.DefaultAgent, log)
 	if agentsErr != nil {
 		t.Fatalf("buildAgentResolver: %v", agentsErr)
 	}
-	svc, _, _, err := startSession(context.Background(), cfg, rt, store, lcm, messenger, telemetryadapter.NoopSink{}, agents, nil, nil, nil, nil, nil, log)
+	stack, err := startSession(context.Background(), cfg, rt, store, lcm, messenger, telemetryadapter.NoopSink{}, agents, nil, nil, nil, nil, nil, nil, nil, log)
+	svc, reviewSvc, lc := stack.Service, stack.Review, stack.Lifecycle
+	_, _ = reviewSvc, lc
 	if err != nil {
 		t.Fatalf("startSession: %v", err)
 	}
@@ -559,7 +567,7 @@ func TestWiring_StartLifecycleThreadsMessengerIntoLCM(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	messenger := &captureMessenger{}
-	stack := startLifecycle(ctx, store, tmux.New(tmux.Options{}), messenger, nil, nil, nil, log)
+	stack := startLifecycle(ctx, store, tmux.New(tmux.Options{}), messenger, nil, nil, nil, nil, log)
 	t.Cleanup(stack.Stop)
 	t.Cleanup(cancel)
 

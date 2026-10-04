@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
@@ -37,6 +37,10 @@ vi.mock("../hooks/useSessionUsageSummaries", () => ({
 vi.mock("../lib/api-client", () => ({
 	apiClient: { POST: (...args: unknown[]) => postMock(...args) },
 	apiErrorMessage: (_error: unknown, fallback: string) => fallback,
+	// The board now hosts the workflow lane, which reads the project Board
+	// projection. Reporting no trusted base URL keeps that query disabled so
+	// these tests stay about the session grid.
+	hasTrustedApiBaseUrl: () => false,
 }));
 
 vi.mock("../lib/bridge", () => ({
@@ -164,12 +168,32 @@ describe("SessionsBoard", () => {
 
 		expect(screen.getByTestId("board-topbar-label").textContent).toContain("Board");
 		expect(screen.queryByText("solkit-ui")).toBeNull();
-		expect(screen.getByRole("button", { name: "New task" }).closest(".center-panel-titlebar")).toHaveClass(
+		expect(screen.getByRole("button", { name: "New session" }).closest(".center-panel-titlebar")).toHaveClass(
 			"workspace-topbar-container",
 		);
 		expect(
-			within(screen.getByRole("button", { name: "New task" })).getByText("Task").hasAttribute("data-compact-label"),
+			within(screen.getByRole("button", { name: "New session" })).getByText("Session").hasAttribute("data-compact-label"),
 		).toBe(true);
+	});
+
+	// The two buttons beside each other do different things, and the board is
+	// where that was confusable: "New session" delegates a worker through
+	// /orchestrators/delegate, "New work" opens the workflow form with
+	// this project preselected. This asserts the second one exists on a board
+	// with no workflow runs at all -- ProjectWorkflowLane renders nothing then,
+	// which is exactly when there was no way to reach a real workflow.
+	it("offers a way to start a real workflow run, with the project preselected", () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [{ id: "p1", name: "solkit-ui", path: "/tmp/solkit-ui", sessions: [] }],
+			isError: false,
+			isSuccess: true,
+		});
+
+		renderBoard("p1");
+
+		fireEvent.click(screen.getByRole("button", { name: "New work" }));
+
+		expect(navigateMock).toHaveBeenCalledWith({ to: "/workflows", search: { projectId: "p1" } });
 	});
 
 	it.each([
@@ -206,7 +230,7 @@ describe("SessionsBoard", () => {
 
 		renderBoard("p1");
 
-		const button = screen.getByRole("button", { name: `Orchestrator, ${label}` });
+		const button = screen.getByRole("button", { name: `Interactive orchestrator, ${label}` });
 		const indicator = button.querySelector("span.size-dot-sm") as HTMLElement;
 		expect(within(button).getByText("Orchestrator").hasAttribute("data-compact-label")).toBe(true);
 		expect(indicator).toHaveAttribute("aria-hidden", "true");
@@ -432,6 +456,81 @@ describe("SessionsBoard", () => {
 		expect(within(idleCard).getByText("Idle").parentElement).toHaveClass("text-status-idle");
 		expect(within(noSignalCard).getByText("No signal").parentElement).toHaveClass("text-status-unknown");
 		expect(within(draftCard).getByText("Draft PR").parentElement).toHaveClass("text-status-in-review");
+	});
+
+	// The user-visible half of the finished-task fix: the task that did its
+	// work is labelled Completed on the board, and it sits in the Completed
+	// section of the finished column instead of hiding among the idle ones —
+	// without ever being called ready to merge or merged.
+	it("labels a finished task Completed and files it under Completed, not Idle", () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				workspaceWithSessions([
+					{
+						id: "s-completed",
+						workspaceId: "p1",
+						workspaceName: "radic",
+						title: "finished-task",
+						provider: "claude-code",
+						branch: "ao/radic-9",
+						status: "completed",
+						activity: { state: "idle", lastActivityAt: "2026-01-01T00:00:00Z" },
+						updatedAt: "2026-01-01T00:00:00Z",
+						prs: [],
+					},
+					{
+						id: "s-idle",
+						workspaceId: "p1",
+						workspaceName: "radic",
+						title: "quiet-task",
+						provider: "claude-code",
+						branch: "ao/radic-10",
+						status: "idle",
+						activity: { state: "idle", lastActivityAt: "2026-01-01T00:00:00Z" },
+						updatedAt: "2026-01-01T00:00:00Z",
+						prs: [],
+					},
+					{
+						id: "s-working",
+						workspaceId: "p1",
+						workspaceName: "radic",
+						title: "busy-task",
+						provider: "claude-code",
+						branch: "ao/radic-11",
+						status: "working",
+						activity: { state: "active", lastActivityAt: "2026-01-01T00:00:00Z" },
+						updatedAt: "2026-01-01T00:00:00Z",
+						prs: [],
+					},
+				]),
+			],
+			isError: false,
+			isSuccess: true,
+		});
+
+		renderBoard("p1");
+
+		const completedCard = screen
+			.getByText("finished-task")
+			.closest('[data-testid="board-session-card"]') as HTMLElement;
+		expect(within(completedCard).getByText("Completed").parentElement).toHaveClass("text-status-ready");
+		expect(within(completedCard).queryByText("Idle")).toBeNull();
+
+		const workLane = screen.getByRole("region", { name: "Idle / Working sessions" });
+		expect(workLane).not.toHaveTextContent("finished-task");
+		expect(within(workLane).getByRole("region", { name: "Idle sessions" })).toHaveTextContent("quiet-task");
+		expect(within(workLane).getByRole("region", { name: "Working sessions" })).toHaveTextContent("busy-task");
+		expect(within(workLane).getByLabelText("1 idle session")).toHaveTextContent("1");
+		expect(within(workLane).getByLabelText("1 working session")).toHaveTextContent("1");
+
+		const mergeLane = screen.getByRole("region", { name: "Ready to merge / Merged sessions" });
+		const completedRegion = within(mergeLane).getByRole("region", { name: "Completed sessions" });
+		expect(within(completedRegion).getByText("finished-task")).toBeInTheDocument();
+		expect(within(mergeLane).getByLabelText("1 completed session")).toHaveTextContent("1");
+		expect(within(mergeLane).getByLabelText("0 ready to merge sessions")).toHaveTextContent("0");
+		expect(within(mergeLane).getByLabelText("0 merged sessions")).toHaveTextContent("0");
+		expect(within(mergeLane).queryByRole("region", { name: "Ready to merge sessions" })).not.toBeInTheDocument();
+		expect(within(mergeLane).queryByRole("region", { name: "Merged sessions" })).not.toBeInTheDocument();
 	});
 
 	it("places an exited live session in Needs you with an Exited badge", () => {

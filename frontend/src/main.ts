@@ -38,12 +38,17 @@ import {
 import { coerceUiSettings, readUiSettings, writeUiSettings, type UiSettings } from "./main/ui-settings";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, statSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { type DaemonLaunchSpec, bundledDaemonIdentityError, resolveDaemonLaunch } from "./shared/daemon-launch";
+import {
+	type DaemonLaunchSpec,
+	bundledDaemonIdentityError,
+	configuredDaemonIdentityError,
+	resolveDaemonLaunch,
+} from "./shared/daemon-launch";
 import { createListenPortScanner, defaultRunFilePath, parseRunFile } from "./shared/daemon-discovery";
 import type { DaemonStatus } from "./shared/daemon-status";
 import { attachAppShortcuts } from "./main/app-shortcuts";
@@ -66,7 +71,24 @@ import {
 	resolveDaemonFromPort,
 	resolveDaemonFromRunFile,
 } from "./shared/daemon-attach";
-import { browserDaemonOwnershipDecision, shouldReplacePortHolder } from "./shared/daemon-takeover";
+import {
+	type ShutdownProof,
+	browserDaemonOwnershipDecision,
+	isTransientOwnershipVerdict,
+	supervisorLinkTarget,
+	supervisorLinkVerdict,
+	decidePortHolderTakeover,
+	proveDaemonOwnedForShutdown,
+} from "./shared/daemon-takeover";
+import {
+	PREVIOUS_DAEMON_EXIT_POLL_MS,
+	PREVIOUS_DAEMON_EXIT_TIMEOUT_MS,
+	awaitPreviousDaemonExit,
+	decideReplacementRetry,
+} from "./shared/daemon-replace";
+import { readProcessState } from "./main/process-state";
+import { readDaemonLogSince } from "./main/daemon-log";
+import { sameCanonicalPath } from "./main/canonical-path";
 import { buildDaemonEnv, resolveShellEnv, type ShellRunner } from "./shared/shell-env";
 import {
 	handleCloudDeepLink,
@@ -74,19 +96,21 @@ import {
 	registerCloudProtocol,
 	showCloudSignInFailure,
 } from "./main/cloud-auth";
+import { beginSsoSignIn } from "./main/sso-signin";
 import { DEFAULT_POSTHOG_HOST, DEFAULT_POSTHOG_PROJECT_KEY } from "./shared/posthog-config";
-import { buildTelemetryBootstrap } from "./shared/telemetry";
+import { buildTelemetryBootstrap, defaultDataDir } from "./shared/telemetry";
 import { createBrowserViewHost, type BrowserViewHost } from "./main/browser-view-host";
 import { createWindowComposition, type WindowComposition } from "./main/window-composition";
 import { AgentBrowserRuntime } from "./main/agent-browser-runtime";
 import { sameBrowserRuntimeIdentity, type BrowserRuntimeIdentity } from "./main/browser-runtime-identity";
-import { connectSupervisor, type SupervisorLinkHandle } from "./main/supervisor-link";
+import { connectSupervisor, type SupervisorLinkHandle, type SupervisorLinkVerdict } from "./main/supervisor-link";
 import { connectBrowserRuntime, type BrowserRuntimeLinkHandle } from "./main/browser-runtime-link";
 import { keepDaemonAlive, shouldLinkOnAttach } from "./main/daemon-owner";
 import { readMigrationState, updateMigration, writeAppStateMarker, type MigrationState } from "./main/app-state";
 import { isAllowedAppExternalURL, openAllowedAppExternalURL } from "./main/external-open";
 import { shouldSignalAttention, shouldToast } from "./main/notification-signals";
-import { buildWindowsAppMenuTemplate } from "./main/menu";
+import { buildAppMenuTemplate } from "./main/menu";
+import { toggleDevToolsSafely } from "./main/devtools";
 import { ancestorRepositorySetupWarning, scanImportFolder } from "./main/import-folder-scan";
 
 // Globals injected at compile time by @electron-forge/plugin-vite.
@@ -146,6 +170,22 @@ let daemonStartPromise: Promise<DaemonStatus> | null = null;
 let daemonStartEpoch = 0;
 let daemonStatus: DaemonStatus = { state: "stopped" };
 let daemonOutput = "";
+// Set when a daemon replacement is being retried or has failed: until an explicit
+// daemon:start / daemon:restart, nothing automatic (status polling, boot) may stop
+// another daemon again. Without it the renderer's 1 s status poll would /shutdown
+// whatever daemon appears next -- the soak harness restoring its own, or `ao start`.
+let replacementHold: string | null = null;
+let replacementRetryTimer: ReturnType<typeof setTimeout> | null = null;
+// Bumped whenever the hold is cleared: a replacement decision still awaiting
+// its probes must not re-arm a hold (or a retry) that an explicit start cleared.
+let replacementHoldGeneration = 0;
+
+function clearReplacementHold(): void {
+	replacementHoldGeneration += 1;
+	replacementHold = null;
+	if (replacementRetryTimer) clearTimeout(replacementRetryTimer);
+	replacementRetryTimer = null;
+}
 let browserViewHost: BrowserViewHost | null = null;
 let windowComposition: WindowComposition | null = null;
 const browserCleanupPromises = new Set<Promise<void>>();
@@ -167,9 +207,8 @@ let isFlashing = false;
 const isDev = !app.isPackaged;
 
 // Dev mode uses a separate port and state subdirectory so it never collides with
-// a concurrently running installed-app daemon. The subdir also isolates supervise.sock
-// on Unix (backend derives it as dir(RunFilePath)/supervise.sock) and the named pipe
-// on Windows (supervisorPipeFromRunFile derives it from the same dir basename).
+// a concurrently running installed-app daemon. (The supervisor endpoint is per daemon
+// instance and published in the run-file; it is never derived from these paths.)
 const DEV_DAEMON_PORT = 3002;
 const DEV_STATE_SUBDIR = "dev"; // ~/.ao/dev/
 
@@ -191,6 +230,18 @@ const NATIVE_WINDOW_BACKGROUND_LIGHT = "#fbfbfb";
 
 function getShellWebContents(): WebContents | null {
 	return windowComposition?.shellWebContents ?? null;
+}
+
+// A WebContents reference proves nothing on its own: the window may have closed
+// since it was read, and calling into a destroyed one throws. Menu actions
+// re-resolve through this immediately before every use.
+function liveWebContents(contents: WebContents | null | undefined): WebContents | null {
+	if (!contents) return null;
+	try {
+		return contents.isDestroyed() ? null : contents;
+	} catch {
+		return null;
+	}
 }
 
 function syncNativeWindowBackground(): void {
@@ -312,17 +363,40 @@ function appendDaemonOutput(text: string): void {
 	daemonOutput = (daemonOutput + text).slice(-MAX_DAEMON_OUTPUT_CHARS);
 }
 
-// Menu installed on Windows where the native menu bar is hidden. The bar stays
-// out of sight, but the roles keep their accelerators alive (Reload, zoom, full
-// screen, edit commands). DevTools uses the AO browser toggle so the focused
-// Browser panel opens the same native Chromium surface as the toolbar.
-function buildWindowsAppMenu(): Menu {
+// Every DevTools entry point — the native menu, the accelerator, and the
+// renderer's own title-bar menu — funnels through here. The target is resolved
+// at the moment of use and proven live first; see main/devtools.ts for why
+// Electron's own toggleDevTools role cannot be used on a BaseWindow.
+function toggleDevTools(): Promise<void> {
+	return toggleDevToolsSafely({
+		togglePanelDevTools: () => browserViewHost?.toggleDevToolsForLastFocused(),
+		getShellContents: () => getShellWebContents(),
+		log: (message, detail) => (detail === undefined ? console.warn(message) : console.warn(message, detail)),
+	});
+}
+
+// Reload the surface the person is actually looking at: the focused Browser
+// panel if there is one, else the app shell.
+function reloadFocusedContents(ignoreCache: boolean): void {
+	const target = liveWebContents(browserViewHost?.getLastFocusedPanelContents()) ?? liveWebContents(getShellWebContents());
+	if (!target) return;
+	try {
+		if (ignoreCache) target.reloadIgnoringCache();
+		else target.reload();
+	} catch (error) {
+		console.warn("AO: reload failed", error);
+	}
+}
+
+// The application menu is installed on EVERY platform. Leaving macOS and Linux
+// on Electron's default menu is what exposed its toggleDevTools role, which
+// crashes the main process against AO's BaseWindow.
+function buildAppMenu(): Menu {
 	return Menu.buildFromTemplate(
-		buildWindowsAppMenuTemplate(() => {
-			const fallback = () => getShellWebContents()?.toggleDevTools();
-			void browserViewHost?.toggleDevToolsForLastFocused().then((state) => {
-				if (!state) fallback();
-			}).catch(fallback);
+		buildAppMenuTemplate(process.platform, {
+			toggleDevTools: () => void toggleDevTools(),
+			reload: () => reloadFocusedContents(false),
+			forceReload: () => reloadFocusedContents(true),
 		}),
 	);
 }
@@ -406,13 +480,15 @@ async function createWindowInternal(): Promise<void> {
 	const shellWebContents = getShellWebContents();
 	if (!shellWebContents) throw new Error("AO shell WebContents was not created");
 
-	// On Windows the app paints its own title bar (WindowTitlebar), so the native
-	// menu bar is hidden (autoHideMenuBar above). The role-based menu is still
-	// installed so its accelerators keep working and act on the focused pane;
-	// setMenuBarVisibility(false) keeps the strip itself out of view. macOS/Linux
-	// keep their native menus.
+	// Reinstall the application menu now that a window exists, so its actions
+	// bind against this window's browser host. On Windows the app paints its own
+	// title bar (WindowTitlebar), so the native menu bar is hidden
+	// (autoHideMenuBar above) and only the accelerators matter;
+	// setMenuBarVisibility(false) keeps the strip itself out of view. macOS and
+	// Linux show it, which is why their templates mirror the shape Electron's
+	// own default menu had.
+	Menu.setApplicationMenu(buildAppMenu());
 	if (process.platform === "win32") {
-		Menu.setApplicationMenu(buildWindowsAppMenu());
 		mainWindow.setMenuBarVisibility(false);
 	}
 
@@ -501,9 +577,21 @@ async function createWindowInternal(): Promise<void> {
 		disposeBrowserRuntimeLink();
 		keybindingRecordingActive = false;
 		if (windowComposition === composition) windowComposition = null;
-		void disposeBrowserViewHost().finally(() => {
-			composition.dispose();
-		});
+		// The shell surface is released only after the browser runtime has been
+		// torn down, which is asynchronous -- so this callback runs at least a
+		// tick after Electron destroyed the window, and the composition has to
+		// cope with that (it does; see WindowComposition.dispose).
+		//
+		// The trailing catch is not decoration. Without it a throw in either
+		// half becomes an UNHANDLED REJECTION, which today is a warning and
+		// under `--unhandled-rejections=strict` terminates the whole app --
+		// closing AO because a window was closed. Closing a window is never a
+		// reason to quit, so the failure is logged and contained here.
+		void disposeBrowserViewHost()
+			.finally(() => composition.dispose())
+			.catch((error) => {
+				console.error("window composition cleanup failed:", error);
+			});
 		mainWindow = null;
 		trayLifecycle.clearPendingTarget();
 	});
@@ -676,6 +764,13 @@ function daemonEnv(forceKeep = keepDaemonAlive(process.env)): NodeJS.ProcessEnv 
 		// Claude Code Chat uses AO's packaged ACP adapter + Node runtime. The
 		// provider executable itself is resolved by the daemon from the user's PATH
 		// and passed through CLAUDE_CODE_EXECUTABLE; it is not part of this resource.
+		// P4-A: the renderer is served from the app:// scheme while the daemon
+		// answers on http://127.0.0.1, so the two are different origins and a
+		// SameSite=Lax session cookie would never be sent between them. `none`
+		// (which implies Secure, honored on a loopback origin) is what makes a
+		// real signed-in session usable in the desktop app at all. A user-set
+		// value still wins, as everywhere else here.
+		AO_SESSION_COOKIE_SAMESITE: process.env.AO_SESSION_COOKIE_SAMESITE ?? "none",
 		AO_ACP_RUNTIME_DIR:
 			process.env.AO_ACP_RUNTIME_DIR ??
 			(app.isPackaged
@@ -700,10 +795,6 @@ function daemonEnv(forceKeep = keepDaemonAlive(process.env)): NodeJS.ProcessEnv 
 function pathKey(value: string): string {
 	const resolved = path.resolve(value);
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-}
-
-function samePath(a: string, b: string): boolean {
-	return pathKey(a) === pathKey(b);
 }
 
 function pathInside(child: string, parent: string): boolean {
@@ -738,9 +829,9 @@ async function readDaemonProbe(port: number, endpoint: "healthz" | "readyz"): Pr
 
 function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe): string | null {
 	if (launch.source === "dev") {
-		const cwdMatches = probe.workingDirectory ? samePath(probe.workingDirectory, launch.cwd) : false;
+		const cwdMatches = probe.workingDirectory ? sameCanonicalPath(probe.workingDirectory, launch.cwd) : false;
 		const startupCwdMatches = probe.startupWorkingDirectory
-			? samePath(probe.startupWorkingDirectory, launch.cwd)
+			? sameCanonicalPath(probe.startupWorkingDirectory, launch.cwd)
 			: false;
 		const executableMatches = probe.executablePath ? pathInside(probe.executablePath, launch.cwd) : false;
 		if (!probe.workingDirectory && !probe.startupWorkingDirectory && !probe.executablePath) {
@@ -755,9 +846,10 @@ function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe): stri
 	}
 
 	if (launch.source === "bundled") {
-		return bundledDaemonIdentityError(probe, launch.command, process.env.APPIMAGE, samePath);
+		return bundledDaemonIdentityError(probe, launch.command, process.env.APPIMAGE, sameCanonicalPath);
 	}
-	return null;
+	// AO_DAEMON_COMMAND is configuration, not an ownership exception (P9).
+	return configuredDaemonIdentityError(probe, launch.command, sameCanonicalPath);
 }
 
 /**
@@ -771,12 +863,6 @@ function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe): stri
  * headless `ao start` daemons stay unlinked so they remain persistent after
  * app quit.
  */
-function supervisorPipeFromRunFile(rfp: string | null): string {
-	if (!rfp) return "\\\\.\\pipe\\ao-supervise";
-	const dir = path.basename(path.dirname(rfp));
-	if (dir === ".ao" || dir === "." || dir === "") return "\\\\.\\pipe\\ao-supervise";
-	return "\\\\.\\pipe\\ao-supervise-" + dir.replace(/[^a-zA-Z0-9-]/g, "-");
-}
 
 function disposeBrowserRuntimeLink(): void {
 	browserRuntimeLink?.dispose();
@@ -829,22 +915,27 @@ function establishBrowserRuntimeLink(): void {
 	browserRuntimeLinkIdentity = identity;
 }
 
-function establishSupervisorLink(): void {
-	const rfp = runFilePath();
-	const addr =
-		process.platform === "win32"
-			? supervisorPipeFromRunFile(rfp)
-			: rfp
-				? path.join(path.dirname(rfp), "supervise.sock")
-				: null;
-	if (addr) {
-		supervisorLink?.dispose();
-		supervisorLink = connectSupervisor(addr, {
-			log: (msg) => console.log(`AO: ${msg}`),
-		});
-	} else {
-		console.warn("AO: supervisor link skipped; run-file path unavailable");
+// Holds the link only to the daemon incarnation proven here (P9), at the
+// endpoint that proven run-file publishes (named after the instance by the
+// daemon; never derived here). Every (re)connect re-proves the same instance
+// AND endpoint, so a link made for instance A never ends up connected to B.
+function establishSupervisorLink(launch: DaemonLaunchSpec, proof: ShutdownProof): void {
+	const target = supervisorLinkTarget(proof);
+	if (!target) {
+		console.warn(
+			proof.verdict === "verified"
+				? "AO: supervisor link skipped; the daemon does not publish a supervisor endpoint"
+				: `AO: supervisor link refused: ${proof.verdict}`,
+		);
+		return;
 	}
+	const verify = async (): Promise<SupervisorLinkVerdict> =>
+		supervisorLinkVerdict(await proveDaemonOwnership(launch, target.port), target);
+	supervisorLink?.dispose();
+	supervisorLink = connectSupervisor(target.supervisorAddress, {
+		log: (msg) => console.log(`AO: ${msg}`),
+		verify,
+	});
 }
 
 async function inspectExistingDaemon(
@@ -870,17 +961,141 @@ async function inspectExistingDaemon(
 	return { status, owner: info?.owner, appRunId: info?.appRunId };
 }
 
-async function gracefullyReplaceDaemonForBrowser(status: DaemonStatus): Promise<void> {
-	if (!status.port) throw new Error("the running daemon did not report a port");
-	const response = await fetch(`http://127.0.0.1:${status.port}/shutdown`, { method: "POST" });
-	if (!response.ok) throw new Error(`daemon shutdown returned HTTP ${response.status}`);
+const SHUTDOWN_REQUEST_TIMEOUT_MS = 10_000;
 
-	const deadline = Date.now() + 8_000;
-	while (Date.now() < deadline) {
-		if (!(await readDaemonProbe(status.port, "healthz"))) return;
-		await new Promise<void>((resolve) => setTimeout(resolve, 200));
+/** Electron refused to stop a daemon whose ownership P9 does not prove. Nothing was sent. */
+class DaemonOwnershipRefusal extends Error {
+	constructor(readonly proof: Exclude<ShutdownProof, { verdict: "verified" }>) {
+		super(proof.reason);
 	}
-	throw new Error("the previous daemon did not stop within 8 seconds");
+}
+
+// The data dir this launch's own daemon serves: the env the spawn would get,
+// resolved against the daemon's working directory as the daemon resolves it.
+function expectedDaemonDataDir(launch: DaemonLaunchSpec): string | null {
+	const dir = defaultDataDir(process.platform, daemonEnv(), os.homedir());
+	return dir ? path.resolve(launch.cwd, dir) : null;
+}
+
+// P9 §15, proven immediately before acting (shutdown, attach, link) so no caller's earlier
+// decision can stand in for it: the run-file of this launch names the daemon,
+// the process is alive, and /healthz answers as that PID, instance,
+// installation and data dir, and as this launch's checkout/bundle/configured
+// binary. See proveDaemonOwnedForShutdown.
+async function proveDaemonOwnership(launch: DaemonLaunchSpec, port: number): Promise<ShutdownProof> {
+	let runFile: ReturnType<typeof parseRunFile> = null;
+	const rfp = runFilePath();
+	if (rfp) {
+		try {
+			runFile = parseRunFile(await readFile(rfp, "utf8"));
+		} catch {
+			runFile = null;
+		}
+	}
+	const probe = await readDaemonProbe(port, "healthz");
+	return proveDaemonOwnedForShutdown({
+		port,
+		runFile,
+		runFilePidState: runFile?.pid ? await readProcessState(runFile.pid) : "gone",
+		probe,
+		expectedDataDir: expectedDaemonDataDir(launch),
+		launchIdentityError: probe ? daemonIdentityError(launch, probe) : null,
+		sameDataDir: sameCanonicalPath,
+	});
+}
+
+// The ONLY place the desktop app sends /shutdown. Asks a daemon P9 proves is
+// this launch's to stop, and returns its PID once that process has exited.
+// /healthz going quiet is not enough: the daemon closes its listener before it
+// releases <data>/daemon.lock, and a replacement spawned into that gap refuses
+// to start (P11 Stage 2, 2026-09-16). See shared/daemon-replace.ts.
+async function gracefullyReplaceDaemonForBrowser(
+	launch: DaemonLaunchSpec,
+	port: number | undefined,
+	pid: number | undefined,
+): Promise<number> {
+	if (!port) throw new Error("the running daemon did not report a port");
+	if (!pid) throw new Error("the running daemon did not report a PID, so its exit cannot be confirmed");
+	const proof = await proveDaemonOwnership(launch, port);
+	if (proof.verdict !== "verified") throw new DaemonOwnershipRefusal(proof);
+	if (proof.pid !== pid) {
+		throw new DaemonOwnershipRefusal({
+			verdict: "running_unverified",
+			reason: `the verified daemon is pid ${proof.pid}, not the pid ${pid} this start inspected`,
+		});
+	}
+	const response = await fetch(`http://127.0.0.1:${port}/shutdown`, {
+		method: "POST",
+		signal: AbortSignal.timeout(SHUTDOWN_REQUEST_TIMEOUT_MS),
+	});
+	if (!response.ok) throw new Error(`daemon shutdown returned HTTP ${response.status}`);
+	// The listener belonged to the verified PID a moment ago; the daemon names
+	// itself in the answer. A different PID here means the port changed hands in
+	// between: report it and do not spawn over it.
+	const answeredPid = await response
+		.json()
+		.then((body: { pid?: unknown }) => (typeof body?.pid === "number" ? body.pid : null))
+		.catch(() => null);
+	if (answeredPid !== proof.pid) {
+		throw new Error(
+			`the /shutdown answer came from pid ${answeredPid ?? "unknown"}, not the verified daemon ${proof.pid}; AO will not start another daemon over it`,
+		);
+	}
+
+	const result = await awaitPreviousDaemonExit({
+		pid: proof.pid,
+		port,
+		probe: (p) => readDaemonProbe(p, "healthz"),
+		processState: (p) => readProcessState(p),
+		now: Date.now,
+		sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+		timeoutMs: PREVIOUS_DAEMON_EXIT_TIMEOUT_MS,
+		pollMs: PREVIOUS_DAEMON_EXIT_POLL_MS,
+	});
+	if (!result.ok) throw new Error(result.reason);
+	return proof.pid;
+}
+
+// Link the daemon this launch just spawned, once P9 proves the daemon on the
+// bound port is it (the run-file is written just before the listener serves,
+// so allow a short settle). Never links anything else.
+async function linkSpawnedDaemon(launch: DaemonLaunchSpec, port: number, child: ChildProcess): Promise<void> {
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const proof = await proveDaemonOwnership(launch, port);
+		// A Restart/stop meanwhile: this proof may describe the dying daemon; never link it
+		// over (and dispose) the link of the daemon that replaced it.
+		if (daemonProcess !== child || daemonStoppingProcess === child) return;
+		if (proof.verdict === "verified") {
+			establishSupervisorLink(launch, proof);
+			return;
+		}
+		if (proof.verdict !== "no_provenance" && !isTransientOwnershipVerdict(proof.verdict)) {
+			console.warn(`AO: supervisor link refused: ${proof.verdict}: ${proof.reason}`);
+			return;
+		}
+		await new Promise<void>((resolve) => setTimeout(resolve, 250));
+	}
+	console.warn("AO: supervisor link skipped: the spawned daemon was not proven within 5 seconds");
+}
+
+// Status for a replacement that did not happen. A P9 refusal names the other
+// daemon and leaves resolving it to the person; nothing retries it on its own.
+function replacementFailureStatus(prefix: string, err: unknown): DaemonStatus {
+	if (err instanceof DaemonOwnershipRefusal && (err.proof.verdict === "stale" || isTransientOwnershipVerdict(err.proof.verdict))) {
+		return {
+			state: "error",
+			message: `AO could not verify the AO daemon on this app's port right now (${err.proof.verdict}: ${err.proof.reason}), so it did not stop it. Use Restart to check again.`,
+			code: "not_ready",
+		};
+	}
+	if (err instanceof DaemonOwnershipRefusal) {
+		return {
+			state: "error",
+			message: `Another AO daemon holds this app's port and AO cannot prove it belongs to this app (${err.proof.verdict}: ${err.proof.reason}). AO did not stop it. Stop it yourself -- for example \`ao stop\` for its data dir, or quit the other checkout's app -- then use Restart.`,
+			code: "identity_mismatch",
+		};
+	}
+	return { state: "error", message: `${prefix}: ${(err as Error).message}`, code: "not_ready" };
 }
 
 async function refreshDaemonStatus(): Promise<DaemonStatus> {
@@ -899,7 +1114,24 @@ async function refreshDaemonStatus(): Promise<DaemonStatus> {
 	const existing = await inspectExistingDaemon(launch);
 	if (existing) {
 		if (browserDaemonOwnershipDecision(appRunId, existing).action === "replace") {
+			// A failed replacement is not retried by polling; only an explicit start.
+			if (replacementHold) return daemonStatus;
 			return startDaemon();
+		}
+		// Polling must not undo an attach refusal: adopt the status only for a proven daemon.
+		const proof = existing.status.port ? await proveDaemonOwnership(launch, existing.status.port) : null;
+		if (!proof || proof.verdict !== "verified" || proof.pid !== existing.status.pid) {
+			setDaemonStatus(
+				replacementFailureStatus(
+					"Could not attach to the AO daemon",
+					new DaemonOwnershipRefusal(
+						proof && proof.verdict !== "verified"
+							? proof
+							: { verdict: "running_unverified", reason: "the daemon to attach to is not the verified one" },
+					),
+				),
+			);
+			return daemonStatus;
 		}
 		setDaemonStatus(existing.status);
 	} else if (
@@ -915,12 +1147,16 @@ async function refreshDaemonStatus(): Promise<DaemonStatus> {
 	return daemonStatus;
 }
 
-async function startDaemon(): Promise<DaemonStatus> {
+// A replacement that refused to start over a still-held ownership lock right
+// after this app stopped the daemon it replaced (see decideReplacementRetry).
+type ReplacementRetry = { replacedPid: number; attempt: number; keepAlive: boolean | undefined };
+
+async function startDaemon(retry?: ReplacementRetry): Promise<DaemonStatus> {
 	if (daemonStartPromise) {
 		return daemonStartPromise;
 	}
 	const startEpoch = daemonStartEpoch;
-	const promise = startDaemonInner(startEpoch).finally(() => {
+	const promise = startDaemonInner(startEpoch, retry).finally(() => {
 		if (daemonStartPromise === promise) {
 			daemonStartPromise = null;
 		}
@@ -936,7 +1172,7 @@ function resolvedDaemonPort(): number {
 	return isDev && !process.env.AO_PORT ? DEV_DAEMON_PORT : expectedDaemonPort(process.env);
 }
 
-async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
+async function startDaemonInner(startEpoch: number, retry?: ReplacementRetry): Promise<DaemonStatus> {
 	if (daemonProcess) {
 		return daemonStatus;
 	}
@@ -963,32 +1199,72 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		return daemonStatus;
 	}
 
-	let replacementKeepAlive: boolean | undefined;
+	let replacementKeepAlive: boolean | undefined = retry?.keepAlive;
+	// The PID of the daemon this start stopped, once its exit is proven. Only a
+	// start that replaced a daemon may retry a lock refusal.
+	let replacedPid: number | null = retry?.replacedPid ?? null;
+	// A retry only re-spawns into a data dir it just proved free. Anything that
+	// has claimed the port or run-file meanwhile is ambiguous: fail closed, never
+	// replace a second time.
+	const refuseRetry = (holder: string): DaemonStatus => {
+		setDaemonStatus({
+			state: "error",
+			message: `AO daemon did not start: ${holder} appeared while retrying the replacement; AO will not replace it again.`,
+			details: daemonOutput.trim() || undefined,
+			code: "not_ready",
+		});
+		return daemonStatus;
+	};
 	const existing = await inspectExistingDaemon(launch);
 	if (startEpoch !== daemonStartEpoch) {
 		return daemonStatus;
 	}
+	if (existing && retry) return refuseRetry(`an AO daemon (pid ${existing.status.pid ?? "unknown"})`);
+	const refuseHeld = (): DaemonStatus => {
+		setDaemonStatus({
+			state: "error",
+			message: `AO will not stop another daemon after a failed replacement (${replacementHold}). Use Restart to try again.`,
+			details: daemonOutput.trim() || undefined,
+			code: "not_ready",
+		});
+		return daemonStatus;
+	};
 	if (existing) {
 		const ownership = browserDaemonOwnershipDecision(appRunId, existing);
 		if (ownership.action === "replace") {
+			if (replacementHold) return refuseHeld();
 			try {
-				await gracefullyReplaceDaemonForBrowser(existing.status);
+				replacedPid = await gracefullyReplaceDaemonForBrowser(launch, existing.status.port, existing.status.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
-				setDaemonStatus({
-					state: "error",
-					message: `Could not take ownership of the browser runtime: ${(err as Error).message}`,
-					code: "not_ready",
-				});
+				// Whatever answers next is not stopped by a status poll (see replacementHold).
+				replacementHold = (err as Error).message;
+				setDaemonStatus(replacementFailureStatus("Could not take ownership of the browser runtime", err));
 				return daemonStatus;
 			}
 		} else {
+			// Attaching (and linking, which makes quitting this app stop the daemon)
+			// is taking ownership too: only a P9-proven daemon of this launch.
+			const proof = existing.status.port ? await proveDaemonOwnership(launch, existing.status.port) : null;
+			if (!proof || proof.verdict !== "verified" || proof.pid !== existing.status.pid) {
+				setDaemonStatus(
+					replacementFailureStatus(
+						"Could not attach to the AO daemon",
+						new DaemonOwnershipRefusal(
+							proof && proof.verdict !== "verified"
+								? proof
+								: { verdict: "running_unverified", reason: "the daemon to attach to is not the verified one" },
+						),
+					),
+				);
+				return daemonStatus;
+			}
 			setDaemonStatus(existing.status);
 			// Re-link the supervisor only when attaching to an app-owned daemon (one we
 			// previously spawned). Headless `ao start` daemons (owner unset) stay unlinked
 			// so they remain persistent after app quit.
 			if (shouldLinkOnAttach(existing.owner)) {
-				establishSupervisorLink();
+				establishSupervisorLink(launch, proof);
 			}
 			return daemonStatus;
 		}
@@ -1010,6 +1286,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	if (startEpoch !== daemonStartEpoch) {
 		return daemonStatus;
 	}
+	if (directDaemon && retry) return refuseRetry(`an AO daemon (pid ${directDaemon.pid ?? "unknown"})`);
 	if (directDaemon) {
 		let portAttachOwner: string | undefined;
 		let portAttachAppRunId: string | undefined;
@@ -1035,80 +1312,100 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 			appRunId: portAttachAppRunId,
 		});
 		if (ownership.action === "replace") {
+			if (replacementHold) return refuseHeld();
 			try {
-				await gracefullyReplaceDaemonForBrowser(directDaemon);
+				replacedPid = await gracefullyReplaceDaemonForBrowser(launch, directDaemon.port, directDaemon.pid);
 				replacementKeepAlive = ownership.keepAlive;
 			} catch (err) {
-				setDaemonStatus({
-					state: "error",
-					message: `Could not take ownership of the browser runtime: ${(err as Error).message}`,
-					code: "not_ready",
-				});
+				// Whatever answers next is not stopped by a status poll (see replacementHold).
+				replacementHold = (err as Error).message;
+				setDaemonStatus(replacementFailureStatus("Could not take ownership of the browser runtime", err));
 				return daemonStatus;
 			}
 		} else {
+			// The port answered, but the owner/appRunId came from the run-file: attach
+			// only when P9 proves they describe the same daemon of this launch.
+			const proof = directDaemon.port ? await proveDaemonOwnership(launch, directDaemon.port) : null;
+			if (!proof || proof.verdict !== "verified" || proof.pid !== directDaemon.pid) {
+				setDaemonStatus(
+					replacementFailureStatus(
+						"Could not attach to the AO daemon",
+						new DaemonOwnershipRefusal(
+							proof && proof.verdict !== "verified"
+								? proof
+								: { verdict: "running_unverified", reason: "the daemon answering the port is not the verified one" },
+						),
+					),
+				);
+				return daemonStatus;
+			}
 			setDaemonStatus(directDaemon);
-			if (shouldLinkOnAttach(portAttachOwner)) establishSupervisorLink();
+			if (shouldLinkOnAttach(portAttachOwner)) {
+				establishSupervisorLink(launch, proof);
+			}
 			return daemonStatus;
 		}
 	}
 
-	// Wedged-orphan kill+replace: both attach paths returned null, but a process
-	// may still be holding the port. The only reachable case here is a hung/wedged
-	// holder whose run-file PID is still alive but is not answering /healthz (e.g.
-	// our own daemon that bound the port and then deadlocked). Two cases are
-	// intentionally NOT handled: an identity-mismatched but healthy AO daemon is
-	// already surfaced as an error status upstream by resolveDaemonFromPort (not
-	// killed here), and a foreign non-AO process holding the port with a dead
-	// run-file PID is not replaced (out of scope). When no holder is detectable,
-	// skip straight to spawn.
+	// Port-holder takeover (P9): both attach paths returned null, but a process
+	// may still hold the port. AO never signals a process whose ownership it has
+	// not proven -- a PID that is merely alive may belong to anything after PID
+	// reuse, and its process group with it. A holder is only ever asked to stop
+	// through the daemon's own /shutdown, and only when it is provably the daemon
+	// the run-file names and passes this launch's identity check. Everything else
+	// is refused with the process named, and nothing is touched.
 	const orphanProbe = await readDaemonProbe(resolvedDaemonPort(), "healthz");
 	const runFilePath_ = runFilePath();
-	let runFilePid: number | null = null;
+	let runFileInfo: ReturnType<typeof parseRunFile> = null;
 	if (runFilePath_) {
 		try {
-			runFilePid = parseRunFile(await readFile(runFilePath_, "utf8"))?.pid ?? null;
+			runFileInfo = parseRunFile(await readFile(runFilePath_, "utf8"));
 		} catch {
-			// run-file absent or unreadable; proceed without a PID.
+			// run-file absent or unreadable; proceed without it.
 		}
 	}
-	// process.kill(pid, 0) does not kill; it throws iff the PID is not live.
-	let holderPidAlive = false;
-	if (runFilePid) {
+	const runFilePid = runFileInfo?.pid || null;
+	// A zombie holds no port, lock or run-file; anything that cannot be proven counts as alive.
+	const runFilePidState = runFilePid ? await readProcessState(runFilePid) : "gone";
+	const takeover = decidePortHolderTakeover({
+		probe: orphanProbe,
+		runFilePid,
+		runFileInstanceId: runFileInfo?.instanceId,
+		runFilePidAlive: runFilePidState === "alive" || runFilePidState === "unknown",
+		identityError: orphanProbe ? daemonIdentityError(launch, orphanProbe) : null,
+	});
+	if (retry && takeover.action !== "spawn") {
+		return refuseRetry(orphanProbe ? `an AO daemon (pid ${orphanProbe.pid})` : `a live run-file process (pid ${runFilePid})`);
+	}
+	if (takeover.action === "refuse") {
+		setDaemonStatus({
+			state: "error",
+			message: `The AO daemon port is held by a process AO cannot prove it owns: ${takeover.reason}`,
+			code: "not_ready",
+		});
+		return daemonStatus;
+	}
+	if (takeover.action === "graceful_shutdown" && orphanProbe) {
+		if (replacementHold) return refuseHeld();
 		try {
-			process.kill(runFilePid, 0);
-			holderPidAlive = true;
-		} catch {
-			holderPidAlive = false;
+			replacedPid = await gracefullyReplaceDaemonForBrowser(launch, resolvedDaemonPort(), orphanProbe.pid);
+		} catch (err) {
+			replacementHold = (err as Error).message;
+			setDaemonStatus(replacementFailureStatus("The previous AO daemon did not shut down", err));
+			return daemonStatus;
 		}
-	}
-	if (shouldReplacePortHolder(orphanProbe, holderPidAlive)) {
-		// Use the run-file PID when available; fall back to the probe's reported
-		// PID as a last resort (a wedged daemon may not have written a fresh run-file).
-		const pidToKill = runFilePid ?? orphanProbe?.pid ?? null;
-		if (pidToKill) {
+		// The run-file is removed only while it still names the daemon that just
+		// stopped, and only once that process is gone.
+		if (runFilePath_ && runFilePid && ["gone", "zombie"].includes(await readProcessState(runFilePid))) {
 			try {
-				process.kill(-pidToKill, "SIGTERM");
-			} catch {
-				try {
-					process.kill(pidToKill, "SIGTERM");
-				} catch {
-					// process already gone; proceed
+				const current = parseRunFile(await readFile(runFilePath_, "utf8"));
+				// Same incarnation, not merely the same (possibly reused) PID.
+				if (current?.pid === runFilePid && current?.instanceId === runFileInfo?.instanceId) {
+					await rm(runFilePath_, { force: true });
 				}
+			} catch {
+				// already gone
 			}
-		}
-		// Poll until the port is free (probe returns null) or 8 s elapses.
-		const TAKEOVER_TIMEOUT_MS = 8_000;
-		const TAKEOVER_POLL_MS = 200;
-		const deadline = Date.now() + TAKEOVER_TIMEOUT_MS;
-		while (Date.now() < deadline) {
-			const still = await readDaemonProbe(resolvedDaemonPort(), "healthz");
-			if (!still) break;
-			await new Promise<void>((r) => setTimeout(r, TAKEOVER_POLL_MS));
-		}
-		// Remove the stale run-file so the new daemon can write a fresh one.
-		if (runFilePath_) {
-			await rm(runFilePath_, { force: true });
 		}
 	}
 
@@ -1121,7 +1418,8 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		return daemonStatus;
 	}
 
-	daemonOutput = "";
+	// A retry keeps the previous attempt's output: it is the evidence if all fail.
+	if (!retry) daemonOutput = "";
 	setDaemonStatus({ state: "starting" });
 	if (launch.source === "bundled") {
 		try {
@@ -1156,12 +1454,20 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	// child so the parent does not wait on it. Port discovery then relies on the
 	// running.json handshake (the log pipe scan is skipped).
 	const keep = replacementKeepAlive ?? keepDaemonAlive(process.env);
+	// This child's own output, for deciding whether ITS failure is a lock refusal.
+	// daemonOutput also carries earlier attempts' output, for display only.
+	let childOutput = "";
 	let keepDaemonLogFd: number | undefined;
 	let stdio: "pipe" | "ignore" | ["pipe", number | "ignore", number | "ignore"] = "pipe";
+	const keepLogPath = path.join(os.homedir(), ".ao", "daemon.log");
+	// Where this child's keep-alive log output starts: its only diagnostic, since
+	// there are no pipes to capture. Read back if it fails to start.
+	let keepLogOffset = 0;
 	if (keep) {
-		const logPath = path.join(os.homedir(), ".ao", "daemon.log");
+		const logPath = keepLogPath;
 		try {
 			keepDaemonLogFd = openSync(logPath, "a");
+			keepLogOffset = statSync(logPath).size;
 			stdio = ["pipe", keepDaemonLogFd, keepDaemonLogFd];
 		} catch {
 			// Log redirect failed (e.g. ~/.ao not creatable, permission denied):
@@ -1222,6 +1528,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	// confirmed sources race — the "daemon listening" slog line (stderr, but both
 	// streams are scanned) and the running.json handshake — first one wins.
 	const spawnedAtMs = Date.now();
+	let handshakeProving = false;
 	let portConfirmed = false;
 	let runFileTimer: ReturnType<typeof setInterval> | undefined;
 	let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1237,6 +1544,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		if (portConfirmed || daemonProcess !== child || daemonStoppingProcess === child) return;
 		portConfirmed = true;
 		stopDiscovery();
+		clearReplacementHold();
 		setDaemonStatus({ state: "ready", port });
 
 		// Establish the OS-native liveness link on the spawn path (we own this
@@ -1255,9 +1563,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		// orphan-cleanup below re-reads process.env because this `keep` is scoped
 		// to the spawn function — AO_KEEP_DAEMON is set once at startup and never
 		// mutated, so both reads agree.)
-		if (!keep) {
-			establishSupervisorLink();
-		}
+		if (!keep) void linkSpawnedDaemon(launch, port, child);
 	};
 
 	// One scanner per stream: each keeps its own partial-line buffer.
@@ -1269,6 +1575,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 
 		child.stdout?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString("utf8");
+			childOutput = (childOutput + text).slice(-MAX_DAEMON_OUTPUT_CHARS);
 			appendDaemonOutput(text);
 			console.log(text.trimEnd());
 			scanStdout(text);
@@ -1276,6 +1583,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 
 		child.stderr?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString("utf8");
+			childOutput = (childOutput + text).slice(-MAX_DAEMON_OUTPUT_CHARS);
 			appendDaemonOutput(text);
 			console.error(text.trimEnd());
 			scanStderr(text);
@@ -1290,8 +1598,17 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 					const info = parseRunFile(contents);
 					// Ignore a stale handshake left by a previous daemon: only trust a
 					// file written at/after this spawn.
-					if (info && info.startedAtMs >= spawnedAtMs - RUN_FILE_FRESHNESS_SKEW_MS) {
-						reportBoundPort(info.port);
+					if (info && info.startedAtMs >= spawnedAtMs - RUN_FILE_FRESHNESS_SKEW_MS && !handshakeProving) {
+						// A fresh run-file is not proof it is this child's: another launch may
+						// have written it (two checkouts share ~/.ao/dev/running.json).
+						handshakeProving = true;
+						void proveDaemonOwnership(launch, info.port)
+							.then((proof) => {
+								if (proof.verdict === "verified" && proof.pid === info.pid) reportBoundPort(info.port);
+							})
+							.finally(() => {
+								handshakeProving = false;
+							});
 					}
 				})
 				.catch(() => undefined); // absent until the daemon binds; keep polling
@@ -1341,6 +1658,9 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		stopDiscovery();
 		if (daemonProcess !== child) return;
 		daemonProcess = null;
+		// This child's daemon is gone; its link must not outlive it.
+		supervisorLink?.dispose();
+		supervisorLink = null;
 		// An explicit stopDaemon() already set a clean `{ state: "stopped" }`.
 		// daemon-telemetry reports any status carrying a `code` as
 		// ao.renderer.daemon_failure, so don't stamp `code: "exited"` on a stop
@@ -1356,18 +1676,81 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 			setDaemonStatus({ state: "stopped" });
 			return;
 		}
-		setDaemonStatus({
+		if (keep) {
+			childOutput = readDaemonLogSince(keepLogPath, keepLogOffset);
+			appendDaemonOutput(childOutput);
+		}
+		const exitedStatus: DaemonStatus = {
 			state: "stopped",
 			message: signal ? `Daemon exited with ${signal}` : `Daemon exited with code ${code ?? "unknown"}`,
 			details: daemonOutput.trim() || undefined,
 			code: "exited",
 			exitCode: code,
 			signal,
-		});
+		};
+		if (portConfirmed || replacedPid === null) {
+			setDaemonStatus(exitedStatus);
+			return;
+		}
+		// It never came up, and this start had replaced a daemon: decide whether
+		// the one justified retry applies. Keep "starting" visible meanwhile.
+		const holdGeneration = replacementHoldGeneration;
+		void (async () => {
+			const port = resolvedDaemonPort();
+			const portProbe = await readDaemonProbe(port, "healthz");
+			let liveRunFilePid: number | null = null;
+			const rfp = runFilePath();
+			if (rfp) {
+				try {
+					const info = parseRunFile(await readFile(rfp, "utf8"));
+					// Unknown counts as live: never retry over a run-file that might be claimed.
+					if (info?.pid && !["gone", "zombie"].includes(await readProcessState(info.pid))) liveRunFilePid = info.pid;
+				} catch {
+					// no run-file: nothing claims the data dir through it
+				}
+			}
+			const attempt = retry?.attempt ?? 0;
+			const decision = decideReplacementRetry({
+				replacedPid,
+				attempt,
+				exitCode: code,
+				signal,
+				output: childOutput,
+				portProbe,
+				liveRunFilePid,
+			});
+			if (startEpoch !== daemonStartEpoch || daemonProcess || holdGeneration !== replacementHoldGeneration) return;
+			if (decision.action === "fail") {
+				replacementHold = decision.reason;
+				setDaemonStatus({
+					...exitedStatus,
+					message: `${exitedStatus.message}: ${decision.reason}`,
+				});
+				return;
+			}
+			console.warn(
+				`AO: replacement daemon refused to start over a held lock; retry ${attempt + 1} in ${decision.delayMs}ms`,
+			);
+			replacementHold = "a replacement is being retried";
+			setDaemonStatus({ state: "starting" });
+			replacementRetryTimer = setTimeout(() => {
+				replacementRetryTimer = null;
+				if (startEpoch !== daemonStartEpoch || daemonProcess || holdGeneration !== replacementHoldGeneration) return;
+				void startDaemon({ replacedPid, attempt: attempt + 1, keepAlive: keep }).catch((error: unknown) => {
+					setDaemonStatus({
+						state: "error",
+						message: `Could not start the AO daemon: ${error instanceof Error ? error.message : String(error)}`,
+						details: daemonOutput.trim() || undefined,
+						code: "spawn_failed",
+					});
+				});
+			}, decision.delayMs);
+		})();
 	});
 
 	return daemonStatus;
 }
+
 
 // Signal the daemon's whole process group so the kill reaches the real daemon
 // behind the /bin/sh wrapper (and any PTY children it forked), not just the
@@ -1384,6 +1767,8 @@ function killDaemon(child: ChildProcess): void {
 
 function stopDaemon(): DaemonStatus {
 	daemonStartEpoch += 1;
+	if (replacementRetryTimer) clearTimeout(replacementRetryTimer);
+	replacementRetryTimer = null;
 	daemonStartPromise = null;
 	// An explicit stop (or a newer restart request) cancels any deferred restart
 	// left waiting for a previously slow child to exit.
@@ -1461,10 +1846,24 @@ async function restartDaemon(): Promise<DaemonStatus> {
 	return startDaemonForRestart();
 }
 
+// Lets the renderer show an explicit "dev sandbox" indicator instead of
+// silently querying ~/.ao/dev/data while the user believes they're on the
+// real ~/.ao/data install. See CLAUDE.md "IMPORTANT PRODUCT RULE".
+ipcMain.handle("daemon:getEnvInfo", () => ({
+	isDevSandbox: isDev,
+	dataDir: defaultDataDir(process.platform, daemonEnv(), os.homedir()),
+	runFile: runFilePath(),
+}));
+
 ipcMain.handle("daemon:getStatus", () => refreshDaemonStatus());
-ipcMain.handle("daemon:start", () => startDaemon());
+ipcMain.handle("daemon:start", () => {
+	// An explicit start is the only thing that may try a replacement again.
+	clearReplacementHold();
+	return startDaemon();
+});
 ipcMain.handle("daemon:stop", () => stopDaemon());
 ipcMain.handle("daemon:restart", async () => {
+	clearReplacementHold();
 	try {
 		return await restartDaemon();
 	} catch (error) {
@@ -1521,13 +1920,14 @@ ipcMain.on(SET_TERMINAL_FOCUSED_CHANNEL, (event, focused: unknown) => {
 // Backs the custom title-bar menu (WindowTitlebar). Each item maps to the same
 // action the native default menu would have performed.
 ipcMain.handle("menu:action", (_event, action: string) => {
-	const win = mainWindow;
+	const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
 	if (!win) return;
 	// Clicking this shell-painted menu moves focus off the panel, so prefer the last-focused panel, else the focused contents, else the shell.
-	const focused = webContents.getFocusedWebContents();
-	const shell = getShellWebContents();
+	const focused = liveWebContents(webContents.getFocusedWebContents());
+	const shell = liveWebContents(getShellWebContents());
 	const wc =
-		(focused && focused !== shell ? focused : browserViewHost?.getLastFocusedPanelContents()) ?? shell;
+		(focused && focused !== shell ? focused : liveWebContents(browserViewHost?.getLastFocusedPanelContents())) ??
+		shell;
 	if (!wc) return;
 	switch (action) {
 		case "edit.undo":
@@ -1545,10 +1945,10 @@ ipcMain.handle("menu:action", (_event, action: string) => {
 		case "view.reload":
 			return wc.reload();
 		case "view.devtools":
-			return browserViewHost?.toggleDevToolsForLastFocused().then((state) => {
-				if (state) return state;
-				return wc.toggleDevTools();
-			}).catch(() => wc.toggleDevTools()) ?? wc.toggleDevTools();
+			// Deliberately does not use `wc`: that reference was resolved before the
+			// panel toggle awaits, and the window can be gone by the time a fallback
+			// would run. toggleDevTools() re-resolves and never rejects.
+			return toggleDevTools();
 		case "view.zoomIn":
 			return wc.setZoomLevel(wc.getZoomLevel() + 0.5);
 		case "view.zoomOut":
@@ -1816,6 +2216,18 @@ function notifyRenderersOfCloudSession(account: import("./shared/cloud-account")
 
 installCloudIPC(cloudDataDir, notifyRenderersOfCloudSession);
 
+// P4-A: desktop single sign-on. The whole flow lives in the main process
+// because the AO session must land in the renderer's own cookie jar, and the
+// only way to put it there without a token ever becoming a JavaScript value
+// is to let Electron's net module write the Set-Cookie itself. See
+// src/main/sso-signin.ts for the shape and why each step exists.
+ipcMain.handle("auth:ssoSignIn", async () => {
+	if (daemonStatus.state !== "ready" || !daemonStatus.port) {
+		throw new Error("Agent Orchestrator is not connected to its daemon yet.");
+	}
+	return beginSsoSignIn({ apiBaseUrl: `http://127.0.0.1:${daemonStatus.port}` });
+});
+
 function focusCloudWindow(): void {
 	const window = BaseWindow.getAllWindows()[0];
 	if (!window) return;
@@ -1864,7 +2276,16 @@ function initAutoUpdates(): void {
 	const runFile = runFilePath();
 	if (!runFile) return;
 	const stateDir = path.dirname(runFile);
-	void ensureUpdatePrefs(stateDir).then(() => startAutoUpdates(stateDir));
+	// Both halves are async and neither is awaited, so without a rejection
+	// handler a failing update check is an unhandled rejection at boot -- the
+	// same hazard the window-close path had, and fatal for the whole app under
+	// `--unhandled-rejections=strict`. Auto-update is best-effort by design:
+	// AO runs perfectly well without it, so a failure is logged and dropped.
+	void ensureUpdatePrefs(stateDir)
+		.then(() => startAutoUpdates(stateDir))
+		.catch((error) => {
+			console.error("auto-update initialisation failed:", error);
+		});
 }
 
 // Resolve the bundle path `ao start` will later `open` and stat as a usable app.
@@ -1913,6 +2334,12 @@ async function writeAppStateOnLaunch(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+	// Replace Electron's default application menu immediately. Until this runs,
+	// the default menu is live and its toggleDevTools role would crash the main
+	// process against AO's BaseWindow; createWindowInternal reinstalls the same
+	// menu later, and the actions no-op safely while no window exists.
+	Menu.setApplicationMenu(buildAppMenu());
+
 	// Capture install provenance BEFORE relocation. moveToApplicationsFolder()
 	// relaunches from /Applications WITHOUT forwarding our --installed-via arg, and
 	// code past a successful move never runs in this instance, so a post-move-only

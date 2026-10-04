@@ -8,10 +8,31 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 	shelltermsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/shellterm"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
+
+// providerSetupTerminals adapts *shelltermsvc.Service to
+// providersetupsvc.Terminals -- the only difference is the return type of
+// OpenProviderSetupTerminal, which providersetup deliberately narrows to a
+// package-local ShellTerminal rather than importing shellterm's full surface.
+type providerSetupTerminals struct {
+	svc *shelltermsvc.Service
+}
+
+func (t providerSetupTerminals) OpenProviderSetupTerminal(ctx context.Context, workingDir string, argv []string, env map[string]string, title string) (providersetupsvc.ShellTerminal, error) {
+	term, err := t.svc.OpenProviderSetupTerminal(ctx, workingDir, argv, env, title)
+	if err != nil {
+		return providersetupsvc.ShellTerminal{}, err
+	}
+	return providersetupsvc.ShellTerminal{HandleID: term.HandleID}, nil
+}
+
+func (t providerSetupTerminals) CloseShellTerminal(ctx context.Context, handleID string) error {
+	return t.svc.CloseShellTerminal(ctx, handleID)
+}
 
 // startShellTerminals builds the standalone shell terminal service and sweeps
 // any terminals left behind by a previous app run.

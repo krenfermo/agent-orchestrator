@@ -15,10 +15,16 @@ import (
 // UpsertUsageBinding records or refreshes the association between an AO
 // session and a native root session/thread.
 func (s *Store) UpsertUsageBinding(ctx context.Context, rec domain.UsageBindingRecord) (domain.UsageBindingRecord, error) {
+	subject := usageSubjectOf(rec)
+	if !subject.Valid() {
+		return domain.UsageBindingRecord{}, fmt.Errorf("usage binding needs a valid subject, got %q", subject.String())
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	row, err := s.qw.UpsertUsageBinding(ctx, gen.UpsertUsageBindingParams{
-		SessionID:      rec.SessionID,
+		SubjectKind:    string(subject.Kind),
+		SubjectID:      subject.ID,
+		SessionID:      usageSessionColumn(subject),
 		Harness:        rec.Harness,
 		NativeRootID:   rec.NativeRootID,
 		InitialModelID: rec.InitialModelID,
@@ -27,15 +33,47 @@ func (s *Store) UpsertUsageBinding(ctx context.Context, rec domain.UsageBindingR
 		UpdatedAt:      timeOrNow(rec.UpdatedAt),
 	})
 	if err != nil {
-		return domain.UsageBindingRecord{}, fmt.Errorf("upsert usage binding for session %s root %q: %w", rec.SessionID, rec.NativeRootID, err)
+		return domain.UsageBindingRecord{}, fmt.Errorf("upsert usage binding for subject %s root %q: %w", subject, rec.NativeRootID, err)
 	}
 	return usageBindingFromGen(row), nil
 }
 
-// GetUsageBinding returns one binding, or ok=false when absent.
+// usageSubjectOf resolves a record's subject, defaulting a record that names
+// only a session to the session subject. Callers written before the subject
+// existed therefore keep binding exactly what they always bound.
+func usageSubjectOf(rec domain.UsageBindingRecord) domain.UsageSubject {
+	if rec.Subject.Valid() {
+		return rec.Subject
+	}
+	if rec.SessionID != "" {
+		return domain.SessionSubject(rec.SessionID)
+	}
+	return domain.UsageSubject{}
+}
+
+// usageSessionColumn is the session_id column for a subject: the session for a
+// session subject, NULL for every other kind. Storage CHECKs the correspondence,
+// so this is the one place that decides it.
+func usageSessionColumn(subject domain.UsageSubject) *domain.SessionID {
+	if subject.Kind != domain.UsageSubjectSession {
+		return nil
+	}
+	id := domain.SessionID(subject.ID)
+	return &id
+}
+
+// GetUsageBinding returns one SESSION binding, or ok=false when absent. Kept as
+// the session-shaped call every pre-existing caller already uses; pane and
+// planner subjects go through GetUsageBindingBySubject.
 func (s *Store) GetUsageBinding(ctx context.Context, sessionID domain.SessionID, harness domain.AgentHarness, nativeRootID string) (domain.UsageBindingRecord, bool, error) {
-	row, err := s.qr.GetUsageBindingBySessionHarnessRoot(ctx, gen.GetUsageBindingBySessionHarnessRootParams{
-		SessionID:    sessionID,
+	return s.GetUsageBindingBySubject(ctx, domain.SessionSubject(sessionID), harness, nativeRootID)
+}
+
+// GetUsageBindingBySubject returns one binding for any subject kind.
+func (s *Store) GetUsageBindingBySubject(ctx context.Context, subject domain.UsageSubject, harness domain.AgentHarness, nativeRootID string) (domain.UsageBindingRecord, bool, error) {
+	row, err := s.qr.GetUsageBindingBySubjectHarnessRoot(ctx, gen.GetUsageBindingBySubjectHarnessRootParams{
+		SubjectKind:  string(subject.Kind),
+		SubjectID:    subject.ID,
 		Harness:      harness,
 		NativeRootID: nativeRootID,
 	})
@@ -43,14 +81,48 @@ func (s *Store) GetUsageBinding(ctx context.Context, sessionID domain.SessionID,
 		return domain.UsageBindingRecord{}, false, nil
 	}
 	if err != nil {
-		return domain.UsageBindingRecord{}, false, fmt.Errorf("get usage binding for session %s root %q: %w", sessionID, nativeRootID, err)
+		return domain.UsageBindingRecord{}, false, fmt.Errorf("get usage binding for subject %s root %q: %w", subject, nativeRootID, err)
 	}
 	return usageBindingFromGen(row), true, nil
 }
 
+// ListUsageBindingsForSubject returns every binding of one subject.
+func (s *Store) ListUsageBindingsForSubject(ctx context.Context, subject domain.UsageSubject) ([]domain.UsageBindingRecord, error) {
+	rows, err := s.qr.ListUsageBindingsForSubject(ctx, gen.ListUsageBindingsForSubjectParams{
+		SubjectKind: string(subject.Kind), SubjectID: subject.ID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list usage bindings for subject %s: %w", subject, err)
+	}
+	out := make([]domain.UsageBindingRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, usageBindingFromGen(row))
+	}
+	return out, nil
+}
+
+// FinalizeUsageBindingsForSubject moves one subject's live bindings to
+// `finalizing`, and touches nothing else.
+//
+// It exists so a runtime pane can end its OWN usage collection. The
+// session-scoped finalizer must never be reachable from a pane's lifecycle: a
+// reviewer's `session-end` firing the session finalizer would finalize the
+// WORKER's bindings, cutting the worker's own ingestion short.
+func (s *Store) FinalizeUsageBindingsForSubject(ctx context.Context, subject domain.UsageSubject, at time.Time) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.FinalizeUsageBindingsForSubject(ctx, gen.FinalizeUsageBindingsForSubjectParams{
+		SubjectKind: string(subject.Kind), SubjectID: subject.ID, FinalizedAt: timeOrNow(at),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("finalize usage bindings for subject %s: %w", subject, err)
+	}
+	return n, nil
+}
+
 // ListUsageBindingsForSession returns every native usage binding for a session.
 func (s *Store) ListUsageBindingsForSession(ctx context.Context, sessionID domain.SessionID) ([]domain.UsageBindingRecord, error) {
-	rows, err := s.qr.ListUsageBindingsForSession(ctx, sessionID)
+	rows, err := s.qr.ListUsageBindingsForSession(ctx, &sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list usage bindings for session %s: %w", sessionID, err)
 	}
@@ -74,7 +146,7 @@ func (s *Store) FinalizeUsageBindingsForSessionLaunch(
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	rows, err := s.qw.FinalizeUsageBindingsForSessionLaunch(ctx, gen.FinalizeUsageBindingsForSessionLaunchParams{
-		SessionID:                sessionID,
+		SessionID:                &sessionID,
 		ExpectedRuntimeLaunchID:  expectedRuntimeLaunchID,
 		ExpectedSessionUpdatedAt: expectedSessionUpdatedAt,
 		FinalizedAt:              timeOrNow(at),
@@ -291,7 +363,16 @@ func (s *Store) GetUsageSourceForIngestion(ctx context.Context, id int64) (domai
 	if err != nil {
 		return domain.UsageSourceContext{}, false, fmt.Errorf("get usage source %d: %w", id, err)
 	}
-	return usageSourceContextFromGen(row), true, nil
+	out := usageSourceContextFromGen(row)
+	root, err := s.qr.GetUsageSubjectWorkspaceRoot(ctx, gen.GetUsageSubjectWorkspaceRootParams{
+		SubjectKind: row.SubjectKind,
+		SubjectID:   row.SubjectID,
+	})
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.UsageSourceContext{}, false, fmt.Errorf("get usage source %d workspace root: %w", id, err)
+	}
+	out.WorkspaceRoot = root
+	return out, true, nil
 }
 
 // MarkUsageSourceState updates only the source lifecycle/error state.
@@ -352,16 +433,29 @@ func (s *Store) MarkUsageSourceFailure(ctx context.Context, id, failureCount int
 
 // ApplyUsageChunk atomically writes parsed usage events and advances the source
 // cursor/baselines. The cursor never moves unless all event writes commit.
+//
+// tools carries the chunk's agent tool observations (3C). They commit in the
+// same transaction as the events and the cursor, so a crash can never leave a
+// cursor past observations that were not written, and a re-read after a reset
+// re-derives the same keys and inserts nothing twice.
 func (s *Store) ApplyUsageChunk(
 	ctx context.Context,
 	sourceID, expectedOffset int64,
 	expectedRevision time.Time,
 	nextState domain.SourceCursorState,
 	events []domain.ModelUsageEvent,
+	tools ...domain.AgentToolFacts,
 ) error {
 	if nextState.ParserStateJSON != "" {
 		if err := validateParserStateObject(nextState.ParserStateJSON); err != nil {
 			return err
+		}
+	}
+	for _, facts := range tools {
+		for _, obs := range facts.Observations {
+			if !obs.Valid() || credentialShaped(obs.ToolName) || credentialShaped(obs.Path) {
+				return fmt.Errorf("usage source %d: invalid tool observation %q", sourceID, obs.Key)
+			}
 		}
 	}
 	s.writeMu.Lock()
@@ -382,6 +476,17 @@ func (s *Store) ApplyUsageChunk(
 			(source.SourceState == domain.UsageSourceComplete && source.SourceLastErrorCode == domain.UsageErrorArtifactReplaced) {
 			return fmt.Errorf("%w: source %d changed while its chunk was being read", domain.ErrUsageSourceRevisionConflict, sourceID)
 		}
+		// 3C coverage: how many of this source's events already exist before
+		// this chunk writes any. Recorded only when the extractor covers the
+		// source for the first time, it is the count of events a binary
+		// without the extractor ingested -- counted here, in the same
+		// transaction, so no clock ordering is involved.
+		var preCoverageEvents int64
+		if len(tools) > 0 {
+			if preCoverageEvents, err = q.CountUsageEventsForSource(ctx, sql.NullInt64{Int64: source.SourceID, Valid: source.SourceID > 0}); err != nil {
+				return err
+			}
+		}
 		insertedEvent := false
 		for _, ev := range events {
 			existing, err := q.GetModelUsageEventByKey(ctx, gen.GetModelUsageEventByKeyParams{
@@ -395,12 +500,38 @@ func (s *Store) ApplyUsageChunk(
 				if !usageEventMatches(existing, ev) {
 					return fmt.Errorf("%w: binding %d event %q", domain.ErrUsageSourceEventConflict, source.BindingID, ev.SourceEventKey)
 				}
+				// The tokens match, so this is the SAME call being re-reported
+				// -- either a re-read of an unchanged transcript or, far more
+				// often, a later record of a billed message whose first record
+				// already produced the row. The second case is the only way a
+				// turn class can arrive after the event does, so a differing
+				// class here is a refinement and not the conflict a differing
+				// token vector would be. Class-only, monotonic, and a no-op
+				// when nothing changed.
+				if refined, ok := refinedTurnClass(existing.TurnClass, ev.TurnClass); ok {
+					if err := q.RefineModelUsageEventTurnClass(ctx, gen.RefineModelUsageEventTurnClassParams{
+						TurnClass:      refined,
+						BindingID:      source.BindingID,
+						SourceEventKey: ev.SourceEventKey,
+					}); err != nil {
+						return err
+					}
+				}
 				continue
 			}
-			if err := q.InsertModelUsageEvent(ctx, usageEventInsertParams(source, ev)); err != nil {
+			if err := q.InsertModelUsageEvent(ctx, usageEventInsertParams(source, ev, timeOrNow(nextState.UpdatedAt))); err != nil {
 				return err
 			}
 			insertedEvent = true
+		}
+		recordedAt := timeOrNow(nextState.UpdatedAt)
+		for _, facts := range tools {
+			if err := applyAgentToolFacts(ctx, q, source.BindingID, source.SourceID, facts, recordedAt); err != nil {
+				return err
+			}
+			if err := recordAgentToolCoverage(ctx, q, source.BindingID, source.SourceID, expectedOffset, nextState.ByteOffset, facts.ExtractorVersion, preCoverageEvents, recordedAt); err != nil {
+				return err
+			}
 		}
 		if err := q.UpdateUsageSourceCursor(ctx, gen.UpdateUsageSourceCursorParams{
 			ID:              sourceID,
@@ -431,7 +562,7 @@ func (s *Store) ApplyUsageChunk(
 
 // ListUsageModelAggregates returns model-level aggregate rows for a session.
 func (s *Store) ListUsageModelAggregates(ctx context.Context, sessionID domain.SessionID) ([]domain.UsageModelAggregate, error) {
-	rows, err := s.qr.AggregateUsageBySessionHarnessModel(ctx, sessionID)
+	rows, err := s.qr.AggregateUsageBySessionHarnessModel(ctx, &sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate usage for session %s: %w", sessionID, err)
 	}
@@ -444,7 +575,7 @@ func (s *Store) ListUsageModelAggregates(ctx context.Context, sessionID domain.S
 
 // GetUsageSessionIncomplete reports whether durable collection facts indicate missing usage.
 func (s *Store) GetUsageSessionIncomplete(ctx context.Context, sessionID domain.SessionID) (bool, error) {
-	incomplete, err := s.qr.GetUsageSessionIncomplete(ctx, string(sessionID))
+	incomplete, err := s.qr.GetUsageSessionIncomplete(ctx, sql.NullString{String: string(sessionID), Valid: true})
 	if err != nil {
 		return false, fmt.Errorf("get usage integrity for session %s: %w", sessionID, err)
 	}
@@ -453,15 +584,22 @@ func (s *Store) GetUsageSessionIncomplete(ctx context.Context, sessionID domain.
 
 // ListCompactSessionUsage returns sessions with observed usage in one grouped
 // read. projectID optionally limits the rows to one dashboard board.
-func (s *Store) ListCompactSessionUsage(ctx context.Context, projectID domain.ProjectID) ([]domain.CompactSessionUsage, error) {
-	rows, err := s.qr.ListCompactSessionUsage(ctx, projectID)
+// ownerUserID (Checkpoint 8P-C), when non-nil, restricts results to
+// exactly that owner's own sessions -- nil preserves pre-8P-C unscoped
+// behavior (trusted-local / no identity resolved).
+func (s *Store) ListCompactSessionUsage(ctx context.Context, projectID domain.ProjectID, ownerUserID *domain.UserID) ([]domain.CompactSessionUsage, error) {
+	var owner any
+	if ownerUserID != nil {
+		owner = string(*ownerUserID)
+	}
+	rows, err := s.qr.ListCompactSessionUsage(ctx, gen.ListCompactSessionUsageParams{ProjectID: projectID, OwnerUserID: owner})
 	if err != nil {
 		return nil, fmt.Errorf("list compact session usage for project %s: %w", projectID, err)
 	}
 	out := make([]domain.CompactSessionUsage, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, domain.CompactSessionUsage{
-			SessionID: row.SessionID, TotalTokens: row.TotalTokens, Incomplete: row.Incomplete != 0,
+			SessionID: derefSessionID(row.SessionID), TotalTokens: row.TotalTokens, Incomplete: row.Incomplete != 0,
 		})
 	}
 	return out, nil
@@ -470,7 +608,8 @@ func (s *Store) ListCompactSessionUsage(ctx context.Context, projectID domain.Pr
 func usageBindingFromGen(row gen.UsageBinding) domain.UsageBindingRecord {
 	return domain.UsageBindingRecord{
 		ID:             row.ID,
-		SessionID:      row.SessionID,
+		Subject:        domain.UsageSubject{Kind: domain.UsageSubjectKind(row.SubjectKind), ID: row.SubjectID},
+		SessionID:      derefSessionID(row.SessionID),
 		Harness:        row.Harness,
 		NativeRootID:   row.NativeRootID,
 		InitialModelID: row.InitialModelID,
@@ -478,6 +617,16 @@ func usageBindingFromGen(row gen.UsageBinding) domain.UsageBindingRecord {
 		LastErrorCode:  row.LastErrorCode,
 		UpdatedAt:      row.UpdatedAt,
 	}
+}
+
+// derefSessionID flattens the nullable session column. An empty SessionID means
+// "this binding has no session", which for a pane or planner subject is the
+// normal state rather than a missing value.
+func derefSessionID(id *domain.SessionID) domain.SessionID {
+	if id == nil {
+		return ""
+	}
+	return *id
 }
 
 func usageSourceFromGen(row gen.UsageSource) domain.UsageSourceRecord {
@@ -521,7 +670,8 @@ func usageSourceContextFromGen(row gen.GetUsageSourceWithBindingAndSessionRow) d
 			LastErrorCode:   row.SourceLastErrorCode,
 			UpdatedAt:       row.SourceUpdatedAt,
 		},
-		SessionID:      row.SessionID,
+		Subject:        domain.UsageSubject{Kind: domain.UsageSubjectKind(row.SubjectKind), ID: row.SubjectID},
+		SessionID:      derefSessionID(row.SessionID),
 		NativeRootID:   row.NativeRootID,
 		InitialModelID: row.InitialModelID,
 		BindingState:   row.BindingState,
@@ -548,10 +698,15 @@ func usageSourceInsertParams(rec domain.UsageSourceRecord) gen.InsertUsageSource
 	}
 }
 
-func usageEventInsertParams(source gen.GetUsageSourceWithBindingAndSessionRow, ev domain.ModelUsageEvent) gen.InsertModelUsageEventParams {
+// usageEventInsertParams builds one event row. recordedAt is the ingest
+// instant; observed_at is the provider's own event time and stays NULL when the
+// artifact carried none, because a period or a role window built on a
+// fabricated timestamp is worse than one that admits the gap.
+func usageEventInsertParams(source gen.GetUsageSourceWithBindingAndSessionRow, ev domain.ModelUsageEvent, recordedAt time.Time) gen.InsertModelUsageEventParams {
+	five, hour := cacheLifetimeColumns(ev.Tokens)
 	return gen.InsertModelUsageEventParams{
 		BindingID:           source.BindingID,
-		UsageSourceID:       source.SourceID,
+		UsageSourceID:       sql.NullInt64{Int64: source.SourceID, Valid: true},
 		ModelID:             ev.ModelID,
 		InputTokens:         ev.Tokens.InputTokens,
 		UncachedInputTokens: ev.Tokens.UncachedInputTokens,
@@ -560,9 +715,84 @@ func usageEventInsertParams(source gen.GetUsageSourceWithBindingAndSessionRow, e
 		OutputTokens:        ev.Tokens.OutputTokens,
 		ReasoningTokens:     ptrInt64ToNull(ev.Tokens.ReasoningTokens),
 		SourceEventKey:      ev.SourceEventKey,
+		TurnClass:           ev.TurnClass,
+		ObservedAt:          ptrTimeToNullTime(ev.ObservedAt),
+		RecordedAt:          sql.NullTime{Time: recordedAt, Valid: !recordedAt.IsZero()},
+		CacheWrite5mTokens:  five,
+		CacheWrite1hTokens:  hour,
 	}
 }
 
+// cacheLifetimeColumns turns a decoded lifetime split into the pair of nullable
+// columns, or into two NULLs.
+//
+// NULL means the lifetime of this call's cache creation was not observed. It
+// does NOT mean zero tokens -- that claim already has a home in
+// cache_write_tokens -- and the distinction is the entire reason the columns
+// are nullable. Three cases produce NULL and all three are the same statement:
+// a transcript with no cache_creation block, a split the parser could not
+// reconcile with its own total, and a source that reported creation without
+// saying what kind.
+//
+// A split that does not add up to the total it accompanies is REFUSED rather
+// than stored beside it. The parser already raised the anomaly; persisting two
+// numbers that contradict the third would put the contradiction in the ledger
+// where every later sum would inherit it.
+func cacheLifetimeColumns(tokens domain.UsageTokenMetrics) (five, hour sql.NullInt64) {
+	split := tokens.CacheCreation
+	if split.UnknownTTLTokens > 0 || split.Total() == 0 {
+		return sql.NullInt64{}, sql.NullInt64{}
+	}
+	if split.Total() != tokens.CacheWriteTokens {
+		return sql.NullInt64{}, sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: split.Ephemeral5mTokens, Valid: true},
+		sql.NullInt64{Int64: split.Ephemeral1hTokens, Valid: true}
+}
+
+// refinedTurnClass decides whether an already-stored class should be replaced
+// by one derived from a later record of the same message, and with what.
+//
+// Monotonic in one direction only: a class may be raised from "AO saw no tool
+// in the records it had" to a real one, and a real one may broaden to mixed.
+// It is never lowered, and an unclassified incoming value never overwrites a
+// class already recorded -- a re-read that failed to decode a record must not
+// be able to erase what an earlier read established.
+func refinedTurnClass(existing, incoming domain.TurnClass) (domain.TurnClass, bool) {
+	if incoming == domain.TurnUnclassified || !incoming.Valid() || existing == incoming {
+		return "", false
+	}
+	switch existing {
+	case domain.TurnUnclassified, domain.TurnMessage:
+		// Nothing was known, or nothing but talk was seen. Anything the later
+		// records show is more informed than that.
+		return incoming, true
+	case domain.TurnMixed:
+		// Already the broadest class there is.
+		return "", false
+	default:
+		// A real class meeting a different real class means this one message
+		// did more than one kind of thing -- which is precisely TurnMixed, and
+		// picking either side would hide the batching the class exists to make
+		// visible.
+		if incoming == domain.TurnMessage {
+			return "", false
+		}
+		return domain.TurnMixed, true
+	}
+}
+
+// usageEventMatches compares an already-stored row against an event arriving
+// under the same key.
+//
+// The cache-lifetime columns are DELIBERATELY NOT COMPARED. A row written
+// before migration 0170 carries NULL there and the same call re-read today
+// carries a split, and that is not a conflict -- it is the same event, better
+// measured. Treating it as one would make every pre-0170 row raise
+// source_event_conflict on the next pass over a transcript that has not
+// changed. What the columns are worth is a refinement, handled where turn_class
+// already is; what they must never do is invalidate a token vector that agrees
+// in every dimension that was ever stored.
 func usageEventMatches(existing gen.GetModelUsageEventByKeyRow, event domain.ModelUsageEvent) bool {
 	reasoning := ptrInt64ToNull(event.Tokens.ReasoningTokens)
 	return existing.ModelID == event.ModelID &&
@@ -585,6 +815,11 @@ func usageAggregateFromGen(row gen.AggregateUsageBySessionHarnessModelRow) domai
 			CacheWriteTokens:    row.CacheWriteTokens,
 			OutputTokens:        row.OutputTokens,
 			ReasoningTokens:     int64PtrWhen(row.ReasoningTokens, row.ReasoningEventCount > 0),
+			CacheCreation: domain.CacheCreationSplit{
+				Ephemeral5mTokens: row.CacheWrite5mTokens,
+				Ephemeral1hTokens: row.CacheWrite1hTokens,
+				UnknownTTLTokens:  row.CacheWriteUnknownTtlTokens,
+			},
 		},
 		ReasoningEventCount: row.ReasoningEventCount,
 	}
@@ -656,4 +891,140 @@ func int64PtrWhen(v int64, ok bool) *int64 {
 		return nil
 	}
 	return &v
+}
+
+// ListUsageSourceIDsForCacheTTLBackfill lists the transcript sources that own
+// at least one event whose cache lifetime was never observed.
+func (s *Store) ListUsageSourceIDsForCacheTTLBackfill(ctx context.Context) ([]int64, error) {
+	ids, err := s.qr.ListUsageSourceIDsForCacheTTLBackfill(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list usage sources for cache ttl backfill: %w", err)
+	}
+	return ids, nil
+}
+
+// BackfillModelUsageEventCacheTTL records a cache lifetime on one event that
+// did not have one, and reports whether it actually changed a row.
+//
+// false means the guarded UPDATE matched nothing: the row already carries a
+// lifetime, carries half of one, or no longer matches the token vector this
+// lifetime was reconstructed from. All three are reasons to leave it alone, and
+// the caller counts which rather than retrying.
+func (s *Store) BackfillModelUsageEventCacheTTL(
+	ctx context.Context,
+	bindingID int64,
+	ev domain.ModelUsageEvent,
+) (bool, error) {
+	tokens := ev.Tokens
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qr.BackfillModelUsageEventCacheTTL(ctx, gen.BackfillModelUsageEventCacheTTLParams{
+		CacheWrite5mTokens:  sql.NullInt64{Int64: tokens.CacheCreation.Ephemeral5mTokens, Valid: true},
+		CacheWrite1hTokens:  sql.NullInt64{Int64: tokens.CacheCreation.Ephemeral1hTokens, Valid: true},
+		BindingID:           bindingID,
+		SourceEventKey:      ev.SourceEventKey,
+		ModelID:             ev.ModelID,
+		InputTokens:         tokens.InputTokens,
+		UncachedInputTokens: tokens.UncachedInputTokens,
+		CacheReadTokens:     tokens.CacheReadTokens,
+		CacheWriteTokens:    tokens.CacheWriteTokens,
+		OutputTokens:        tokens.OutputTokens,
+	})
+	if err != nil {
+		return false, fmt.Errorf("backfill cache ttl for event %q: %w", ev.SourceEventKey, err)
+	}
+	return rows > 0, nil
+}
+
+// GetStoredModelUsageEvent reads one event back as the ledger holds it.
+//
+// Used by the cache-lifetime backfill to compare the stored vector against a
+// reconstruction before writing. Returns the lifetime columns' STATE rather
+// than their values: what a caller needs to decide is whether the row has an
+// observation, half of one, or none, and handing back the numbers would invite
+// a caller to complete a partial pair.
+func (s *Store) GetStoredModelUsageEvent(ctx context.Context, bindingID int64, sourceEventKey string) (domain.StoredModelUsageEvent, bool, error) {
+	row, err := s.qr.GetModelUsageEventByKey(ctx, gen.GetModelUsageEventByKeyParams{
+		BindingID:      bindingID,
+		SourceEventKey: sourceEventKey,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.StoredModelUsageEvent{}, false, nil
+	}
+	if err != nil {
+		return domain.StoredModelUsageEvent{}, false, fmt.Errorf("get usage event %q: %w", sourceEventKey, err)
+	}
+	out := domain.StoredModelUsageEvent{
+		ModelID: row.ModelID,
+		Tokens: domain.UsageTokenMetrics{
+			InputTokens:         row.InputTokens,
+			UncachedInputTokens: row.UncachedInputTokens,
+			CacheReadTokens:     row.CacheReadTokens,
+			CacheWriteTokens:    row.CacheWriteTokens,
+			OutputTokens:        row.OutputTokens,
+			ReasoningTokens:     nullInt64ToPtr(row.ReasoningTokens),
+		},
+		CacheCreationObserved: row.CacheWrite5mTokens.Valid && row.CacheWrite1hTokens.Valid,
+		CacheCreationPartial:  row.CacheWrite5mTokens.Valid != row.CacheWrite1hTokens.Valid,
+	}
+	return out, true, nil
+}
+
+// nullInt64ToPtr is ptrInt64ToNull's inverse: a NULL column comes back as a nil
+// pointer, never as a zero, so a dimension the provider never reported stays
+// distinguishable from one it reported as zero.
+func nullInt64ToPtr(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	out := v.Int64
+	return &out
+}
+
+// ExecForCacheTTLMaintenanceTest runs one statement directly against the write
+// connection.
+//
+// TEST SEAM, and a narrow one on purpose. The cache-lifetime backfill has to be
+// proved correct against a row state its own write path cannot produce -- one
+// lifetime column set and the other NULL -- and there is no honest way to reach
+// that state except by writing it by hand. Nothing in production calls this;
+// the name is long so that stays true.
+func (s *Store) ExecForCacheTTLMaintenanceTest(ctx context.Context, stmt string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if _, err := s.writeDB.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("exec maintenance statement: %w", err)
+	}
+	return nil
+}
+
+// ListCompactedSessionsForSummaryPrior returns the sessions that have ever
+// replaced their own conversation and carry a harness rollup.
+//
+// It is the candidate list for the cross-session summary-cost prior, and it is
+// one column on purpose: the per-session arithmetic already exists in
+// observe/usage.CompactionReader, and duplicating it in SQL would give two
+// answers to one question. The filter -- sessions that actually compacted -- is
+// what keeps the read affordable, because a prior about compaction concerns a
+// handful of sessions however large the corpus becomes.
+//
+// limit is a ceiling rather than a page. A cohort big enough to reach it has long
+// since earned a folded aggregate of its own, and silently truncating is better
+// than an unbounded read on a decision path.
+func (s *Store) ListCompactedSessionsForSummaryPrior(ctx context.Context, limit int64) ([]domain.SessionID, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.qr.ListCompactedSessionsForSummaryPrior(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list compacted sessions for the summary prior: %w", err)
+	}
+	out := make([]domain.SessionID, 0, len(rows))
+	for _, row := range rows {
+		if row == nil || *row == "" {
+			continue
+		}
+		out = append(out, *row)
+	}
+	return out, nil
 }

@@ -2,7 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { apiClient, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { mockWorkspaces } from "../lib/mock-data";
-import { usesPreviewWorkspaceData } from "../lib/preview-mode";
+import { isUnauthorized } from "../lib/query-client";
+import { usesDemoWorkspaceData } from "../lib/preview-mode";
 import { toReviewerHarnessId } from "../lib/reviewer-harnesses";
 import { captureRendererEvent } from "../lib/telemetry";
 import {
@@ -47,7 +48,10 @@ function reportUnknownSessionField(field: "status" | "activity", value?: string)
 type FakeAgentSeam = { snapshot: () => WorkspaceSummary[] };
 
 async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
-	if (usesPreviewWorkspaceData) {
+	// Invented workspaces only when somebody asked for them. Being the browser
+	// build is not asking: dev:web pointed at a real daemon must show that
+	// daemon, and must show a real disconnection when it cannot reach it.
+	if (usesDemoWorkspaceData()) {
 		const fake =
 			typeof window !== "undefined"
 				? (window as unknown as { __aoFakeAgent?: FakeAgentSeam }).__aoFakeAgent
@@ -122,7 +126,9 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 export const workspaceQueryOptions = {
 	queryKey: workspaceQueryKey,
 	queryFn: fetchWorkspaces,
-	retry: 1,
+	// One retry for a transient failure, none for a refusal: a 401 answered
+	// again is still a 401, and this query polls.
+	retry: (failureCount: number, error: unknown) => !isUnauthorized(error) && failureCount < 1,
 	refetchInterval: 15_000,
 };
 

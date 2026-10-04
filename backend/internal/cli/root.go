@@ -50,6 +50,10 @@ func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
+	var ce exitCodeError
+	if errors.As(err, &ce) {
+		return ce.code
+	}
 	var ue usageError
 	if errors.As(err, &ue) {
 		return 2
@@ -79,6 +83,9 @@ type Deps struct {
 	DoctorGitLabRESTBase string
 	Now                  func() time.Time
 	Sleep                func(time.Duration)
+	// LookupEnv reads the process environment. Injectable so the agent-identity
+	// rules below (P4-I) are testable without mutating the real environment.
+	LookupEnv func(string) (string, bool)
 }
 
 // DefaultDeps returns production dependencies.
@@ -94,6 +101,7 @@ func DefaultDeps() Deps {
 		LookPath:             exec.LookPath,
 		CommandOutput:        commandOutput,
 		CommandOutputInDir:   commandOutputInDir,
+		LookupEnv:            os.LookupEnv,
 		DoctorGitHubRESTBase: defaultDoctorGitHubRESTBase,
 		DoctorGitLabRESTBase: defaultDoctorGitLabRESTBase,
 		Now:                  time.Now,
@@ -155,6 +163,9 @@ func (d Deps) withDefaults() Deps {
 	if d.Sleep == nil {
 		d.Sleep = def.Sleep
 	}
+	if d.LookupEnv == nil {
+		d.LookupEnv = def.LookupEnv
+	}
 	return d
 }
 
@@ -188,6 +199,7 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	})
 
 	root.AddCommand(newDaemonCommand())
+	root.AddCommand(newServerCommand())
 	root.AddCommand(newStartCommand(ctx))
 	root.AddCommand(newStopCommand(ctx))
 	root.AddCommand(newStatusCommand(ctx))
@@ -202,12 +214,27 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	root.AddCommand(newLaunchCommand(ctx))
 	root.AddCommand(newPtyHostCommand())
 	root.AddCommand(newImportCommand(ctx))
+	root.AddCommand(newBackupCommand(ctx))
+	root.AddCommand(newRestoreCommand(ctx, "restore <backup-dir>"))
+	root.AddCommand(newUsageCommand(ctx))
 	root.AddCommand(newDevCommand(ctx))
 	root.AddCommand(newProjectCommand(ctx))
 	root.AddCommand(newSessionCommand(ctx))
+	root.AddCommand(newWorkCommand(ctx))
 	root.AddCommand(newOrchestratorCommand(ctx))
 	root.AddCommand(newPRCommand(ctx))
 	root.AddCommand(newReviewCommand(ctx))
+	root.AddCommand(newDecisionCommand(ctx))
+	root.AddCommand(newIncidentCommand(ctx))
+	root.AddCommand(newWorkflowCommand(ctx))
+	root.AddCommand(newCapacityCommand(ctx))
+	root.AddCommand(newSkillsCommand(ctx))
+	root.AddCommand(newMemoryCommand(ctx))
+	root.AddCommand(newProviderCommand(ctx))
+	root.AddCommand(newRuntimeCommand(ctx))
+	root.AddCommand(newWorktreeCommand(ctx))
+	root.AddCommand(newAuthCommand(ctx))
+	root.AddCommand(newAdminCommand(ctx))
 	root.AddCommand(newCompletionCommand())
 	root.AddCommand(newVersionCommand())
 
@@ -228,7 +255,7 @@ func shouldEmitCLIInvocation(cmd *cobra.Command) bool {
 	// "ao completion"/"ao help" are shell setup and self-documentation.
 	// "ao pty-host" and "ao agent-process" are internal runtime processes.
 	// None reflect user activity.
-	case "ao daemon", "ao start", "ao completion", "ao help", "ao pty-host", "ao agent-process", "ao agent-process supervise":
+	case "ao daemon", "ao server", "ao start", "ao completion", "ao help", "ao pty-host", "ao agent-process", "ao agent-process supervise":
 		return false
 	default:
 		return true

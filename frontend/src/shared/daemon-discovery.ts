@@ -77,6 +77,18 @@ export type RunFileInfo = {
 	/** Desktop launch that supplied this daemon's private browser token. */
 	appRunId?: string;
 	browserRuntimeAddress?: string;
+	/** P9 (run-file v2): the daemon process lifetime identity that wrote this file. */
+	instanceId?: string;
+	/** P9 (run-file v2): the data dir the daemon that wrote this file serves. */
+	dataDir?: string;
+	/** P9 (run-file v2): the AO installation (data dir identity) of the daemon that wrote this file. */
+	installationId?: string;
+	/**
+	 * The exact supervisor endpoint (Unix socket / named pipe) of the daemon instance
+	 * that wrote this file. Only ever used from a run-file whose identity was proven;
+	 * never derived. Absent from daemons that predate it: then nothing links.
+	 */
+	supervisorAddress?: string;
 };
 
 /** Parse running.json contents. Returns null for malformed JSON or an invalid port. */
@@ -88,13 +100,28 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		return null;
 	}
 	if (typeof raw !== "object" || raw === null) return null;
-	const { pid, port, startedAt, owner, appRunId, browserRuntimeAddress } = raw as {
+	const {
+		pid,
+		port,
+		startedAt,
+		owner,
+		appRunId,
+		browserRuntimeAddress,
+		instanceId,
+		installationId,
+		dataDir,
+		supervisorAddress,
+	} = raw as {
 		pid?: unknown;
 		port?: unknown;
 		startedAt?: unknown;
 		owner?: unknown;
 		appRunId?: unknown;
 		browserRuntimeAddress?: unknown;
+		instanceId?: unknown;
+		installationId?: unknown;
+		dataDir?: unknown;
+		supervisorAddress?: unknown;
 	};
 	if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) return null;
 	const startedAtMs = typeof startedAt === "string" ? Date.parse(startedAt) : NaN;
@@ -105,6 +132,10 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		owner: typeof owner === "string" ? owner : undefined,
 		appRunId: typeof appRunId === "string" ? appRunId : undefined,
 		browserRuntimeAddress: typeof browserRuntimeAddress === "string" ? browserRuntimeAddress : undefined,
+		instanceId: typeof instanceId === "string" && instanceId !== "" ? instanceId : undefined,
+		installationId: typeof installationId === "string" && installationId !== "" ? installationId : undefined,
+		dataDir: typeof dataDir === "string" && dataDir !== "" ? dataDir : undefined,
+		supervisorAddress: typeof supervisorAddress === "string" && supervisorAddress !== "" ? supervisorAddress : undefined,
 	};
 }
 

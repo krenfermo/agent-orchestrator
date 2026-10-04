@@ -1,19 +1,51 @@
 package tmux
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+)
 
 // newSessionArgs builds args for `tmux new-session -d -s <id> -x 220 -y 50
 // -c <cwd> <shell> -c <launchCmd>`. The shell -c form runs the launch command
 // inside the configured shell so exported env vars and quoting work correctly.
-func newSessionArgs(id, cwd, shellPath, launchCmd string) []string {
-	return []string{
+// newSessionArgs builds the creation command.
+//
+// When owner is set, `-e AO_SESSION_OWNER=<token>` makes the ownership token
+// part of the very command that creates the session: tmux applies it while
+// constructing the session, so the session cannot become visible to a probe
+// before it carries its identity. Ownership is therefore a property of
+// creation, not a follow-up write.
+//
+// identityEnv carries P9's provenance stamps (`AO_INSTALLATION_ID=…`,
+// `AO_DAEMON_INSTANCE_ID=…`) as further `-e` pairs, for the same reason the
+// owner token is one: provenance that is part of creation cannot be missing
+// from a session a probe can already see. Identities only — never a prompt, a
+// command or a secret.
+func newSessionArgs(id, cwd, shellPath, launchCmd, owner string, identityEnv ...string) []string {
+	args := []string{
 		"new-session", "-d",
+		// -P -F prints the NEW session's immutable instance id as part of the
+		// creation command itself. Discovering it afterwards by name would defeat
+		// the purpose: between creating and looking it up, the session could
+		// vanish and a stranger take the name, and AO would adopt the stranger's
+		// id as "the session I just made" — and later destroy it.
+		"-P", "-F", "#{session_id}",
 		"-s", id,
 		"-x", "220",
 		"-y", "50",
 		"-c", cwd,
-		shellPath, "-c", launchCmd,
 	}
+	if owner != "" {
+		args = append(args, "-e", ownerEnvKey+"="+owner)
+	}
+	for _, kv := range identityEnv {
+		if kv != "" {
+			args = append(args, "-e", kv)
+		}
+	}
+	return append(args, shellPath, "-c", launchCmd)
 }
 
 // respawnPaneArgs replaces the process in the session's only pane while keeping
@@ -25,6 +57,15 @@ func respawnPaneArgs(id, cwd, shellPath, launchCmd string) []string {
 		"-c", cwd,
 		shellPath, "-c", launchCmd,
 	}
+}
+
+// showGlobalEnvironmentArgs lists the tmux server's global environment — the
+// environment captured from whoever's `tmux -L <socket>` call first started
+// the server, which every session/pane it later spawns inherits. Used only
+// for best-effort drift detection (Runtime.ContaminatedEnvVars), never to
+// mutate a running server.
+func showGlobalEnvironmentArgs() []string {
+	return []string{"show-environment", "-g"}
 }
 
 // setStatusOffArgs hides the tmux status bar for the given session.
@@ -87,7 +128,23 @@ func hasSessionArgs(id string) []string {
 // support this prefix; pane-targeting commands (send-keys, capture-pane,
 // set-option) use a plain session name.
 func exactSessionTarget(id string) string {
+	if isSessionInstanceID(id) {
+		// An instance id is ALREADY exact — it names one incarnation and cannot
+		// be reassigned. Prefixing it with `=` would make tmux look for a
+		// session literally named "$3".
+		return id
+	}
 	return "=" + id
+}
+
+// isSessionInstanceID reports whether a target is tmux's immutable `$N` session
+// id rather than a reusable name.
+//
+// The distinction is the whole ownership model: a NAME is a discovery key and
+// nothing more, while an instance id is the authority key that every fact and
+// every destructive action must be addressed to once discovery is done.
+func isSessionInstanceID(target string) bool {
+	return strings.HasPrefix(target, "$")
 }
 
 // listPanePIDsArgs builds args for `tmux list-panes -s -t =<id> -F #{pane_pid}`.
@@ -106,10 +163,131 @@ func sendKeysLiteralArgs(id, chunk string) []string {
 	return []string{"send-keys", "-t", id, "-l", chunk}
 }
 
+// loadBufferArgs builds args for `tmux load-buffer -b <buffer> <path>`, which
+// reads the file's bytes into a named tmux paste buffer. The payload travels
+// through the filesystem, so the command itself stays small regardless of how
+// large the prompt is (Checkpoint 8P-E.13C).
+func loadBufferArgs(buffer, path string) []string {
+	return []string{"load-buffer", "-b", buffer, path}
+}
+
+// pasteBufferArgs builds args for
+// `tmux paste-buffer -d -p -b <buffer> -t <id>`, which delivers the buffer's
+// bytes to the pane as input. -d deletes the buffer once pasted, so a prompt
+// never lingers in the tmux server's buffer stack.
+//
+// -p IS THE PROMPT. Without it, tmux replaces every LF in the buffer with a
+// carriage return before writing it to the pane (its documented default; -r
+// would suppress the replacement). A pane running a shell never notices,
+// because the tty line discipline maps CR back to NL — but an agent TUI runs
+// in raw mode, where a bare CR is not a line separator, it is ENTER. So a
+// multi-line prompt pasted without -p is not delivered as one message at all:
+// the agent is handed each line followed by a submit, and everything before
+// the final fragment is entered and cleared one line at a time.
+//
+// That is incident wf-a816d7fe (2026-08-27), and it is worth stating exactly
+// because every layer above it reported success. AO built a correct 4600-byte
+// fix prompt (its recorded promptReceipt digest matches a byte-exact
+// reconstruction), the transport exited 0, and the composer-empty probe
+// returned `submitted` — the composer WAS empty, because all ~90 fragments had
+// been submitted. What reached the agent was the last 510 bytes: the closing
+// guardrails paragraph. The reviewer's findings sit in the middle of the
+// prompt and never arrived at all. The worker replied "your message arrived
+// truncated (it starts mid-word), and I read it as a restatement of the
+// guardrails rather than a new task", changed nothing, and AO correctly but
+// unhelpfully stopped the run on ambiguous_worker_state.
+//
+// -p wraps the payload in bracketed-paste control codes (ESC[200~ … ESC[201~)
+// when the application has requested bracketed paste mode, which every agent
+// TUI AO drives does. Inside those markers the CRs are literal pasted text
+// rather than submits, so the whole prompt lands in the composer as one
+// message and SendMessage's own trailing Enter submits it exactly once.
+//
+// Verified against tmux 3.7b by reading the bytes the pane actually receives:
+//
+//	paste-buffer -d      -> "AAA\rBBB\rCCC\r"
+//	paste-buffer -d -p   -> "\x1b[200~AAA\rBBB\rCCC\r\x1b[201~"
+//
+// -r is deliberately NOT added alongside it: a real terminal paste carries CR
+// for its line breaks too, so keeping the replacement is what makes this
+// byte-identical to a human pasting the same text into the same pane.
+func pasteBufferArgs(buffer, id string) []string {
+	return []string{"paste-buffer", "-d", "-p", "-b", buffer, "-t", id}
+}
+
+// deleteBufferArgs builds args for `tmux delete-buffer -b <buffer>`, used to
+// clean up a loaded buffer whose paste never happened.
+func deleteBufferArgs(buffer string) []string {
+	return []string{"delete-buffer", "-b", buffer}
+}
+
 // sendEnterArgs builds args for `tmux send-keys -t <id> Enter` to submit the
 // queued input.
 func sendEnterArgs(id string) []string {
 	return []string{"send-keys", "-t", id, "Enter"}
+}
+
+// tmuxKeyNames maps AO's closed dialog-key vocabulary onto tmux's own key
+// names (P3-C).
+//
+// It is a TABLE rather than a pass-through, and that is the security property:
+// a provider adapter asks for "down", not for a string tmux will interpret. A
+// key absent from this table cannot reach a pane, so no adapter can smuggle a
+// raw control sequence, a command separator or a semicolon-chained second
+// command into send-keys through the key argument.
+var tmuxKeyNames = map[ports.DialogKey]string{
+	ports.KeyUp:     "Up",
+	ports.KeyDown:   "Down",
+	ports.KeyEnter:  "Enter",
+	ports.KeyEscape: "Escape",
+	ports.KeyDigit1: "1",
+	ports.KeyDigit2: "2",
+	ports.KeyDigit3: "3",
+	ports.KeyDigit4: "4",
+	ports.KeyDigit5: "5",
+	ports.KeyDigit6: "6",
+	ports.KeyDigit7: "7",
+	ports.KeyDigit8: "8",
+	ports.KeyDigit9: "9",
+}
+
+// sendNamedKeyArgs builds args for `tmux send-keys -t <id> <keyname>`.
+//
+// The digits are sent with -l (literal) so tmux types the character rather than
+// looking it up as a key name; every other member is a named key.
+func sendNamedKeyArgs(id, name string, literal bool) []string {
+	if literal {
+		return []string{"send-keys", "-t", id, "-l", name}
+	}
+	return []string{"send-keys", "-t", id, name}
+}
+
+// paneInModeArgs builds args for
+// `tmux display-message -p -t =<id> #{pane_in_mode}`, which answers "is this
+// pane currently in one of tmux's own modes (copy-mode, view-mode, a chooser)".
+//
+// It is load-bearing rather than diagnostic. While a pane is in a mode, tmux
+// handles keys itself against that mode's key table, so `send-keys ... Enter`
+// is consumed by the MODE and never reaches the application — while
+// `paste-buffer` still queues its bytes on the pane's input. Both commands exit
+// 0, so a delivery made in that state looks entirely successful and submits
+// nothing. See ensurePaneAcceptsKeys.
+//
+// The target is the bare id, matching send-keys/paste-buffer rather than the
+// `=`-prefixed exact form used by the session-scoped commands: display-message
+// resolves `=<name>` to nothing and prints an empty line, so the guard would
+// answer "unreadable" for every healthy pane. Verified against tmux 3.7b.
+func paneInModeArgs(id string) []string {
+	return []string{"display-message", "-p", "-t", id, "#{pane_in_mode}"}
+}
+
+// cancelPaneModeArgs builds args for `tmux send-keys -X -t <id> cancel`, the
+// mode-aware way to leave whatever mode a pane is in. -X dispatches a command
+// to the mode itself, which is why this works for copy-mode, view-mode and the
+// choosers alike, and why it is used instead of guessing at a key (`q`, Escape)
+// whose meaning depends on the mode and the configured key table.
+func cancelPaneModeArgs(id string) []string {
+	return []string{"send-keys", "-X", "-t", id, "cancel"}
 }
 
 // sendInterruptArgs builds args for `tmux send-keys -t <id> C-c` to interrupt
@@ -124,8 +302,113 @@ func capturePaneArgs(id string, lines int) []string {
 	return []string{"capture-pane", "-t", id, "-p", "-S", fmt.Sprintf("-%d", lines)}
 }
 
+// captureVisiblePaneArgs builds args for `tmux capture-pane -t <id> -p`, with
+// NO -S: it returns the pane's visible screen and none of its history.
+//
+// That distinction is load-bearing for P3-C's delivery receipt. An answered
+// prompt stays in scrollback for as long as the pane lives, so a capture that
+// includes history can never report the prompt gone -- and "the prompt is gone"
+// is the only proof AO accepts that an answer actually reached the agent.
+func captureVisiblePaneArgs(id string) []string {
+	return []string{"capture-pane", "-t", id, "-p"}
+}
+
 // capturePaneStyledArgs preserves SGR sequences so callers can distinguish a
 // dim TUI placeholder from normal human-authored composer text.
 func capturePaneStyledArgs(id string, lines int) []string {
 	return []string{"capture-pane", "-e", "-t", id, "-p", "-S", fmt.Sprintf("-%d", lines)}
+}
+
+// ownerEnvKey is the session-environment variable carrying AO's ownership
+// token. Session environment is used rather than a `@`-prefixed user option
+// because `new-session -e` sets it AS PART OF the creation command, which a
+// `set-option` call never can: the marker and the session become visible in the
+// same tmux operation, so no state exists in which one is present without the
+// other.
+const ownerEnvKey = "AO_SESSION_OWNER"
+
+// installationEnvKey and daemonInstanceEnvKey are P9's provenance stamps: which
+// AO installation (data dir) and which daemon process created the session. They
+// live in the session environment beside the owner token for the same
+// atomic-with-creation reason.
+const (
+	installationEnvKey   = "AO_INSTALLATION_ID"
+	daemonInstanceEnvKey = "AO_DAEMON_INSTANCE_ID"
+)
+
+// sessionEnvArgs reads one session-environment variable of an exact target.
+func sessionEnvArgs(id, key string) []string {
+	return []string{"show-environment", "-t", exactSessionTarget(id), key}
+}
+
+// setSessionEnvArgs rewrites one session-environment variable of an exact
+// target. Used only by Restart, which replaces the pane's process under a NEW
+// launch of the same session and must carry that launch's ownership token.
+func setSessionEnvArgs(id, key, value string) []string {
+	return []string{"set-environment", "-t", exactSessionTarget(id), key, value}
+}
+
+// paneDeadArgs asks whether each pane's process has exited.
+//
+// `has-session` answers a different and much weaker question — whether a NAME
+// is registered — and a session whose reviewer has exited still answers yes to
+// it whenever `remain-on-exit` keeps the dead pane around. Adopting on that
+// answer is adopting a corpse, so liveness is proven per-pane instead.
+
+// setRemainOnExitOffArgs pins the dead-pane behaviour AO relies on, whatever the
+// operator's own tmux configuration says. With `remain-on-exit on` inherited
+// from a user's config, a finished reviewer leaves its session standing, which
+// is the precise shape of a phantom running review.
+func setRemainOnExitOffArgs(id string) []string {
+	return []string{"set-option", "-t", exactSessionTarget(id), "remain-on-exit", "off"}
+}
+
+// sessionInstanceArgs re-reads just the instance id, for the revalidation that
+// closes a read-then-act window.
+func sessionInstanceArgs(id string) []string {
+	// Exact target (P9): a bare name lets tmux fall back to prefix and pattern
+	// matching, so "proj-1" could resolve to "proj-12" -- another session's
+	// incarnation answering for this one.
+	return []string{"display-message", "-p", "-t", exactSessionFormatTarget(id), "#{session_id}"}
+}
+
+// exactSessionFormatTarget is the exact-match target for commands that resolve
+// a PANE (display-message). Measured on tmux 3.7b: `-t =name` there answers
+// EMPTY with exit 0 -- which would read a live session as absent -- while
+// `-t =name:` resolves exactly that session and never a prefix of another. An
+// instance id is already exact.
+func exactSessionFormatTarget(id string) string {
+	if isSessionInstanceID(id) {
+		return id
+	}
+	return "=" + id + ":"
+}
+
+// killSessionInstanceArgs destroys ONE EXACT session incarnation.
+//
+// tmux accepts a `$N` session id as a target, and that is the whole point: a
+// kill aimed at a NAME lands on whatever holds the name at the moment it runs,
+// which after a replacement is somebody else's session. Aimed at `$N` it either
+// kills the instance AO proved it owned or it fails, and both outcomes are safe.
+func killSessionInstanceArgs(instanceID string) []string {
+	return []string{"kill-session", "-t", instanceID}
+}
+
+// listSessionsArgs enumerates every session on AO's own tmux server, emitting
+// the incarnation and the name together on one line.
+//
+// The incarnation comes FIRST and is what callers key on: a listing that
+// returned only names would hand every later decision back to whatever holds
+// the name at the moment it is used, which is the ABA this whole adapter is
+// built to exclude.
+//
+// The separator is a SPACE, not a tab. tmux sanitizes control characters in
+// format output unless the client runs under a UTF-8 locale: with no locale
+// variables at all -- the ordinary environment of a daemon started by launchd
+// or by the desktop app -- or with LANG=C, the tab comes back as `_`, every
+// line fails to split, and the inventory is silently empty. A session id is
+// always `$` followed by digits, so the first space is unambiguous whatever
+// the name holds.
+func listSessionsArgs() []string {
+	return []string{"list-sessions", "-F", "#{session_id} #{session_name}"}
 }

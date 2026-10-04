@@ -19,7 +19,15 @@ export function NewTaskDialog({ open, projectId, onCreated, onOpenChange }: NewT
 					{/* One title line names the dialog, styled like every other settings-style
 					    modal; everything else stays the composer's surface, no bordered header. */}
 					<Dialog.Title className="settings-dialog-title px-4 pt-3">{t("newTask.title")}</Dialog.Title>
-					<Dialog.Description className="sr-only">{t("newTask.description")}</Dialog.Description>
+					{/* Visible, not sr-only. This dialog delegates a freeform worker
+					    and creates no workflow_run, and its prompt field used to be
+					    labelled "Task" -- the same word that names a workflow
+					    strategy. People opened it believing they were starting a
+					    Task run. Saying which object this makes, next to the name of
+					    the surface that makes the other one, is the fix. */}
+					<Dialog.Description className="px-4 pt-1 text-xs text-muted-foreground">
+						{t("newTask.notWorkflow")}
+					</Dialog.Description>
 					<TaskComposer
 						projectId={projectId}
 						autoFocusTitle

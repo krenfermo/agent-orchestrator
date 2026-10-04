@@ -49,7 +49,7 @@ func gooseHooksPath(workspacePath string) string {
 
 // GetAgentHooks installs AO's Goose hooks, preserving user-defined hooks.
 func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfig) error {
-	return gooseHooks.Install(ctx, cfg.WorkspacePath)
+	return gooseHooks.Install(ctx, cfg.WorkspacePath, cfg.DataDir)
 }
 
 // UninstallHooks removes AO's Goose hooks, leaving user-defined hooks untouched.

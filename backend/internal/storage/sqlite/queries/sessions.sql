@@ -4,31 +4,34 @@ SELECT COALESCE(MAX(num), 0) + 1 AS next FROM sessions WHERE project_id = ?;
 -- name: InsertSession :exec
 INSERT INTO sessions (
     id, project_id, num, issue_id, kind, harness, reviewer_harness, auto_review_enabled, display_name,
-    activity_state, activity_last_at, first_signal_at, is_terminated,
+    activity_state, activity_last_at, first_signal_at, turn_completed_at, is_terminated,
     branch, workspace_path, workspace_repo_path, diff_base_sha, diff_base_ref, runtime_handle_id,
     runtime_launch_id, agent_session_id, prompt,
     latest_user_prompt, latest_assistant_update, native_transcript_path,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
     session_mode, provider_conversation_id, controller_generation,
-    created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci
+    created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
+    runtime_instance_id, runtime_owner_token, last_signal_at
 ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?
 );
 
 -- name: UpdateSession :exec
 UPDATE sessions SET
     issue_id = ?, kind = ?, harness = ?, reviewer_harness = ?, auto_review_enabled = ?, display_name = ?,
-    activity_state = ?, activity_last_at = ?, first_signal_at = ?, is_terminated = ?,
+    activity_state = ?, activity_last_at = ?, first_signal_at = ?, turn_completed_at = ?, is_terminated = ?,
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
     runtime_launch_id = ?, agent_session_id = ?, prompt = ?,
     latest_user_prompt = ?, latest_assistant_update = ?, native_transcript_path = ?,
     preview_url = ?, preview_revision = ?, terminate_on_pr_merge = ?,
     cleanup_generation = ?, browser_capability_verifier = ?,
     provider_conversation_id = ?, controller_generation = ?, updated_at = ?,
-    is_pinned = ?, pinned_at = ?, auto_inject_review = ?, auto_inject_ci = ?
+    is_pinned = ?, pinned_at = ?, auto_inject_review = ?, auto_inject_ci = ?,
+    runtime_instance_id = ?, runtime_owner_token = ?, last_signal_at = ?
 WHERE id = ?;
 
 -- name: RecordSessionLatestUserPrompt :execrows
@@ -73,36 +76,58 @@ WHERE id = ? AND session_mode = ? AND is_terminated = 0;
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
     runtime_handle_id, agent_session_id, prompt,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
+    created_at, updated_at, display_name, first_signal_at, turn_completed_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions WHERE id = ?;
+
+-- name: GetSessionByProjectAndIssueID :one
+-- Workflow (Checkpoint 8B) uses issue_id as a durable natural key to find a
+-- session it may already have spawned for one workflow step, independent of
+-- whether the workflow's own bookkeeping (step.session_id / checkpoint) made
+-- it to disk. Most-recently-created wins if more than one session somehow
+-- shares the key (should not happen in practice, since issue_id embeds the
+-- unique workflow step id).
+SELECT id, project_id, num, issue_id, kind, harness,
+    activity_state, activity_last_at, is_terminated, branch, workspace_path,
+    runtime_handle_id, agent_session_id, prompt,
+    created_at, updated_at, display_name, first_signal_at, turn_completed_at, preview_url,
+    preview_revision, cleanup_generation, runtime_launch_id,
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    reviewer_harness, is_pinned, pinned_at,
+    session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
+    runtime_instance_id, runtime_owner_token, last_signal_at
+FROM sessions WHERE project_id = ? AND issue_id = ? ORDER BY created_at DESC, num DESC LIMIT 1;
 
 -- name: ListSessionsByProject :many
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
     runtime_handle_id, agent_session_id, prompt,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
+    created_at, updated_at, display_name, first_signal_at, turn_completed_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions WHERE project_id = ? ORDER BY num;
 
 -- name: ListAllSessions :many
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
     runtime_handle_id, agent_session_id, prompt,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
+    created_at, updated_at, display_name, first_signal_at, turn_completed_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions ORDER BY project_id, num;
 
 

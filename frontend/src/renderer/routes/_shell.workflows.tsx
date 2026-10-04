@@ -1,0 +1,843 @@
+import { createFileRoute, Link, Outlet, useMatchRoute } from "@tanstack/react-router";
+import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useExecutionPolicy } from "../hooks/useExecutionPolicy";
+import { useProjectsList } from "../hooks/useProjectsList";
+import {
+	APPROVAL_POLICIES,
+	DEFAULT_REVIEW_DEPTH,
+	EXECUTION_STRATEGIES,
+	PLACEMENTS,
+	REPAIR_POLICIES,
+	REVIEW_DEPTHS,
+	useWorkflowRuns,
+	type ApprovalPolicy,
+	type ExecutionStrategy,
+	type Placement,
+	type RepairPolicy,
+	type ReviewDepth,
+} from "../hooks/useWorkflowRuns";
+import { useSettings } from "../hooks/useSettings";
+import { useUiStore } from "../stores/ui-store";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "../components/ui/select";
+import type { TFunction } from "i18next";
+import { WorkflowStageBadge } from "../components/workflow-status";
+import { translateDynamic } from "../components/workflow-activity";
+import { summaryKey } from "../lib/workflow-presentation";
+import {
+	MAX_TASK_SPECIFICATION_BYTES,
+	SPECIFICATION_COUNTER_FROM_BYTES,
+	specificationByteLength,
+} from "../../shared/task-specification";
+import {
+	buildVerificationPlan,
+	commandDraftProblem,
+	newCommandDraft,
+	parseAcceptanceCriteria,
+	statedCommandDrafts,
+	verificationIsExecutable,
+	type VerificationCommandDraft,
+} from "../lib/task-verification";
+
+/**
+ * A workflow's name is the thing it was asked to do — its objective's first
+ * line. The rest of a long specification belongs on the run's own page (§17).
+ */
+function objectiveTitle(objective: string): string {
+	const first = objective.split("\n", 1)[0]?.trim();
+	return first && first.length > 0 ? first : objective.trim();
+}
+
+/**
+ * The objective ceiling and its byte count now live in
+ * shared/task-specification, because the new-task composer needs exactly the
+ * same two things and a second copy of the number is how the UI and the daemon
+ * came to disagree in the first place. Re-exported under the names this route
+ * has always used so nothing that reads the workflow form has to care.
+ */
+export const MAX_OBJECTIVE_BYTES = MAX_TASK_SPECIFICATION_BYTES;
+export const objectiveByteLength = specificationByteLength;
+
+const OBJECTIVE_COUNTER_FROM_BYTES = SPECIFICATION_COUNTER_FROM_BYTES;
+
+/**
+ * `?projectId=` is how the Board hands this form the project the user was
+ * already looking at, so creating a run does not start with re-picking it.
+ *
+ * It is read through the router rather than off `window.location` because the
+ * desktop app runs on HASH history (see router.tsx): there the whole location
+ * lives after the `#`, `window.location.search` is empty, and the preselect
+ * silently did nothing in the one build almost everybody uses.
+ */
+export const Route = createFileRoute("/_shell/workflows")({
+	component: WorkflowsListRoute,
+	validateSearch: (search: Record<string, unknown>): { projectId?: string } => {
+		const projectId = search.projectId;
+		return typeof projectId === "string" && projectId !== "" ? { projectId } : {};
+	},
+});
+
+function WorkflowsListRoute() {
+	const matchRoute = useMatchRoute();
+	const { projectId } = Route.useSearch();
+	if (matchRoute({ to: "/workflows/$workflowId", fuzzy: true })) {
+		return <Outlet />;
+	}
+	return <WorkflowsList initialProjectId={projectId} />;
+}
+
+export function WorkflowsList({ initialProjectId }: { initialProjectId?: string } = {}) {
+	const { t } = useTranslation();
+	const { runs, isLoading, error, createRun, creating, createError } = useWorkflowRuns();
+	const { projects, isLoading: projectsLoading } = useProjectsList();
+	const { policy: executionPolicy, isLoading: policyLoading } = useExecutionPolicy();
+	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
+	// The daemon's project-memory rollout stage. It is a daemon policy, not a
+	// per-run one, and it is shown because §12 requires the summary to state
+	// whether AO will bring remembered project knowledge to this work.
+	const { settings } = useSettings();
+	const memoryMode = settings?.memoryMode;
+	const [projectId, setProjectId] = useState(initialProjectId ?? "");
+	// Arriving from the Board a second time, for a different project, navigates
+	// to a route that is already mounted -- so seeding state at mount is not
+	// enough on its own. Only a real, non-empty change follows; clearing the
+	// search must not wipe a choice the user made here by hand.
+	useEffect(() => {
+		if (initialProjectId) setProjectId(initialProjectId);
+	}, [initialProjectId]);
+	const [objective, setObjective] = useState("");
+	// Byte length, recomputed only when the text changes: TextEncoder on every
+	// keystroke of a 100 KB specification would be felt.
+	const objectiveBytes = useMemo(() => objectiveByteLength(objective), [objective]);
+	const objectiveTooLong = objectiveBytes > MAX_OBJECTIVE_BYTES;
+	// P1-A: two independent choices, deliberately not one.
+	//
+	// Execution strategy is how much orchestration this run gets — a bounded
+	// Task, an Autonomous plan, or a Master initiative broken into
+	// workstreams. Autonomous is the default for normal project work.
+	//
+	// Approval is who approves and drives. Checkpoint 8P-D.1's requirement is
+	// unchanged and now lives here alone: the user must be able to pick it
+	// deliberately for THIS run rather than inherit it invisibly from the
+	// global Settings → Execution Policy toggle. `approvalChoice` starts
+	// undefined so the radio reflects the stored policy once it loads, and
+	// any explicit click wins from then on.
+	const [strategy, setStrategy] = useState<ExecutionStrategy>("autonomous");
+	const [approvalChoice, setApprovalChoice] = useState<ApprovalPolicy | undefined>(undefined);
+	const approvalDefault: ApprovalPolicy = executionPolicy?.autonomousMode ? "automatic" : "manual";
+	const approvalPolicy = approvalChoice ?? approvalDefault;
+	const strategyLabels: Record<ExecutionStrategy, { label: string; explainer: string }> = {
+		task: {
+			label: t("shell.workflowsStrategyTaskLabel"),
+			explainer: t("shell.workflowsStrategyTaskExplainer"),
+		},
+		autonomous: {
+			label: t("shell.workflowsStrategyAutonomousLabel"),
+			explainer: t("shell.workflowsStrategyAutonomousExplainer"),
+		},
+		master: {
+			label: t("shell.workflowsStrategyMasterLabel"),
+			explainer: t("shell.workflowsStrategyMasterExplainer"),
+		},
+	};
+	// P5-A: how much scrutiny the delivered change gets — a fifth independent
+	// axis, frozen at creation like the others.
+	//
+	// `depthChoice` starts undefined so the radio follows the selected
+	// strategy's own default (none for a bounded Task, light for Autonomous,
+	// deep for Master) until somebody clicks, and any explicit click wins from
+	// then on. That is deliberately the same shape `approvalChoice` uses: a
+	// default that visibly tracks another choice, and stops the moment the user
+	// expresses one of their own.
+	//
+	// Nothing selected here can make a review shallower than the change's risk
+	// requires. The daemon reviews at the deeper of this request and the
+	// change's deterministic risk tier, so a sensitive change is reviewed in
+	// full whatever this says — which is why the form can offer the cheap
+	// options without a warning banner.
+	const [depthChoice, setDepthChoice] = useState<ReviewDepth | undefined>(undefined);
+	const reviewDepth = depthChoice ?? DEFAULT_REVIEW_DEPTH[strategy];
+	const reviewDepthLabels: Record<ReviewDepth, { label: string; explainer: string }> = {
+		none: {
+			label: t("wf.reviewDepth.none"),
+			explainer: t("wf.reviewDepth.noneExplainer"),
+		},
+		light: {
+			label: t("wf.reviewDepth.light"),
+			explainer: t("wf.reviewDepth.lightExplainer"),
+		},
+		deep: {
+			label: t("wf.reviewDepth.deep"),
+			explainer: t("wf.reviewDepth.deepExplainer"),
+		},
+	};
+	// A Task run has no planner, so the two things a planner would otherwise
+	// have produced -- what "done" means, and how it is checked -- have to come
+	// from here. Without them a task runs to completion and then fails at
+	// Verify with verify_ambiguous, which is what happened to
+	// wf-aee38f69-081c-48d1-a3a4-53430ca70682: the form sent no verification at
+	// all, and the daemon accepted the empty plan.
+	//
+	// The editor always holds one more row than the user has filled, so there
+	// is somewhere to type the next command; a blank row contributes nothing.
+	const [commandDrafts, setCommandDrafts] = useState<VerificationCommandDraft[]>(() => [newCommandDraft()]);
+	const [criteriaText, setCriteriaText] = useState("");
+	const acceptanceCriteria = useMemo(() => parseAcceptanceCriteria(criteriaText), [criteriaText]);
+	// Only the Task strategy needs them: a planned run's checks are its
+	// planner's output, and the planner has not run when this form is submitted.
+	const needsVerification = strategy === "task";
+	const verificationReady = verificationIsExecutable(commandDrafts);
+
+	// P1-B: auto-repair is a third independent axis, frozen at creation.
+	// "suggest" is the default because a repair writes code, and opting into
+	// that unattended should be a decision somebody made.
+	const [repairPolicy, setRepairPolicy] = useState<RepairPolicy>("suggest");
+	// P3-A §7: where the work happens, chosen here rather than discovered
+	// afterwards. "auto" is the default because it is what AO did before this
+	// choice existed -- defaulting to an explicit placement would silently change
+	// where every existing user's work happens.
+	const [placement, setPlacement] = useState<Placement>("auto");
+	const placementLabels: Record<Placement, { label: string; explainer: string }> = {
+		direct_branch: {
+			label: t("wf.placement.direct_branch"),
+			explainer: t("wf.placement.direct_branchExplainer"),
+		},
+		isolated_worktree: {
+			label: t("wf.placement.isolated_worktree"),
+			explainer: t("wf.placement.isolated_worktreeExplainer"),
+		},
+		auto: {
+			label: t("wf.placement.auto"),
+			explainer: t("wf.placement.autoExplainer"),
+		},
+	};
+	const repairLabels: Record<RepairPolicy, { label: string; explainer: string }> = {
+		disabled: {
+			label: t("shell.workflowsRepairPolicyDisabledLabel"),
+			explainer: t("shell.workflowsRepairPolicyDisabledExplainer"),
+		},
+		suggest: {
+			label: t("shell.workflowsRepairPolicySuggestLabel"),
+			explainer: t("shell.workflowsRepairPolicySuggestExplainer"),
+		},
+		automatic: {
+			label: t("shell.workflowsRepairPolicyAutomaticLabel"),
+			explainer: t("shell.workflowsRepairPolicyAutomaticExplainer"),
+		},
+	};
+	const approvalLabels: Record<ApprovalPolicy, { label: string; explainer: string }> = {
+		automatic: {
+			label: t("shell.workflowsApprovalAutomaticLabel"),
+			explainer: t("shell.workflowsApprovalAutomaticExplainer"),
+		},
+		manual: {
+			label: t("shell.workflowsApprovalManualLabel"),
+			explainer: t("shell.workflowsApprovalManualExplainer"),
+		},
+	};
+
+	// The preselected project from a deep link may not (yet) be in the loaded
+	// list; keep the select controlled either way, it just shows no match.
+	const selectedProject = useMemo(() => projects.find((p) => p.id === projectId), [projects, projectId]);
+
+	const onSubmit = (event: React.FormEvent) => {
+		event.preventDefault();
+		if (!projectId.trim() || !objective.trim()) return;
+		// The same refusal the daemon makes, made here so the user is told
+		// before a run exists rather than after a worker has done the job.
+		if (needsVerification && !verificationReady) return;
+		void createRun({
+			projectId: projectId.trim(),
+			objective: objective.trim(),
+			strategy,
+			approvalPolicy,
+			repairPolicy,
+			placement,
+			reviewDepth,
+			...(needsVerification
+				? { acceptanceCriteria, verification: buildVerificationPlan(commandDrafts) }
+				: {}),
+		})
+			.then(() => {
+				setObjective("");
+				setCriteriaText("");
+				setCommandDrafts([newCommandDraft()]);
+			})
+			// A refused create is already reported through `createError`, which
+			// the form renders. The catch is here so the rejection mutateAsync
+			// re-throws does not surface as an unhandled promise rejection -- and
+			// so a daemon refusal never clears the form the user has to correct.
+			.catch(() => undefined);
+	};
+
+	const noProjects = !projectsLoading && projects.length === 0;
+
+	return (
+		// Owns its own vertical scroll for the same reason the detail route
+		// does: the shell hands routes a `min-h-0 flex-1` box with no scroll of
+		// its own, so a long workflow list ran off the bottom of the window.
+		// See that route for why `[&>*]:shrink-0` is required here.
+		<div className="mx-auto flex h-full min-h-0 max-w-6xl flex-col gap-6 overflow-y-auto break-words p-6 [&>*]:shrink-0">
+			{/* P8: this page is THE place new work starts. Every "new work" entry
+			    point (board, sidebar, command palette) lands here; "new agent
+			    session" is a different thing and says so in its own dialog. */}
+			<div className="flex flex-col gap-1">
+				<h1 className="text-lg font-semibold">{t("cc.newWork.title")}</h1>
+				<p className="text-sm text-muted-foreground">{t("cc.newWork.subtitle")}</p>
+			</div>
+
+			{noProjects ? (
+				<div className="flex flex-col gap-3 rounded-lg border border-border p-4">
+					<p className="text-sm text-muted-foreground">{t("shell.workflowsNoProjects")}</p>
+					<Button
+						type="button"
+						variant="outline"
+						className="self-start"
+						onClick={() => openGlobalSettings("projects")}
+					>
+						{t("shell.workflowsGoToSettings")}
+					</Button>
+				</div>
+			) : (
+				<form className="flex flex-col gap-3 rounded-lg border border-border p-4" onSubmit={onSubmit}>
+					{/* P8: the mode comes first. It decides what kind of run this is —
+					    a bounded Task, an Autonomous plan, a Master initiative — and the
+					    rest of the form (checks, review depth) reads differently under it. */}
+					<fieldset className="flex flex-col gap-2">
+						<legend className="text-sm font-medium">{t("shell.workflowsStrategy")}</legend>
+						<div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+							{EXECUTION_STRATEGIES.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										strategy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={strategy === value}
+											name="workflow-execution-strategy"
+											onChange={() => setStrategy(value)}
+											type="radio"
+											value={value}
+										/>
+										{strategyLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{strategyLabels[value].explainer}</span>
+								</label>
+							))}
+						</div>
+					</fieldset>
+					<label className="flex flex-col gap-1 text-sm">
+						{t("shell.workflowsProjectLabel")}
+						<Select value={projectId} onValueChange={setProjectId}>
+							<SelectTrigger className="w-full" aria-label={t("shell.workflowsProjectLabel")} data-testid="workflow-project-trigger">
+								<SelectValue placeholder={t("shell.workflowsSelectProjectPlaceholder")}>
+									{selectedProject ? selectedProject.name : undefined}
+								</SelectValue>
+							</SelectTrigger>
+							<SelectContent>
+								{projects.map((project) => (
+									<SelectItem key={project.id} value={project.id}>
+										<div className="flex flex-col">
+											<span>{project.name}</span>
+											<span className="text-xs text-muted-foreground">{project.repo || project.path}</span>
+										</div>
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					</label>
+					<label className="flex flex-col gap-1 text-sm">
+						<span className="flex items-baseline justify-between gap-2">
+							{t("shell.workflowsObjective")}
+							{/* The counter appears only once a specification is long enough for
+							    the ceiling to be worth knowing about. Showing "12 / 131072" next
+							    to a one-line objective would be noise about a limit nobody is
+							    anywhere near. */}
+							{objectiveBytes > OBJECTIVE_COUNTER_FROM_BYTES ? (
+								<span
+									className={
+										objectiveTooLong
+											? "text-xs font-medium text-destructive"
+											: "text-xs text-muted-foreground"
+									}
+								>
+									{t("shell.workflowsObjectiveSize", {
+										bytes: objectiveBytes.toLocaleString(),
+										max: MAX_OBJECTIVE_BYTES.toLocaleString(),
+									})}
+								</span>
+							) : null}
+						</span>
+						<Textarea
+							aria-invalid={objectiveTooLong || undefined}
+							onChange={(event) => setObjective(event.target.value)}
+							placeholder={t("shell.workflowsObjectivePlaceholder")}
+							rows={12}
+							value={objective}
+						/>
+						{objectiveTooLong ? (
+							<span className="text-xs text-destructive">
+								{t("shell.workflowsObjectiveTooLong", {
+									bytes: objectiveBytes.toLocaleString(),
+									max: MAX_OBJECTIVE_BYTES.toLocaleString(),
+								})}
+							</span>
+						) : null}
+					</label>
+					{/* Four independent choices, laid out two-up on wide screens: a
+					    desktop window has room to compare Strategy against Approval
+					    side by side instead of scrolling through four stacked lists. */}
+					<div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+						<fieldset className="flex flex-col gap-2" disabled={policyLoading}>
+							<legend className="text-sm">{t("shell.workflowsApproval")}</legend>
+							{APPROVAL_POLICIES.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										approvalPolicy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={approvalPolicy === value}
+											name="workflow-approval-policy"
+											onChange={() => setApprovalChoice(value)}
+											type="radio"
+											value={value}
+										/>
+										{approvalLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{approvalLabels[value].explainer}</span>
+								</label>
+							))}
+						</fieldset>
+						<fieldset className="flex flex-col gap-2">
+							<legend className="text-sm">{t("shell.workflowsRepairPolicy")}</legend>
+							{REPAIR_POLICIES.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										repairPolicy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={repairPolicy === value}
+											name="workflow-repair-policy"
+											onChange={() => setRepairPolicy(value)}
+											type="radio"
+											value={value}
+										/>
+										{repairLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{repairLabels[value].explainer}</span>
+								</label>
+							))}
+						</fieldset>
+						<fieldset className="flex flex-col gap-2">
+							<legend className="text-sm">{t("wf.create.placement")}</legend>
+							{PLACEMENTS.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										placement === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={placement === value}
+											name="workflow-placement"
+											onChange={() => setPlacement(value)}
+											type="radio"
+											value={value}
+										/>
+										{placementLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{placementLabels[value].explainer}</span>
+								</label>
+							))}
+						</fieldset>
+						<fieldset className="flex flex-col gap-2">
+							<legend className="text-sm">{t("wf.reviewDepth.legend")}</legend>
+							{REVIEW_DEPTHS.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										reviewDepth === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={reviewDepth === value}
+											name="workflow-review-depth"
+											onChange={() => setDepthChoice(value)}
+											type="radio"
+											value={value}
+										/>
+										{reviewDepthLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{reviewDepthLabels[value].explainer}</span>
+								</label>
+							))}
+							{/* The clamp, stated once, next to the dial it applies to.
+							    A user who picks the cheapest option must be able to see
+							    that AO will not honour it for a change that matters. */}
+							<p className="text-xs text-muted-foreground">{t("wf.reviewDepth.clampNote")}</p>
+						</fieldset>
+					</div>
+					{needsVerification ? (
+						<TaskVerificationFields
+							commands={commandDrafts}
+							criteriaText={criteriaText}
+							onChangeCommands={setCommandDrafts}
+							onChangeCriteria={setCriteriaText}
+						/>
+					) : null}
+					{/* §12: every choice that changes what AO actually does, in one
+					    place, before the button that starts it. None of it is hidden
+					    behind an "advanced" disclosure, because all five change real
+					    execution semantics. */}
+					<TaskCreationSummary
+						acceptanceCriteria={needsVerification ? acceptanceCriteria : undefined}
+						commands={needsVerification ? statedCommandDrafts(commandDrafts) : undefined}
+						approvalPolicy={approvalPolicy}
+						memoryMode={memoryMode}
+						placement={placement}
+						project={selectedProject}
+						repairPolicy={repairPolicy}
+						reviewDepth={reviewDepth}
+						strategy={strategy}
+					/>
+					<button
+						className="mt-1 self-start rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
+						disabled={
+							creating ||
+							!projectId.trim() ||
+							!objective.trim() ||
+							objectiveTooLong ||
+							(needsVerification && !verificationReady)
+						}
+						type="submit"
+					>
+						{creating ? t("shell.workflowsCreating") : t("shell.workflowsCreate")}
+					</button>
+					{createError && <p className="text-sm text-destructive">{createError}</p>}
+				</form>
+			)}
+
+			{isLoading && <p className="text-sm text-muted-foreground">{t("shell.workflowsLoading")}</p>}
+			{error && <p className="text-sm text-destructive">{error}</p>}
+
+			<h2 className="text-sm font-semibold text-muted-foreground">{t("cc.newWork.listTitle")}</h2>
+			<ul className="flex flex-col gap-2">
+				{runs.map((run) => (
+					<li className="rounded-lg border border-border p-3" key={run.id}>
+						<Link
+							className="flex flex-col gap-1"
+							params={{ workflowId: run.id }}
+							to="/workflows/$workflowId"
+						>
+							{/* P3-B §3: the list used to print the raw run state, which
+							    cannot tell `running` from `reviewing`, so the same
+							    workflow read differently here, on the board and on its
+							    own page. The stage below is the daemon's own projection —
+							    the same value the other two render. */}
+							<span className="flex min-w-0 items-baseline gap-2">
+								<span className="min-w-0 flex-1 truncate font-medium">{objectiveTitle(run.objective)}</span>
+								<WorkflowStageBadge stage={run.stage} />
+							</span>
+							{run.summaryCode ? (
+								<span className="text-xs text-muted-foreground" data-testid={`workflow-list-summary-${run.id}`}>
+									{translateDynamic(t as TFunction, summaryKey(run.summaryCode), run.summaryCode)}
+								</span>
+							) : null}
+							<span className="text-xs text-muted-foreground">
+								{t("shell.workflowsRunMeta", {
+									projectId: run.projectId,
+									state: run.state,
+									createdAt: new Date(run.createdAt).toLocaleString(),
+								})}
+							</span>
+						</Link>
+					</li>
+				))}
+				{!isLoading && runs.length === 0 && (
+					<li className="text-sm text-muted-foreground">{t("shell.workflowsNone")}</li>
+				)}
+			</ul>
+		</div>
+	);
+}
+
+/**
+ * TaskCreationSummary — P3-A §12.
+ *
+ * The five choices that change what AO actually does, plus where it will do it,
+ * restated in one block immediately above the button that starts the run. None
+ * of it sits behind an "advanced" disclosure: every value here changes real
+ * execution semantics, and hiding a semantic choice is how somebody launches
+ * work into a placement or an approval mode they did not intend.
+ *
+ * It states facts and nothing else. The repository and branch come from the
+ * selected project's own record; when no project is selected yet it says so
+ * rather than showing an empty row that reads as "none".
+ */
+function TaskCreationSummary({
+	strategy,
+	approvalPolicy,
+	repairPolicy,
+	placement,
+	reviewDepth,
+	project,
+	memoryMode,
+	acceptanceCriteria,
+	commands,
+}: {
+	strategy: ExecutionStrategy;
+	approvalPolicy: ApprovalPolicy;
+	repairPolicy: RepairPolicy;
+	placement: Placement;
+	reviewDepth: ReviewDepth;
+	project: { name: string; path?: string; repo?: string; config?: { defaultBranch?: string } } | undefined;
+	memoryMode: string | undefined;
+	// Undefined for a planned strategy, which supplies neither from this form.
+	acceptanceCriteria: string[] | undefined;
+	commands: VerificationCommandDraft[] | undefined;
+}) {
+	const { t } = useTranslation();
+	return (
+		<section className="flex flex-col gap-1 rounded-lg border border-border bg-muted/30 p-3" data-testid="task-creation-summary">
+			<h2 className="text-sm font-semibold">{t("wf.create.summaryTitle")}</h2>
+			<dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+				<dt>{t("wf.create.strategy")}</dt>
+				<dd className="font-medium text-foreground" data-testid="task-creation-mode">
+					{t(`shell.workflowsStrategy${strategy === "task" ? "Task" : strategy === "master" ? "Master" : "Autonomous"}Label`)}
+				</dd>
+				{/* Stated rather than guessed: routing picks the agent and model when
+				    each step launches, so nothing before creation can name them. */}
+				<dt>{t("wf.create.agent")}</dt>
+				<dd>{t("wf.create.agentValue")}</dd>
+				<dt>{t("wf.create.approval")}</dt>
+				<dd>{t(approvalPolicy === "automatic" ? "shell.workflowsApprovalAutomaticLabel" : "shell.workflowsApprovalManualLabel")}</dd>
+				<dt>{t("wf.create.repair")}</dt>
+				<dd>
+					{t(
+						repairPolicy === "automatic"
+							? "shell.workflowsRepairPolicyAutomaticLabel"
+							: repairPolicy === "disabled"
+								? "shell.workflowsRepairPolicyDisabledLabel"
+								: "shell.workflowsRepairPolicySuggestLabel",
+					)}
+				</dd>
+				<dt>{t("wf.create.placement")}</dt>
+				<dd>{t(`wf.placement.${placement}` as "wf.placement.auto")}</dd>
+				<dt>{t("wf.reviewDepth.legend")}</dt>
+				<dd>{t(`wf.reviewDepth.${reviewDepth}` as "wf.reviewDepth.light")}</dd>
+				<dt>{t("wf.create.memory")}</dt>
+				<dd>{memoryMode ? t(`wf.memory.${memoryMode}` as "wf.memory.off") : t("wf.memory.unknown")}</dd>
+				{/* What AO will actually run to decide this task succeeded, stated
+				    here for the same reason the other rows are: it changes the
+				    verdict, and a task whose checks are not what the user meant
+				    fails as surely as one with no checks at all. */}
+				<dt>{t("wf.create.verification")}</dt>
+				<dd className="break-words">
+					{commands === undefined ? (
+						t("wf.create.verificationPlanned")
+					) : commands.length === 0 ? (
+						t("wf.create.verificationNone")
+					) : (
+						<span className="flex flex-col gap-0.5 font-mono">
+							{commands.map((draft) => (
+								<span key={draft.id}>{`${draft.command.trim()} ${draft.args.trim()}`.trim()}</span>
+							))}
+						</span>
+					)}
+				</dd>
+				{acceptanceCriteria !== undefined ? (
+					<>
+						<dt>{t("wf.create.criteria")}</dt>
+						<dd className="break-words">
+							{acceptanceCriteria.length === 0 ? (
+								t("wf.create.criteriaDefault")
+							) : (
+								<span className="flex flex-col gap-0.5">
+									{acceptanceCriteria.map((criterion) => (
+										<span key={criterion}>{criterion}</span>
+									))}
+								</span>
+							)}
+						</dd>
+					</>
+				) : null}
+				{project ? (
+					<>
+						<dt>{t("wf.create.project")}</dt>
+						<dd className="break-words">{project.name}</dd>
+						<dt>{t("wf.create.repository")}</dt>
+						<dd className="break-all font-mono">
+							{project.repo || project.path || t("wf.location.unknownValue")}
+						</dd>
+						<dt>{t("wf.create.branch")}</dt>
+						<dd className="break-all font-mono">
+							{project.config?.defaultBranch || t("wf.location.unknownValue")}
+						</dd>
+					</>
+				) : (
+					<>
+						<dt>{t("wf.create.project")}</dt>
+						<dd>{t("wf.create.selectProjectFirst")}</dd>
+					</>
+				)}
+			</dl>
+		</section>
+	);
+}
+
+/**
+ * TaskVerificationFields — the two things a Task must carry and a planner would
+ * otherwise have produced: how AO will check the work, and what "done" means.
+ *
+ * It is a structured editor rather than a free-text box on purpose. AO does not
+ * read verification commands out of the objective's prose — a command inferred
+ * from a sentence is a command nobody chose, and it would be run against the
+ * user's repository — so every field here is something the user stated.
+ *
+ * The rule it enforces is the daemon's own: at least one command AO can run,
+ * and nothing half-typed. What it does NOT do is second-guess which executables
+ * are allowed; that policy lives in the daemon (ValidateVerifyCommand) and a
+ * copy here would drift from the one actually enforced. A command this accepts
+ * and the daemon refuses comes back as the create error shown below the button.
+ */
+function TaskVerificationFields({
+	commands,
+	criteriaText,
+	onChangeCommands,
+	onChangeCriteria,
+}: {
+	commands: VerificationCommandDraft[];
+	criteriaText: string;
+	onChangeCommands: (next: VerificationCommandDraft[]) => void;
+	onChangeCriteria: (next: string) => void;
+}) {
+	const { t } = useTranslation();
+	const update = (id: string, patch: Partial<VerificationCommandDraft>) =>
+		onChangeCommands(commands.map((draft) => (draft.id === id ? { ...draft, ...patch } : draft)));
+	// Removing the last row leaves an empty one: the editor must always offer
+	// somewhere to type, and a section with no inputs reads as "not available".
+	const remove = (id: string) => {
+		const next = commands.filter((draft) => draft.id !== id);
+		onChangeCommands(next.length > 0 ? next : [newCommandDraft()]);
+	};
+	const problems = commands.map((draft) => commandDraftProblem(draft));
+	const hasStatedCommand = statedCommandDrafts(commands).length > 0;
+
+	return (
+		<fieldset className="flex flex-col gap-3 rounded-lg border border-border p-3" data-testid="task-verification">
+			<legend className="px-1 text-sm">{t("wf.verify.legend")}</legend>
+			<p className="text-xs text-muted-foreground">{t("wf.verify.explainer")}</p>
+			{commands.map((draft, index) => (
+				<div className="flex flex-col gap-2 rounded border border-border bg-muted/40 p-2" key={draft.id}>
+					<div className="flex flex-col gap-2 sm:flex-row">
+						<label className="flex flex-col gap-1 text-xs sm:w-40">
+							{t("wf.verify.commandLabel")}
+							<Input
+								aria-invalid={problems[index] === "commandRequired" || undefined}
+								onChange={(event) => update(draft.id, { command: event.target.value })}
+								placeholder={t("wf.verify.commandPlaceholder")}
+								value={draft.command}
+							/>
+						</label>
+						<label className="flex flex-1 flex-col gap-1 text-xs">
+							{t("wf.verify.argsLabel")}
+							<Input
+								onChange={(event) => update(draft.id, { args: event.target.value })}
+								placeholder={t("wf.verify.argsPlaceholder")}
+								value={draft.args}
+							/>
+						</label>
+					</div>
+					<div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+						<label className="flex flex-1 flex-col gap-1 text-xs">
+							{t("wf.verify.workingDirectoryLabel")}
+							<Input
+								aria-invalid={problems[index] === "workingDirectoryOutside" || undefined}
+								onChange={(event) => update(draft.id, { workingDirectory: event.target.value })}
+								placeholder={t("wf.verify.workingDirectoryPlaceholder")}
+								value={draft.workingDirectory}
+							/>
+						</label>
+						<label className="flex flex-col gap-1 text-xs sm:w-28">
+							{t("wf.verify.timeoutLabel")}
+							<Input
+								aria-invalid={problems[index] === "timeoutRange" || undefined}
+								inputMode="numeric"
+								onChange={(event) => update(draft.id, { timeoutSeconds: event.target.value })}
+								value={draft.timeoutSeconds}
+							/>
+						</label>
+						<label className="flex flex-col gap-1 text-xs sm:w-28">
+							{t("wf.verify.exitCodeLabel")}
+							<Input
+								aria-invalid={problems[index] === "exitCodeInvalid" || undefined}
+								inputMode="numeric"
+								onChange={(event) => update(draft.id, { requiredExitCode: event.target.value })}
+								value={draft.requiredExitCode}
+							/>
+						</label>
+						<label className="flex items-center gap-2 text-xs sm:h-control-form">
+							<input
+								checked={draft.retrySafe}
+								onChange={(event) => update(draft.id, { retrySafe: event.target.checked })}
+								type="checkbox"
+							/>
+							{t("wf.verify.retrySafeLabel")}
+						</label>
+						<Button
+							className="sm:ml-auto"
+							onClick={() => remove(draft.id)}
+							size="sm"
+							type="button"
+							variant="ghost"
+						>
+							{t("wf.verify.removeCommand")}
+						</Button>
+					</div>
+					{problems[index] ? (
+						<p className="text-xs text-destructive">{t(`wf.verify.problem.${problems[index]}` as "wf.verify.problem.commandRequired")}</p>
+					) : null}
+				</div>
+			))}
+			<Button
+				className="self-start"
+				onClick={() => onChangeCommands([...commands, newCommandDraft()])}
+				size="sm"
+				type="button"
+				variant="outline"
+			>
+				{t("wf.verify.addCommand")}
+			</Button>
+			{hasStatedCommand ? null : <p className="text-xs text-destructive">{t("wf.verify.required")}</p>}
+			<label className="flex flex-col gap-1 text-xs">
+				{t("wf.verify.criteriaLabel")}
+				<Textarea
+					onChange={(event) => onChangeCriteria(event.target.value)}
+					placeholder={t("wf.verify.criteriaPlaceholder")}
+					rows={4}
+					value={criteriaText}
+				/>
+				<span className="text-muted-foreground">{t("wf.verify.criteriaHint")}</span>
+			</label>
+		</fieldset>
+	);
+}

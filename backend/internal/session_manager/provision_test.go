@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -20,7 +21,7 @@ func (f fixedBrowserCapability) Issue(_ domain.SessionID) (string, string, error
 }
 
 func TestSpawnEnvProjectVarsCannotOverrideInternal(t *testing.T) {
-	env := spawnEnv("mer-1", "mer", "issue-9", "/data", map[string]string{
+	env := spawnEnv("mer-1", "mer", "issue-9", "/data", "/data/running.json", map[string]string{
 		"FOO":        "bar",
 		EnvSessionID: "hacked", // a project must not override AO-internal vars
 		EnvProjectID: "hacked",
@@ -36,9 +37,39 @@ func TestSpawnEnvProjectVarsCannotOverrideInternal(t *testing.T) {
 	}
 }
 
+// TestSpawnEnvExportsRunFilePath is 8P-D.2's regression test for the exact
+// sequence that produced a false-early verify_workspace_changed in a real
+// autonomous run: the daemon was started with an AO_RUN_FILE override that
+// didn't live under AO_DATA_DIR, spawnEnv exported only AO_DATA_DIR, so every
+// `ao hooks claude-code ...` callback from inside the worker session hit
+// "AO daemon is not running" (resolveRunFilePath falls back to the default
+// ~/.ao/running.json, which the running daemon never wrote) — activity state
+// never left its idle default, and the coordinator's git-status fallback
+// (evaluateWorkStepProgress) called the work step complete while Claude Code
+// was still mid-task, freezing an incomplete reviewed fingerprint. Exporting
+// AO_RUN_FILE removes the guesswork the hook subprocess otherwise has to do.
+func TestSpawnEnvExportsRunFilePath(t *testing.T) {
+	env := spawnEnv("mer-1", "mer", "issue-9", "/data", "/private/tmp/ao-manual-test/data/running.json", nil)
+	if got := env[EnvRunFile]; got != "/private/tmp/ao-manual-test/data/running.json" {
+		t.Fatalf("AO_RUN_FILE = %q, want the daemon's resolved run-file path", got)
+	}
+}
+
+// TestSpawnEnvOmitsRunFileWhenUnset preserves pre-8P-D.2 behavior when the
+// daemon wiring leaves RunFilePath unset (e.g. an older test double): no
+// empty AO_RUN_FILE is exported, so a spawned agent falls back to its own
+// default resolution instead of being pointed at an empty path.
+func TestSpawnEnvOmitsRunFileWhenUnset(t *testing.T) {
+	env := spawnEnv("mer-1", "mer", "issue-9", "/data", "", nil)
+	if _, ok := env[EnvRunFile]; ok {
+		t.Fatalf("AO_RUN_FILE should be absent when runFilePath is empty, got %q", env[EnvRunFile])
+	}
+}
+
 func TestRuntimeEnvInjectsBrowserCapability(t *testing.T) {
 	manager := &Manager{
 		dataDir:             "/data",
+		runFilePath:         "/data/running.json",
 		browserCapabilities: fixedBrowserCapability("capability-1"),
 		executable:          func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil },
 		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -52,6 +83,9 @@ func TestRuntimeEnvInjectsBrowserCapability(t *testing.T) {
 	}
 	if verifier != "verifier-1" {
 		t.Fatalf("verifier = %q", verifier)
+	}
+	if env[EnvRunFile] != "/data/running.json" {
+		t.Fatalf("%s = %q, want the manager's runFilePath threaded through runtimeEnv", EnvRunFile, env[EnvRunFile])
 	}
 }
 
@@ -70,6 +104,36 @@ func TestRuntimeEnvClearsDaemonBrowserRuntimeSecrets(t *testing.T) {
 	}
 }
 
+// TestRuntimeEnvAppliesAOShimForRenamedBinary is Checkpoint 8M §16's
+// regression test for the gap 8L.1's real E2E discovered: a worker session
+// whose daemon binary is not literally named "ao" (HookPATH's pin only
+// works for that exact name) used to leave PATH degraded — every worker
+// hook callback (`ao hooks ...`) resolved to "command not found". Mirrors
+// the exact fallback workflow_reviewer_launcher.go/decision_resolver_launcher.go
+// already apply for their own launches.
+func TestRuntimeEnvAppliesAOShimForRenamedBinary(t *testing.T) {
+	dataDir := t.TempDir()
+	renamed := filepath.Join(dataDir, "renamed-daemon-binary")
+	manager := &Manager{
+		dataDir:    dataDir,
+		executable: func() (string, error) { return renamed, nil },
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := manager.runtimeEnv("mer-1", "mer", "", nil)
+
+	shimDir := filepath.Join(dataDir, "reviewer-runtime", "bin")
+	if !strings.Contains(env["PATH"], shimDir) {
+		t.Fatalf("PATH = %q, want it to include the AO shim directory %q", env["PATH"], shimDir)
+	}
+	shimPath := filepath.Join(shimDir, "ao")
+	if runtime.GOOS == "windows" {
+		shimPath += ".cmd"
+	}
+	if _, err := os.Stat(shimPath); err != nil {
+		t.Fatalf("AO shim not created at %q: %v", shimPath, err)
+	}
+}
+
 func TestHookPATH(t *testing.T) {
 	sep := string(os.PathListSeparator)
 	daemonExe := filepath.Join("/opt", "aod", "ao")
@@ -82,6 +146,7 @@ func TestHookPATH(t *testing.T) {
 		daemonPATH string
 		projectEnv map[string]string
 		want       string
+		wantPinned bool
 		wantErr    bool
 	}{
 		{
@@ -89,18 +154,24 @@ func TestHookPATH(t *testing.T) {
 			executable: exeOK,
 			daemonPATH: "/usr/bin" + sep + "/bin",
 			want:       daemonDir + sep + "/usr/bin" + sep + "/bin",
+			wantPinned: true,
 		},
 		{
 			name:       "project PATH override is the base",
 			executable: exeOK,
 			daemonPATH: "/usr/bin",
 			projectEnv: map[string]string{"PATH": "/proj/bin"},
-			want:       daemonDir + sep + "/proj/bin",
+			want:       daemonDir + sep + "/proj/bin" + sep + "/usr/bin" + sep + "/bin",
+			wantPinned: true,
 		},
 		{
-			name:       "empty base PATH yields the daemon dir alone",
+			// Required system dirs are appended even when the base PATH was
+			// empty, so a caller building PATH from scratch never ends up with
+			// only the daemon's own directory (Checkpoint 8I.2).
+			name:       "empty base PATH still yields required system dirs",
 			executable: exeOK,
-			want:       daemonDir,
+			want:       daemonDir + sep + "/usr/bin" + sep + "/bin",
+			wantPinned: true,
 		},
 		{
 			name:       "unresolvable executable fails",
@@ -110,11 +181,18 @@ func TestHookPATH(t *testing.T) {
 		},
 		{
 			// A daemon binary not named "ao" cannot anchor `ao` resolution by
-			// having its directory prepended, so the pin must be refused.
-			name:       "executable not named ao fails",
+			// having its directory prepended, so the pin is reported as not
+			// applied (pinned=false) — but PATH itself must stay fully usable
+			// (base PATH plus required system dirs), never collapse to nothing.
+			// This is the exact fragility Checkpoint 8I.1 hit: HookPATH used to
+			// hard-error here, and callers degraded PATH down to a single
+			// narrow directory, breaking the reviewer agent CLI's own auth
+			// lookup even though credentials were fine.
+			name:       "executable not named ao is not pinned but PATH stays usable",
 			executable: func() (string, error) { return filepath.Join("/opt", "aod", "ao-daemon"), nil },
 			daemonPATH: "/usr/bin",
-			wantErr:    true,
+			want:       filepath.Join("/opt", "aod") + sep + "/usr/bin" + sep + "/bin",
+			wantPinned: false,
 		},
 	}
 	for _, tc := range cases {
@@ -125,7 +203,7 @@ func TestHookPATH(t *testing.T) {
 				}
 				return ""
 			}
-			got, err := HookPATH(tc.executable, getenv, tc.projectEnv)
+			got, pinned, err := HookPATH(tc.executable, getenv, tc.projectEnv)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("HookPATH = %q, want error", got)
@@ -137,6 +215,48 @@ func TestHookPATH(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("HookPATH = %q, want %q", got, tc.want)
+			}
+			if pinned != tc.wantPinned {
+				t.Fatalf("HookPATH pinned = %v, want %v", pinned, tc.wantPinned)
+			}
+		})
+	}
+}
+
+// TestHookPATH_PreservesInheritedAgentDirs is a proxy for "real agent CLIs
+// (Claude Code, Codex) stay resolvable": HookPATH must never drop a
+// directory that was already on the inherited/base PATH, regardless of
+// whether the daemon executable happens to be named "ao". A typical dev
+// machine has those installed under something like ~/.local/bin or
+// /opt/homebrew/bin, which is exactly the kind of entry Checkpoint 8I.1's
+// PATH-collapse bug silently lost.
+func TestHookPATH_PreservesInheritedAgentDirs(t *testing.T) {
+	claudeDir := "/Users/dev/.local/bin"
+	codexDir := "/opt/homebrew/bin"
+	inherited := claudeDir + string(os.PathListSeparator) + codexDir
+	getenv := func(key string) string {
+		if key == "PATH" {
+			return inherited
+		}
+		return ""
+	}
+
+	for _, tc := range []struct {
+		name       string
+		executable func() (string, error)
+	}{
+		{"named ao", func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil }},
+		{"not named ao", func() (string, error) { return filepath.Join("/opt", "aod", "ao-daemon"), nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := HookPATH(tc.executable, getenv, nil)
+			if err != nil {
+				t.Fatalf("HookPATH: %v", err)
+			}
+			for _, dir := range []string{claudeDir, codexDir} {
+				if !strings.Contains(got, dir) {
+					t.Fatalf("HookPATH = %q, want it to still contain agent install dir %q", got, dir)
+				}
 			}
 		})
 	}

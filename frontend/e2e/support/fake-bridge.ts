@@ -35,10 +35,74 @@ export type FakeBridgeOptions = {
 	daemonPort?: number;
 };
 
+/**
+ * Answer the two probes the renderer makes before it will render the shell at
+ * all: daemon readiness, and identity.
+ *
+ * The renderer resolves the current user on mount (stores/auth-store.ts) and
+ * renders the sign-in screen IN PLACE OF the shell for any answer it cannot read
+ * as a user — including a network error, because a daemon that cannot be reached
+ * is indistinguishable from one that refused. These specs run the renderer with
+ * no daemon at all, so without this every one of them asserts against a login
+ * form and reports "element not found" for whatever it was actually testing.
+ *
+ * It answers `trusted-local`, which is the desktop's real default: the identity
+ * AO synthesizes when AO_TRUSTED_LOCAL_MODE is on and nobody has signed in.
+ * Stubbing `authenticated` instead would put the renderer in a state the desktop
+ * app does not normally boot into.
+ *
+ * Both installers call it, and it lives here rather than being written twice:
+ * two copies of a seam is how this one came to be missing from one of them.
+ */
+export async function installFakeIdentity(page: Page): Promise<void> {
+	// Readiness first. In web mode -- which is what `dev:web` is, because there
+	// is no window.ao -- the platform adapter probes /readyz and treats any
+	// non-ready answer as `daemon_unreachable`, which the shell renders instead
+	// of the app. The dev server 404s that path, so without this stub every
+	// renderer spec asserts against a failure banner.
+	//
+	// The shape is `ao serve`'s own: a pid and a status. A spec that wants to
+	// test the UNREADY presentation overrides this route after calling us, which
+	// is why this is a plain route rather than something conditional.
+	await page.route("**/readyz", (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify({ pid: 4242, status: "ready" }),
+		}),
+	);
+	await page.route("**/api/v1/auth/me", (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify({
+				status: "trusted-local",
+				user: {
+					id: "usr-e2e",
+					displayName: "AO E2E",
+					email: "e2e@example.com",
+					username: "e2e",
+					status: "active",
+					role: "owner",
+				},
+			}),
+		}),
+	);
+	await page.route("**/api/v1/auth/setup-status", (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify({ setupRequired: false }),
+		}),
+	);
+}
+
 export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}): Promise<void> {
 	const version = opts.version ?? "9.9.9-test";
 	const daemonState = opts.daemonState ?? "ready";
 	const daemonPort = opts.daemonPort ?? 8080;
+
+	await installFakeIdentity(page);
 
 	await page.addInitScript(
 		({ version, daemonState, daemonPort }) => {
@@ -93,6 +157,9 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					readText: async () => "",
 				},
 				daemon: {
+					// The renderer reads this on mount (useDevSandboxInfo); the fake reports a
+					// non-sandbox daemon so the shell renders the ordinary chrome.
+					getEnvInfo: async () => ({ isDevSandbox: false, dataDir: null, runFile: null }),
 					getStatus: async () => status,
 					start: async () => status,
 					stop: async () => ({ state: "stopped" }),
@@ -278,6 +345,7 @@ declare global {
  * `page.evaluate(() => window.__aoFakeAgent!.setStatus(...))`.
  */
 export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}): Promise<void> {
+	await installFakeIdentity(page);
 	const version = opts.version ?? "9.9.9-test";
 	const daemonPort = opts.daemonPort ?? 8080;
 	const projectId = opts.projectId ?? "fake-proj";
@@ -522,6 +590,9 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				menu: { action: async () => undefined, notifyShellFocus: () => undefined },
 				clipboard: { writeText: async () => undefined, readText: async () => "" },
 				daemon: {
+					// The renderer reads this on mount (useDevSandboxInfo); the fake reports a
+					// non-sandbox daemon so the shell renders the ordinary chrome.
+					getEnvInfo: async () => ({ isDevSandbox: false, dataDir: null, runFile: null }),
 					getStatus: async () => status,
 					start: async () => status,
 					stop: async () => ({ state: "stopped" }),

@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,45 +19,102 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/modelcatalog"
 	chatdriverregistry "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/registry"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/runtimeselect"
 	"github.com/aoagents/agent-orchestrator/backend/internal/autoreview"
+	"github.com/aoagents/agent-orchestrator/backend/internal/backup"
+	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
+	"github.com/aoagents/agent-orchestrator/backend/internal/codegraph"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonlock"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
+	"github.com/aoagents/agent-orchestrator/backend/internal/mailer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
+	baselineevidence "github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe/usage/pricing"
+	"github.com/aoagents/agent-orchestrator/backend/internal/oidc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
 	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
+	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
+	"github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
+	"github.com/aoagents/agent-orchestrator/backend/internal/runtimegc"
+	"github.com/aoagents/agent-orchestrator/backend/internal/secretbox"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
+	agentauth "github.com/aoagents/agent-orchestrator/backend/internal/service/agentauth"
+	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/authz"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
+	capacitysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/capacity"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
+	environmentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/environment"
+	executionpolicysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	importsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/importer"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/notification/emailoutbox"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	projectmemorysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/projectmemory"
+	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
+	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
+	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/rbac"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/skills"
+	ssosvc "github.com/aoagents/agent-orchestrator/backend/internal/service/ssosvc"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/workitems"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillregistry"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wakepoller"
 )
 
 // Run starts the daemon and blocks until it exits. SIGINT/SIGTERM drive
 // graceful shutdown through the HTTP server and background workers.
+// staticDataDir adapts a fixed AO_DATA_DIR string to
+// providerprofilesvc.DataDirer.
+type staticDataDir string
+
+func (d staticDataDir) DataDir() string { return string(d) }
+
+// Run loads configuration, wires the daemon's dependencies and serves until
+// the process is signalled to stop. It is the whole of the daemon binary's
+// behaviour, and returns the first error that makes serving impossible.
 func Run() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	return RunWithConfig(cfg)
+}
+
+// RunWithConfig starts the same daemon composition root as Run with an
+// already-resolved configuration. It exists for the foreground `ao server`
+// command; Electron continues to use Run and environment-based discovery.
+func RunWithConfig(cfg config.Config) error {
+	// Production guardrail (Frente 3 incident): refuse the default data dir
+	// unless the desktop app launched us or someone chose it explicitly. It
+	// runs first -- before the working directory, the lock or the database
+	// are touched -- so a refused start leaves no trace.
+	if err := config.AuthorizeDefaultDataDir(cfg, os.LookupEnv); err != nil {
+		return err
+	}
+	var err error
 	if cwd, err := os.Getwd(); err == nil {
 		cfg.StartupWorkingDirectory = cwd
 	}
@@ -66,6 +124,57 @@ func Run() error {
 	ignoreBrokenPipeSignal()
 
 	log := newLogger()
+	// Before anything can start a child: read the memory/router switches once
+	// and drop them from this process's environment.
+	defer resolveAndWithholdDaemonOnlySwitches(log)()
+	log.Info("daemon starting", "data_dir", cfg.DataDir, "listen", cfg.Addr(), "frontend_root", cfg.WebRoot)
+	// P9: the daemon's two identities, resolved before anything can launch or
+	// publish a run-file. A data dir whose installation identity cannot be read
+	// runs WITHOUT one (unstamped runtimes, no installation check) rather than
+	// minting a second identity over it: a new identity would silently disown
+	// every runtime the first one stamped.
+	//
+	// Exclusive ownership first: the data dir, and the run-file this daemon will
+	// publish, each held by an OS lock for the daemon's whole lifetime. Two
+	// daemons starting at the same moment cannot both pass a check-then-write
+	// guard; they cannot both hold these locks. The kernel releases them on any
+	// exit, so a crash never leaves them held.
+	dataDirLock, lerr := daemonlock.Acquire(filepath.Join(cfg.DataDir, "daemon.lock"))
+	if errors.Is(lerr, daemonlock.ErrHeld) {
+		return fmt.Errorf("another AO daemon holds data dir %s; refusing to start", cfg.DataDir)
+	} else if lerr != nil {
+		return fmt.Errorf("lock data dir: %w", lerr)
+	}
+	defer func() { _ = dataDirLock.Release() }()
+	runFileLock, lerr := daemonlock.Acquire(cfg.RunFilePath + ".lock")
+	if errors.Is(lerr, daemonlock.ErrHeld) {
+		return fmt.Errorf("another AO daemon owns run-file %s; refusing to start", cfg.RunFilePath)
+	} else if lerr != nil {
+		return fmt.Errorf("lock run-file: %w", lerr)
+	}
+	defer func() { _ = runFileLock.Release() }()
+	// The incarnation that last wrote this run-file. Holding the run-file lock
+	// proves it is no longer running, which is what lets the supervisor listener
+	// clean up that one predecessor's endpoint (and nothing else).
+	priorSupervisor := priorSupervisorEndpoint(cfg.RunFilePath, processalive.Alive)
+
+	// P10: a restore interrupted while the data dir may hold a mix of two states
+	// must be resolved with `ao backup recover` before anything opens the store.
+	// Checked under daemon.lock, so a live restore is never caught mid-write.
+	if err := backup.CheckStartup(cfg.DataDir); err != nil {
+		return err
+	}
+
+	cfg.DaemonInstanceID = daemonmeta.NewDaemonInstanceID()
+	installationID, ierr := daemonmeta.LoadOrCreateInstallationID(cfg.DataDir)
+	if ierr != nil {
+		// Fail CLOSED. Running without an installation identity would leave
+		// every runtime unstamped and skip the installation check, so ownership
+		// would silently rest on less than it claims.
+		return fmt.Errorf("installation identity: %w (check the file by hand; AO will not replace an identity that may still own running workers)", ierr)
+	}
+	cfg.InstallationID = installationID
+	log.Info("daemon identity", "installation_id", cfg.InstallationID, "daemon_instance_id", cfg.DaemonInstanceID)
 	var browserRuntimeToken string
 	if os.Getenv(browserruntime.RuntimeTokenStdinEnv) == "1" {
 		browserRuntimeToken, err = browserruntime.ReadRuntimeToken(os.Stdin)
@@ -90,10 +199,15 @@ func Run() error {
 	// PID for unrelated processes. So a "live" PID is verified against an actual
 	// /healthz probe; a run-file left by a crashed/hard-killed/reused-PID
 	// predecessor is treated as stale and overwritten when the new server starts.
-	if live, err := runfile.CheckStale(cfg.RunFilePath); err != nil {
+	//
+	// P9: both run-file conventions for this data dir are checked, so a daemon
+	// started as `ao server --data-dir X` (X/running.json) is not missed by a
+	// start that reads the default path -- the two-daemons-on-one-DB shape.
+	if live, path, err := liveDaemonForDataDir(&http.Client{Timeout: staleProbeTimeout}, cfg.RunFilePath, cfg.DataDir); err != nil {
 		return fmt.Errorf("inspect run-file: %w", err)
-	} else if live != nil && runFileOwnerServing(&http.Client{Timeout: staleProbeTimeout}, config.LoopbackHost, live) {
-		return fmt.Errorf("daemon already running (pid %d, port %d); refusing to start", live.PID, live.Port)
+	} else if live != nil {
+		return fmt.Errorf("daemon already running for data dir %s (pid %d, port %d, run-file %s); refusing to start",
+			cfg.DataDir, live.PID, live.Port, path)
 	}
 
 	// Open the durable store and bring up the CDC substrate: DB triggers capture
@@ -112,8 +226,222 @@ func Run() error {
 		log.Warn("install using-ao skill", "err", err)
 	}
 
+	// Checkpoint 8P-A: application identity. authMgr is wired into every
+	// daemon boot (not gated on AO_TRUSTED_LOCAL_MODE) so login/logout/me
+	// and the identity middleware always have somewhere real to resolve
+	// against; TrustedLocalMode only changes how the middleware/controller
+	// behave when NO session cookie is present. Bootstrap runs every boot
+	// but only acts once (zero rows in users): it creates the admin from
+	// AO_BOOTSTRAP_ADMIN_EMAIL/AO_BOOTSTRAP_ADMIN_PASSWORD when set, and
+	// backfills any pre-existing NULL project/workflow-run owner to that
+	// admin so nothing is silently orphaned. Never hard-fails startup.
+	authMgr := authsvc.New(store, nil)
+	// P4-I: the identity an AO-LAUNCHED AGENT holds. Built beside authMgr and
+	// over the same store, because it answers the same question -- "who is this
+	// request?" -- for the one caller the browser-session layer structurally
+	// cannot serve: a reviewer or worker in a pane, with no browser and no
+	// person at the keyboard. See service/agentauth.
+	agentAuthMgr := agentauth.New(store, nil, 0)
+	// ...and the end of that identity. A credential outlives its usefulness the
+	// moment the review run it was minted for stops running, and before this it
+	// was only ever taken back on the paths where AO killed the reviewer or
+	// failed to start one -- never on the path a reviewer that simply finished
+	// takes. This reconciler owns both halves of the close-out (the durable row
+	// and the file the token was handed over in) and both timings: eagerly, from
+	// the submit that ends the authority, and as a sweep on boot and on a timer
+	// for every ending that has no request to hang off. See agentauth/reconciler.go.
+	agentCredentialReaper := agentauth.NewReconciler(agentAuthMgr, agentauth.ReconcilerConfig{
+		DataDir: cfg.DataDir,
+		Logger:  log,
+	})
+	bootstrapResult, err := authMgr.Bootstrap(context.Background(), os.Getenv("AO_BOOTSTRAP_ADMIN_EMAIL"), os.Getenv("AO_BOOTSTRAP_ADMIN_PASSWORD"))
+	if err != nil {
+		log.Warn("bootstrap admin setup failed", "err", err)
+	} else if bootstrapResult.Created {
+		log.Info("created bootstrap admin user",
+			"userId", bootstrapResult.AdminID,
+			"backfilledProjects", bootstrapResult.BackfilledProjects,
+			"backfilledWorkflowRuns", bootstrapResult.BackfilledWorkflowRuns,
+		)
+	} else if bootstrapResult.Skipped {
+		log.Warn("no admin user exists yet; set AO_BOOTSTRAP_ADMIN_EMAIL and AO_BOOTSTRAP_ADMIN_PASSWORD and restart to create one")
+	}
+
+	// Checkpoint 8P-E.8.1: promotes a lone pre-8P-E.8 user (created before
+	// the role column existed, backfilled to 'member' by migration 0116) to
+	// owner. A no-op once any owner exists or when zero/multiple users
+	// exist. Never hard-fails startup.
+	if promoted, err := authMgr.EnsureOwnerExists(context.Background()); err != nil {
+		log.Warn("ensure-owner-exists check failed", "err", err)
+	} else if promoted {
+		log.Info("promoted sole pre-existing user to installation owner")
+	}
+
+	// P4-A: SSO. Wired on every boot, exactly like authMgr — the service
+	// itself reports Enabled() false when no provider is configured, so the
+	// routes exist and answer SSO_NOT_CONFIGURED rather than being
+	// conditionally absent. An install that sets no AO_OIDC_* variable is
+	// indistinguishable from one built before this checkpoint.
+	var ssoMgr ssosvc.Manager
+	if cfg.OIDC.Enabled {
+		ssoMgr = ssosvc.New(cfg.OIDC, oidc.NewClient(oidc.Config{
+			Issuer:       cfg.OIDC.Issuer,
+			ClientID:     cfg.OIDC.ClientID,
+			ClientSecret: cfg.OIDC.ClientSecret,
+			RedirectURL:  cfg.OIDC.RedirectURL,
+			Scopes:       cfg.OIDC.Scopes,
+		}, nil, nil), store, federatedSessionIssuer{authMgr}, nil)
+		log.Info("single sign-on enabled",
+			"issuer", cfg.OIDC.Issuer,
+			"redirectUrl", cfg.OIDC.RedirectURL,
+			"authMode", string(cfg.AuthMode),
+			"allowedEmailDomains", len(cfg.OIDC.AllowedEmailDomains),
+		)
+		if _, err := ssoMgr.PurgeExpiredFlows(context.Background()); err != nil {
+			log.Warn("could not prune expired sign-in flows", "err", err)
+		}
+	}
+
 	telemetrySink := newTelemetrySink(cfg, store, log)
 	defer func() { _ = telemetrySink.Close(context.Background()) }()
+
+	// P4-B: authorization. authzSvc is the ONE evaluator every transport asks
+	// "may this principal do X?"; rbacSvc is the write side that manages
+	// accounts, teams and project access under the owner-safety invariants.
+	// Both are wired on every boot for the same reason authMgr is: the answer
+	// to an authorization question must not depend on which optional surface
+	// happened to be configured.
+	authzSvc := authz.New(store)
+	rbacSvc := rbac.New(store, authsvcCreator{authMgr}, rbac.LogAudit{Log: log, Sink: telemetrySink}, nil)
+	// The skill catalog. It reads and writes <dataDir>/skills/catalog, a
+	// SIBLING of the using-ao directory skillassets.Install clobbers above --
+	// nothing here is inside that path, so a boot cannot overwrite an
+	// installed package.
+	//
+	// Phase 8 wires the isolated runner and the image trust root. What that
+	// unblocks is exactly ONE mode -- static-code, the one with a live boundary
+	// test -- and only when the container runtime is usable AND an
+	// administrator has approved a digest for the exact scope. Everything else
+	// is refused with the missing control named, as before: process.exec,
+	// repo.write, net.egress, net.active_scan and secrets.read gain no surface
+	// here.
+	//
+	// The runner is probed once, at boot. A probe failure is not fatal: the
+	// runner still exists, attests nothing, and refuses every execution, which
+	// is the shape a fail-closed component needs.
+	// A bounded context, not the caller's: a wedged container daemon must make
+	// the runner report unavailable, not hold up the boot.
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 20*time.Second)
+	// Every container the runner starts carries this installation's id, which
+	// is what lets a sweep after a restart remove this installation's leftovers
+	// and nothing another AO (or anything else) on the same runtime started.
+	skillRunner := skillrunner.New(probeCtx).WithOwner(cfg.InstallationID)
+	cancelProbe()
+	// The trust root gets the runner as its inspector: an approval is refused
+	// unless this host can show AO the exact bytes under that digest. Without
+	// it the daemon would record decisions about images nobody here has.
+	skillImages := skills.NewImageAuthority(store, store).WithImageInspector(skillRunner)
+	// Frente 2 / 2C: agent modes of builtin or signature-trusted skills run
+	// through AO's host agent executor (ADR 0010). It never carries a tool
+	// mode, and the container runner never carries an agent mode.
+	skillAgent := newSkillAgentExecutor(cfg, log)
+	skillsSvc := skills.New(store, cfg.DataDir,
+		skills.WithSkillExecutor(skillRunner, skillImages, store, cfg.SkillStagingRoot,
+			skillRunner.Unavailable()),
+		skills.WithAgentExecutor(skillAgent, nil),
+		// Provenance for installed versions, read from AO's own table. It is
+		// what lets a settings screen say whether an installed package is
+		// merely verified or actually trusted, without opening a socket.
+		skills.WithOriginSource(store),
+		// Frente 2 / 2B: runs are durable records owned by THIS daemon
+		// instance. The runner doubles as the reaper for a run a previous
+		// instance left behind (its container and staged copy, by run id).
+		skills.WithDurableRuns(store, cfg.DaemonInstanceID, skillRunner, log))
+	// Registered after the store's own deferred Close, so it runs BEFORE it:
+	// every in-flight run records its terminal state while the store is open.
+	defer skillsSvc.CloseRuns(10 * time.Second)
+	// Builtins are made AVAILABLE, never enabled: no project gains a capability
+	// because AO was upgraded.
+	for _, b := range skillsSvc.EnsureBuiltins(context.Background()) {
+		switch b.Action {
+		case "installed", "present":
+			log.Info("skills: builtin package", "skill", b.SkillID, "version", b.Version, "action", b.Action)
+		default:
+			log.Warn("skills: builtin package not installed", "skill", b.SkillID, "version", b.Version,
+				"action", b.Action, "detail", b.Detail)
+		}
+	}
+	// Runs a previous daemon left non-terminal cannot be proven either way;
+	// they end failed (SKILL_RUN_INTERRUPTED) and their leftovers are reaped.
+	if n, err := skillsSvc.ReconcileRuns(context.Background()); err != nil {
+		log.Error("skills: could not reconcile interrupted runs", "err", err)
+	} else if n > 0 {
+		log.Warn("skills: ended runs interrupted by a previous daemon", "count", n)
+	}
+	// Containers whose removal the runtime did not confirm -- a run's, or a
+	// probe's -- are retried until it does. The first sweep runs immediately,
+	// in the background, so a wedged runtime cannot hold up the boot.
+	skillsSvc.StartContainerSweeper(2 * time.Minute)
+	// Phase 10: the registry / marketplace. It ships with NO registry
+	// configured and no default endpoint, so an installation that configures
+	// nothing can install nothing from one.
+	//
+	// The AO version comes from cfg.Telemetry.AppVersion, which the desktop
+	// supervisor stamps, and NOT from cli.Version -- that symbol lives in the
+	// package that imports this one, and its own doc records that release
+	// tooling does not currently override it. On a build launched without a
+	// supervisor the value is empty, and skillregistry.CheckCompatibility then
+	// reports that the check DID NOT RUN rather than that it passed. That is
+	// the deliberate asymmetry: a trust check that cannot run must refuse,
+	// because what it defends against is an attacker; a compatibility check
+	// that cannot run must say so, because what it defends against is a bad
+	// afternoon -- and refusing every install on every source build would only
+	// teach people to route around the checks that do matter.
+	//
+	// Phase 11 adds the private-registry half. The credential resolver reads
+	// the SAME sealed store every other AO credential lives in -- there is no
+	// second, registry-specific home for a secret -- and it is handed to the
+	// provider factory rather than to the marketplace, because the factory is
+	// the one place a registry type turns into a client.
+	//
+	// The two test-only seams on HTTPSOptions (a trust anchor and a resolver)
+	// are deliberately NOT set here and have no configuration reaching them.
+	// That is what makes "AO verifies the certificate" a property of the build
+	// rather than a default somebody can flip.
+	registrySecrets := skills.NewRegistrySecrets(store, secretbox.New(cfg.DataDir))
+	// The trust roots signatures chain to. The BUILT-IN set comes from
+	// skillregistry rather than from configuration or a file, because a trust
+	// root in a file is a trust root an attacker with write access to ~/.ao
+	// replaces -- and one in the binary requires replacing the binary, at
+	// which point they did not need the root.
+	//
+	// It is empty in this build, deliberately: no genuine AO signing key has
+	// been published, and a plausible-looking one would be a forgery this
+	// repository handed out. See internal/skillregistry/official.go.
+	skillTrust := skills.NewTrustAuthority(store, skillregistry.BuiltinOfficialRoots())
+	skillMarketplace := skills.NewMarketplace(store, skillsSvc,
+		skillregistry.DefaultProviderFactory{Secrets: registrySecrets},
+		cfg.Telemetry.AppVersion, cfg.DataDir,
+	).WithConnectivity(store, registrySecrets).WithTrust(skillTrust).WithExternal(store)
+	// The external surface: what this installation has administratively
+	// withdrawn on a forge, and which tags it has seen move. It reads the
+	// trust store (the revocations live beside the key and root ones, because
+	// all three are "what an administrator here decided") and the marketplace
+	// (the tag ledger).
+	skillExternal := skills.NewExternalAuthority(skillTrust, skillMarketplace)
+	probeAttrs := []any{
+		"runtime", skillRunner.Runtime().Describe(),
+		"available", skillRunner.Available(),
+		"controls", len(skillRunner.Attestation().Controls),
+	}
+	// Why the runner is unavailable used to reach only a refused run's message.
+	// It is the runtime's own probe error (e.g. docker not on the daemon's PATH,
+	// no reachable daemon, not linux/cgroup v2) and carries no credential.
+	if !skillRunner.Available() {
+		probeAttrs = append(probeAttrs, "reason", skillRunner.Unavailable())
+	}
+	log.Info("skills: execution environment probed", probeAttrs...)
+
 	telemetrySink.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.daemon.started",
 		Source:     "daemon",
@@ -139,10 +467,49 @@ func Run() error {
 	// attach Stream and liveness; the CDC broadcaster feeds the session-state channel. The manager
 	// is handed to httpd, which mounts it at /mux. Raw PTY bytes never flow
 	// through the CDC change_log -- only session-state events do.
-	runtimeAdapter := runtimeselect.New(log)
+	runtimeAdapter := runtimeselect.New(log, cfg.TmuxSocket, filepath.Join(cfg.DataDir, "tmp"),
+		runtimeselect.Identity{InstallationID: cfg.InstallationID, DaemonInstanceID: cfg.DaemonInstanceID})
 	managedPreview := previewserver.New(log, cfg.DataDir)
 	termMgr := terminal.NewManager(runtimeAdapter, cdcPipe.Broadcaster, log)
 	defer termMgr.Close()
+	// Checkpoint 8P-B.2: the /mux WebSocket bypasses SessionsController
+	// entirely (a client supplies the terminal/pane id only after the
+	// connection upgrades, not via a REST path param), so it needs its own
+	// authorization boundary rather than inheriting SessionsController's.
+	// r.Context() at WS-accept time already carries identity.Middleware's
+	// resolved identity (identity.Middleware runs before mountTerminalMux
+	// in router.go), so this closure only needs to read it back and ask the
+	// one evaluator -- deliberately not importing httpd/controllers here, to
+	// keep daemon's dependency direction one-way.
+	//
+	// P4-C replaced 8P-B.2's owner-equality check here with the same
+	// authorization question every other session surface asks: may this
+	// principal write to the session's PROJECT. Owner-equality was both too
+	// strict and, once organizations exist, the wrong shape -- it denied a
+	// colleague who holds a legitimate grant, while saying nothing at all
+	// about which organization the session belongs to. Routing it through
+	// authz means a terminal attach is scoped by tenancy for free, because
+	// the resolver never puts a foreign organization's project in reach.
+	termMgr.SetAttachAuthorizer(func(ctx context.Context, id string) bool {
+		if cfg.TrustedLocalMode {
+			return true
+		}
+		user, ok := identity.FromContext(ctx)
+		if !ok {
+			return false
+		}
+		project, found, err := store.GetSessionProjectID(ctx, domain.SessionID(id))
+		if err != nil || !found || project == "" {
+			// An un-attributable session fails closed, matching the rule
+			// 8P-B.2 established for an un-owned one.
+			return false
+		}
+		principal := domain.Principal{User: user, AuthMethod: domain.AuthMethodPassword}
+		if p, ok := identity.PrincipalFromContext(ctx); ok {
+			principal = p
+		}
+		return authzSvc.Authorize(ctx, principal, domain.PermSessionWrite, domain.ProjectResource(project)) == nil
+	})
 
 	// The agent messenger sends validated user input to the session's live
 	// runtime pane. Keep this path small until durable inbox semantics are needed.
@@ -150,9 +517,52 @@ func Run() error {
 	// agent nudges (CI failure, review feedback, merge conflict).
 	messenger := newSessionMessenger(store, runtimeAdapter, log)
 	lifecycleMessenger := newModeAwareMessenger()
+	// The driver registry is the chat capability gate, and Settings reports what
+	// it allows, so it is resolved before both.
+	chatDrivers := chatdriverregistry.Build(log)
 	notificationHub := notify.NewHub()
 	notifier := notificationsvc.New(notificationsvc.Deps{Store: store})
-	notificationWriter := notify.New(notify.Deps{Store: store, Publisher: notificationHub})
+	// Daemon-owned preferences. The store's type is field-compatible with the
+	// service's, adapted in settings_wiring.go so neither package imports the
+	// other. Built here, before the notification writer, because the optional
+	// completion-email fan-out resolves its destination through it.
+	//
+	// The secret box's key file lives beside the database under the AO data
+	// dir, so the SMTP password's encryption key travels with the profile it
+	// belongs to and never lands in an OS-default app-data location.
+	settingsSvc := settingssvc.New(
+		settingsStore{store: store},
+		chatDrivers,
+		func() time.Time { return time.Now().UTC() },
+	).WithEmail(secretbox.New(cfg.DataDir), &mailer.Sender{})
+	// The durable email outbox. It plays two roles at once, which is why it is
+	// built here between the settings service and the notification writer:
+	// it is the writer's Emailer (recording that an email is OWED, synchronously
+	// and durably, on the notification INSERT), and it is the worker that later
+	// drains those rows over SMTP. The settings emailer supplies both halves it
+	// needs -- the enqueue-time renderer and the send-time transport.
+	//
+	// Nil-safe by construction: with no SMTP settings the renderer declines,
+	// nothing is enqueued, and in-app notifications are unaffected (P4-D 8).
+	notificationEmailer := settingssvc.NewNotificationEmailer(settingsSvc)
+	emailOutbox := emailoutbox.New(emailoutbox.Deps{
+		Store:     store,
+		Transport: notificationEmailer,
+		Renderer:  notificationEmailer,
+		Logger:    log,
+	})
+	notificationWriter := notify.New(notify.Deps{
+		Store:     store,
+		Publisher: notificationHub,
+		Emailer:   emailOutbox,
+		Logger:    log,
+	})
+	// Session-level facts (a pending decision, a spent repair budget, a failed
+	// integration) become notifications through the same single write path, so
+	// they land in one table and reach the live stream like every other kind.
+	sessionFactNotifier := notificationsvc.NewSessionFactNotifier(notificationsvc.SessionFactDeps{
+		Notifier: notificationWriter,
+	})
 	// Resolution transitions that happened while the daemon was down never
 	// reached lifecycle, so re-check open notifications against the durable
 	// session/PR facts before serving. Best-effort: a failure here only leaves
@@ -160,6 +570,11 @@ func Run() error {
 	if err := notificationWriter.Reconcile(ctx); err != nil {
 		log.Warn("notification resolution reconcile failed", "err", err)
 	}
+	// Emails a previous daemon owed but never finished sending. Draining once at
+	// startup reclaims anything a crash left mid-send; the ticker then keeps the
+	// queue moving. Both are best-effort by design: mail must never gate
+	// startup or the work being reported.
+	startEmailOutboxWorker(ctx, emailOutbox, log)
 
 	// Bring up the Lifecycle Manager and the reaper first: it makes the session
 	// lifecycle write path live (reducer write -> store -> DB trigger ->
@@ -179,22 +594,12 @@ func Run() error {
 		return fmt.Errorf("wire agent resolver: %w", err)
 	}
 
-	lcStack := startLifecycle(ctx, store, runtimeAdapter, lifecycleMessenger, notificationWriter, telemetrySink, agents, log)
+	lcStack := startLifecycle(ctx, store, runtimeAdapter, lifecycleMessenger, notificationWriter, sessionFactNotifier, telemetrySink, agents, log)
 
 	// Wire the controller-facing session service over the same store + LCM, the
 	// selected runtime, routed git/scratch workspaces, the per-session agent
 	// resolver (AO_AGENT validated here for compatibility), and the agent
 	// messenger, then mount it on the API.
-	chatDrivers := chatdriverregistry.Build(log)
-
-	// Daemon-owned preferences. The store's type is field-compatible with the
-	// service's, adapted here so neither package imports the other.
-	settingsSvc := settingssvc.New(
-		settingsStore{store: store},
-		chatDrivers,
-		func() time.Time { return time.Now().UTC() },
-	)
-
 	// Chat service. The driver registry is the capability gate: a harness with no
 	// registered driver cannot start in chat mode, so an unsupported request fails
 	// loudly instead of silently becoming a TUI session.
@@ -241,7 +646,7 @@ func Run() error {
 		NewID:    uuid.NewString,
 	})
 
-	sessionSvc, reviewSvc, sessMgr, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, log)
+	sessions, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, sessionFactNotifier, agentCredentialReaper, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -250,13 +655,15 @@ func Run() error {
 		}
 		return fmt.Errorf("wire session service: %w", err)
 	}
+	sessionSvc, reviewSvc, sessMgr := sessions.Service, sessions.Review, sessions.Lifecycle
+	rawSessionMgr, workspaceObserver := sessions.Manager, sessions.Workspace
 	sessMgr.SetTerminalInputGate(termMgr)
 	lifecycleMessenger.Bind(sessionLifecycleMessenger{sessMgr})
 	lcStack.LCM.SetCompletionTerminator(sessMgr)
 	lcStack.LCM.SetSessionInputLease(sessMgr)
 	lcStack.LCM.SetSessionOperationGate(sessMgr)
 	termMgr.SetSessionInputLease(sessMgr)
-	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink})
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, AllowedRoots: cfg.AllowedProjectRoots, BranchLocks: store})
 	if err := seedScratchProjectOnBoot(ctx, cfg, projectSvc); err != nil {
 		stop()
 		lcStack.Stop()
@@ -273,6 +680,7 @@ func Run() error {
 			log.Warn("initial agent catalog refresh failed", "err", err)
 		}
 	}()
+	environmentSvc := environmentsvc.New(agentSvc, projectSvc)
 
 	// Connect Mobile: the bridge service needs the LAN listener, but the LAN
 	// listener needs the built router's handler, which only exists once srv is
@@ -355,6 +763,208 @@ func Run() error {
 	if reconcileErr := lcStack.ReconcileRuntime(ctx); reconcileErr != nil {
 		log.Error("reconcile agent processes on boot failed", "err", reconcileErr)
 	}
+	// Workflow durable foundation (Checkpoint 8A) + Checkpoint 8C's review
+	// dispatch: wire the coordinator/service and run its own read-mostly boot
+	// recovery. Checkpoint 8C needs its own reviewer-launch path — deliberately
+	// NOT the reviewEngine/reviewSvc wired into startSession above, since that
+	// engine's Launcher always builds a PR-centric prompt internally with no
+	// override hook (see workflow_reviewer_launcher.go's doc comment for the
+	// full reasoning). It reuses the same reviewer registry/resolver and the
+	// same runtime adapter every other session pane already uses — just not
+	// the same Launcher wrapper.
+	workflowReviewers, err := reviewer.NewResolver()
+	if err != nil {
+		stop()
+		lcStack.Stop()
+		if cdcErr := cdcPipe.Stop(); cdcErr != nil {
+			log.Error("cdc pipeline shutdown", "err", cdcErr)
+		}
+		return fmt.Errorf("workflow reviewer resolver: %w", err)
+	}
+	workflowReviewerLauncher := &workflowReviewerLauncher{
+		reviewers:   workflowReviewers,
+		runtime:     runtimeAdapter,
+		dataDir:     cfg.DataDir,
+		runFile:     cfg.RunFilePath,
+		auth:        reviewerAgentAuth{agents: agents},
+		credentials: agentAuthMgr,
+		// On an installation where a cookie-less request resolves nobody, a
+		// reviewer with no credential of its own cannot record a verdict, so
+		// the launch is refused rather than started into the dead end that
+		// parked wf-98ab416c.
+		requireAgentIdentity: !cfg.TrustedLocalMode,
+		executable:           os.Executable,
+	}
+	// Checkpoint 8K-B pass 2: the cross-provider Decision Resolver launcher.
+	// Unlike workflowReviewerLauncher, this resolves through the SAME
+	// per-session agent registry (agents) session_manager itself uses for
+	// ordinary worker spawns — a resolver session is a plain read-only
+	// worker-agent invocation, not a review pass, so it never needs the
+	// reviewer registry/PR-centric prompt workaround workflowReviewerLauncher
+	// documents.
+	decisionResolverLauncher := &decisionResolverLauncher{
+		agents:     agents,
+		runtime:    runtimeAdapter,
+		dataDir:    cfg.DataDir,
+		runFile:    cfg.RunFilePath,
+		executable: os.Executable,
+	}
+	// Checkpoint 8P-E.19: the Incident Advisor's Diagnostic Agent launcher.
+	// Same agent registry, same runtime adapter and same PATH/shim handling as
+	// the decision resolver above — the only differences are its narrower
+	// read-only mandate and its isolated scratch workspace.
+	incidentAgentLauncher := &incidentAgentLauncher{
+		agents:     agents,
+		runtime:    runtimeAdapter,
+		dataDir:    cfg.DataDir,
+		runFile:    cfg.RunFilePath,
+		executable: os.Executable,
+	}
+	// Checkpoint 8P-E.11: durable direct-branch execution locks. The owner
+	// token is this daemon instance's identity -- it is what lets boot
+	// reconciliation tell a lock this instance still owns from one a crashed
+	// predecessor left behind, without ever guessing from timestamps.
+	// P1-D reuses this same token for the execution placements the workflow
+	// coordinator freezes, so a placement and the lock protecting it name the
+	// SAME daemon incarnation. Two independently generated tokens would mean
+	// boot reconciliation could believe it owns the lock and not the placement.
+	// P9: the SAME daemon instance identity running.json, the probes and every
+	// runtime stamp carry -- one incarnation, one id.
+	daemonInstanceToken := cfg.DaemonInstanceID
+	branchLocks := branchlock.New(branchlock.Deps{
+		Store:      store,
+		Preflight:  workspaceObserver,
+		OwnerToken: daemonInstanceToken,
+		NewID:      uuid.NewString,
+		Logger:     log,
+	})
+	// Checkpoint 8P-E.14: ordinary tasks take the same locks, over the same
+	// manager, so a task and a workflow targeting one repository+branch
+	// serialize instead of both writing it. Late-bound because the session and
+	// lifecycle managers are built before the lock manager exists.
+	rawSessionMgr.SetBranchLocks(sessionBranchLocks{mgr: branchLocks})
+	// Checkpoint 8P-E.14A: lifecycle drives the same locks at the session's turn
+	// boundaries, through the re-acquire variant (see sessionTurnBranchLocks).
+	lcStack.LCM.SetBranchLocks(sessionTurnBranchLocks{mgr: branchLocks})
+	// Runtime GC is built BEFORE the workflow coordinator because the
+	// coordinator now depends on it: a terminal run ends the runtime it owns
+	// through the sweeper's own ReclaimSessionRuntime, so that the immediate
+	// terminal path and the periodic sweep apply one implementation of the
+	// ownership/incarnation proofs rather than two. Its own boot and periodic
+	// sweeps are still started further down, at the point they were before.
+	var placementGC runtimegc.WorktreeReleaser
+	if wsMgr := taskWorkspaceManager(cfg, store, log); wsMgr != nil {
+		placementGC = worktreeReleaser{mgr: wsMgr}
+	}
+	runtimeGC := newRuntimeGC(runtimeAdapter, store, placementGC, log)
+	// Project memory. It is constructed unconditionally because it is inert
+	// until something indexes a repository: with no completed pass every
+	// context pack comes back empty with a stated reason, and every role falls
+	// back to exactly the behaviour it had before P2-A. The graph backend is
+	// the in-tree local one; an external adapter would be composed in here
+	// with projectmemory.TeeGraph, never substituted for it.
+	//
+	// It is built before the workflow stack because P2-B's dispatch wrappers
+	// take it: whether they do anything is decided by AO_MEMORY_MODE inside
+	// startWorkflows, not by whether this value exists.
+	// The structural half (migration 0153). It is constructed unconditionally
+	// and is inert until a repository is indexed: with no completed build every
+	// pack's graph evidence comes back empty with a stated reason, and every
+	// role falls back to exactly the behaviour it had before this phase.
+	//
+	// It shares the daemon's store rather than owning a second one, so the
+	// graph and project memory are versioned in the same database and a purge
+	// of one cannot leave the other pointing at facts that are gone.
+	codeGraph := codegraph.NewIndex(store, codegraph.WithIndexLogger(log))
+	projectMemory := projectmemory.NewService(store,
+		projectmemory.WithCodeGraph(codeGraph),
+		projectmemory.WithServiceLogger(log),
+		// Frente 3 / 3B: AO_MEMORY_MAX_FILES / AO_MEMORY_MAX_FILE_BYTES were
+		// parsed and never applied; the operator's bounds now reach every pass.
+		projectmemory.WithIndexerLimits(memoryConfig(log).IndexLimits))
+	// ONE provisioner for the whole daemon. It owns the sync single-flight and
+	// the pack cache, so constructing a second one for the API surface would
+	// give `ao memory report` its own syncer -- and a report could then trigger
+	// a sync concurrent with the one a dispatch is already running, which is
+	// precisely what the single-flight exists to prevent.
+	memoryProvisioning := memoryProvisioner(projectMemory, store, log)
+
+	// P4-F: GitHub as EXTERNAL context, built on the same SCM providers the
+	// observer runs on and shared between the HTTP surface and agent dispatch.
+	// One instance, so the UI's poll and a dispatch's provisioning hit the
+	// same short-lived snapshot cache instead of each paying for its own round
+	// trip to GitHub.
+	githubIntel := newGitHubIntelligence(store, cfg.GitLab, log)
+	if memoryProvisioning != nil {
+		// External context rides on the dispatch-context boundary the memory
+		// provisioner already owns, rather than on a second one: that boundary
+		// is where every role's context is assembled, budgeted and measured,
+		// and a parallel path would be a second place for the "never fail a
+		// dispatch" rule to be forgotten.
+		//
+		// Frente 3 / 3D: AO_MEMORY_EXTERNAL=off keeps it out, so a memory
+		// A/B varies memory and nothing else. The choice is recorded in every
+		// run's policy_snapshot (contextSources.externalContext).
+		if memoryConfig(log).ExternalContext {
+			memoryProvisioning = memoryProvisioning.WithExternal(githubIntel)
+		}
+	}
+
+	// P4-E: external work management (Plane).
+	//
+	// Constructed unconditionally and inert until a project is configured and
+	// switched on: with no configuration every read answers "not configured",
+	// the outbox is never written to, and the worker's every tick claims zero
+	// rows. That is the §3 requirement that AO starts normally when Plane is
+	// not configured, and it is a property of the code rather than of a flag
+	// somebody has to remember to check.
+	//
+	// It shares the daemon's store and secret box rather than owning either,
+	// so the API token is sealed with the same key as every other credential
+	// AO must be able to present.
+	workItemsSvc := workitems.New(workitems.Deps{
+		Store:   store,
+		Secrets: secretbox.New(cfg.DataDir),
+		Logger:  log,
+		NewID:   uuid.NewString,
+	}).WithNotifier(notificationWriter)
+	workItemsDone := workitems.NewWorker(workItemsSvc, workitems.WorkerConfig{Logger: log}).Start(ctx)
+	_ = workItemsDone
+
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, workItemsSvc, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), plannerUsageRecorderFor(usageCollector), agentAuthMgr, agentAuthMgr, agentCredentialReaper, log)
+	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
+	// lock once it can ask what that stop means, and only the coordinator knows
+	// (branchlock/retention.go). The coordinator needs the lock manager to
+	// exist first, so the classifier is handed over here, after construction
+	// and before the first reconcile pass.
+	branchLocks.SetClassifier(coordinatorLockClassifier{coordinator: workflowCoordinator})
+	// Reconcile branch locks BEFORE workflow recovery: a run that is about to
+	// be resumed must find its own lock adopted rather than contended, and a
+	// run waiting on a branch a crashed or permanently stopped run held must
+	// find that branch free.
+	if _, blErr := branchLocks.Reconcile(ctx); blErr != nil {
+		log.Error("reconcile branch locks on boot failed", "err", blErr)
+	}
+	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
+		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
+	}
+	// Checkpoint 8N.1: the daemon-level poller that claims due wakes and
+	// resumes their runs automatically — see workflow/wakepoller's own doc
+	// comment for why this is a separate package from wake.Scheduler itself.
+	// Durable workflow work (today: plan generation, which takes minutes) runs
+	// on a context the coordinator owns rather than on the request or poller
+	// tick that entered it -- this is the daemon lifetime that still ends it.
+	// Set before the poller starts, so the first wake it fires already has it.
+	workflowCoordinator.SetExecutionLifetime(ctx)
+	wakePoller := wakepoller.New(wakeScheduler, workflowCoordinator, wakepoller.Config{Logger: log})
+	lcStack.wakePollerDone = wakePoller.Start(ctx)
+	// P1-C: Runtime GC. It runs once here, at the one moment nothing is
+	// mid-launch and a crashed daemon's orphans are most likely to exist, and
+	// then on a low-frequency timer. It destroys only runtimes whose
+	// ownership, exact incarnation and terminality it can prove.
+	// P1-D §X: the sweep also reclaims AO-managed task worktrees whose work
+	// provably landed. A nil manager narrows the sweep to runtimes only.
+	lcStack.runtimeGCDone = startRuntimeGC(ctx, runtimeGC, log)
 	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{Logger: log})
 	lcStack.autoReviewDone = autoReview.Start(ctx)
 	// Push-device registry: persisted phones that receive OS push notifications.
@@ -397,12 +1007,50 @@ func Run() error {
 		go dispatcher.Run(ctx)
 	}
 
+	// Shared between APIDeps.ProviderProfiles and providersetup.Service
+	// (Checkpoint 8P-E.8.4): both need the same Prober/DataDir-scoped Get,
+	// and constructing it twice would let the two surfaces silently drift.
+	// Checkpoint 8P-E.13A.5: connecting/enabling/re-probing a profile keeps
+	// the owner's stored execution policy priority lists in step, so a
+	// provider connected after the policy was first saved does not stay
+	// invisible to Settings. Shared with APIDeps.ExecutionPolicy below so both
+	// surfaces read and repair the same policy through one implementation.
+	// ONE project-memory service instance backs both API surfaces: the memory
+	// routes and the code-graph routes are two views of the same subsystem,
+	// and giving them separate resolvers would give them separate opinions
+	// about which repository a project id means.
+	memoryAPI := projectmemorysvc.New(projectMemory, store).
+		WithProvisioner(memoryProvisioning).
+		WithWorkspaces(store).
+		WithGraph(codeGraph).
+		WithExplorer(store)
+
+	executionPolicySvc := &executionpolicysvc.Service{Store: store}
+	providerProfilesSvc := &providerprofilesvc.Service{
+		Store:      store,
+		Prober:     providerprofilesvc.CLIProber{},
+		DataDir:    staticDataDir(cfg.DataDir),
+		PolicySync: executionPolicySvc,
+	}
+	providerSetupSvc := &providersetupsvc.Service{
+		Profiles:  providerProfilesSvc,
+		Terminals: providerSetupTerminals{shellTermSvc},
+		Launcher:  providersetupsvc.CLILauncher{},
+		Prober:    providerprofilesvc.CLIProber{},
+		DataDir:   staticDataDir(cfg.DataDir),
+	}
+
 	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
-		Projects:           projectSvc,
-		Agents:             agentSvc,
-		Sessions:           sessionSvc,
-		PRs:                prActions,
-		Reviews:            reviewSvc,
+		Projects:    projectSvc,
+		Agents:      agentSvc,
+		Environment: environmentSvc,
+		Sessions:    sessionSvc,
+		PRs:         prActions,
+		Reviews:     reviewSvc,
+		Workflows:   workflowSvc,
+		// P1-C's observability: what is holding the machine, and what GC did.
+		Scheduler:          workflowCoordinator,
+		RuntimeGC:          runtimeGC,
 		Notifications:      notifier,
 		NotificationStream: notificationHub,
 		Push:               pushRegistry,
@@ -413,13 +1061,62 @@ func Run() error {
 		ShellTerminals:     shellTermSvc,
 		Conversations:      chatSvc,
 		Settings:           settingsSvc,
-		CDC:                store,
-		Events:             cdcPipe.Broadcaster,
-		Activity:           lcStack.LCM,
-		UsageHooks:         usageCollector,
-		UsageSummary:       usagesvc.NewSummaryReader(store),
-		Telemetry:          telemetrySink,
-		Mobile:             mc,
+		// The same resolver the workflow wiring uses, so /settings reports the
+		// policy that is actually in force rather than a second reading of the
+		// environment that could disagree with it.
+		MemoryMode: string(memoryConfig(log).Mode),
+		CDC:        store,
+		Events:     cdcPipe.Broadcaster,
+		Activity:   lcStack.LCM,
+		UsageHooks: usageCollector,
+		// P3-E: the same collector, reached through the pane-shaped entry point
+		// that cannot touch a session's lifecycle.
+		UsageSubjectHooks: usageCollector,
+		UsageSummary:      usagesvc.NewSummaryReader(store),
+		// P3-E: the ledger reader owns the run/project token and cost answers.
+		// Its rate card is resolved once, from AO's own data dir, so a cost
+		// figure always names the rates that produced it -- and a rate card
+		// that is absent or unreadable simply leaves cost unknown while tokens
+		// keep being reported in full.
+		UsageLedger: usagesvc.NewLedgerReader(store, usagePricing(cfg.DataDir, log)),
+		// The AO-ASSEMBLED context view, read from the same baseline evidence
+		// tree P2 already writes. Deliberately a second reader rather than a
+		// widened ledger: what AO sent and what a provider reported receiving
+		// are different quantities, and one reader that could return both is
+		// one refactor away from adding them.
+		UsageContext: usagesvc.NewContextReader(usageEvidenceSource(log)),
+		// P5/P6: the context-SHAPE reader. Same store, same rate card, same
+		// rows -- it folds the ledger into a series rather than a sum, because
+		// "193 calls against a context that grew from 54k to 324k" is the
+		// explanation a total cannot carry. It shares the ledger's pricing so
+		// a per-step cost and the run total can never name different rates.
+		UsageDynamics:    usagesvc.NewDynamicsReader(store, usagePricing(cfg.DataDir, log)),
+		UsageExploration: usagesvc.NewExplorationReader(store),
+		Capacity:         capacitysvc.NewReader(store),
+		// ONE service instance backs both surfaces: the memory routes and the
+		// code-graph routes are two views of the same subsystem, and giving
+		// them separate resolvers would give them separate opinions about
+		// which repository a project id means.
+		ProjectMemory:             memoryAPI,
+		ProjectMemoryGraph:        memoryAPI,
+		ProjectIntelligence:       memoryAPI,
+		ProjectIntelligenceMemory: memoryAPI,
+		// P4-F: GitHub as external context, built on the same SCM providers
+		// the observer runs on. Always wired — a daemon without credentials
+		// serves the degraded surface rather than 501.
+		ProjectGitHub: githubIntel,
+		WorkItems:     workItemsSvc,
+		Questions: &questionssvc.AnswerService{
+			Store: store, Runs: store, Sender: rawSessionMgr, Logger: log,
+			// P3-D: the answer is recorded first and delivered second, and the
+			// delivery must not claim a write landed in a composer that a modal
+			// prompt was covering. This is the same session row the structured
+			// dialog path reads.
+			Inputs: sessionInputState{store: store},
+		},
+		Decisions: &questionssvc.ResolverAnswerService{Store: store},
+		Telemetry: telemetrySink,
+		Mobile:    mc,
 		DevImport: devimportsvc.New(devimportsvc.Deps{
 			Store:         store,
 			TargetDataDir: cfg.DataDir,
@@ -430,6 +1127,29 @@ func Run() error {
 		Browser:             browserService,
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
+		Auth:                authMgr,
+		AgentAuth:           agentAuthMgr,
+		// P5-A phase 2C: the same service also answers, per request, whether an
+		// agent's launch is still the authorized one -- the fence that makes
+		// revocation a defence in depth rather than the only barrier.
+		AgentAuthority:    agentAuthMgr,
+		SSO:               ssoMgr,
+		ProjectOwnership:  store,
+		ProjectTenancy:    store,
+		WorkflowOwnership: store,
+		SessionOwnership:  store,
+		Authz:             authzSvc,
+		ProjectScope:      store,
+		RBAC:              rbacSvc,
+		Skills:            skillsSvc,
+		SkillImages:       skillsSvc,
+		SkillMarketplace:  skillMarketplace,
+		SkillTrust:        skillTrust,
+		SkillExternal:     skillExternal,
+		SkillTenancy:      store,
+		ProviderProfiles:  providerProfilesSvc,
+		ProviderSetup:     providerSetupSvc,
+		ExecutionPolicy:   executionPolicySvc,
 	})
 	if err != nil {
 		stop()
@@ -440,6 +1160,21 @@ func Run() error {
 		return err
 	}
 	previewDone := preview.NewPoller(store, sessionSvc, "http://"+srv.Addr().String(), preview.PollerConfig{Logger: log}).Start(ctx)
+
+	// P4-G: keep every project's code graph current without anybody running a
+	// sync by hand. Started here, after the server is up, because indexing is
+	// background work that must never be on the path that makes AO reachable.
+	// It starts nothing when this build has no code graph wired.
+	intelligenceDone := projectmemorysvc.NewReconciler(memoryAPI, store,
+		projectmemorysvc.ReconcilerConfig{Logger: log}).Start(ctx)
+
+	// The revocation sweep. Its FIRST pass is the restart recovery: whatever a
+	// previous incarnation could not revoke -- or died before revoking, or was
+	// running a build that never revoked at all -- is re-derived from the same
+	// durable rows here and taken back, with nothing to migrate and nothing to
+	// replay.
+	agentCredentialsDone := agentCredentialReaper.Start(ctx)
+
 	_ = os.Unsetenv(browserruntime.RuntimeAddressEnv)
 	if ln, addr, err := browserruntime.Listen(cfg.RunFilePath); err != nil {
 		log.Warn("browser runtime: listener unavailable; agent browser control disabled", "err", err)
@@ -479,12 +1214,14 @@ func Run() error {
 	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.
 	const supervisorGrace = 5 * time.Second
 
-	if ln, addr, err := supervisor.Listen(cfg.RunFilePath); err != nil {
+	if ln, addr, err := supervisor.Listen(cfg.RunFilePath, cfg.DaemonInstanceID, priorSupervisor); err != nil {
 		// Non-fatal: without the link the daemon still works (e.g. headless "ao start"),
 		// it just will not auto-stop when a frontend dies. Do not block startup on it.
 		log.Warn("supervisor: listener unavailable; frontend-death auto-stop disabled", "err", err)
 	} else {
 		log.Info("supervisor: listening", "addr", addr)
+		// Published by the run-file's single atomic write in srv.Run.
+		srv.SetSupervisorAddress(addr)
 		sup := supervisor.New(supervisorGrace, srv.RequestShutdown, log)
 		go func() {
 			if err := sup.Serve(ctx, ln); err != nil {
@@ -508,6 +1245,9 @@ func Run() error {
 	stop()
 	managedPreview.Close()
 	<-previewDone
+	<-intelligenceDone
+	<-agentCredentialsDone
+	<-workItemsDone
 	// Close chat controllers before the lifecycle stack: each owns an app-server
 	// child process, and closing them also settles any turn left in flight so a
 	// restart does not read a half-finished turn as still working.
@@ -562,4 +1302,93 @@ func stabilizeWorkingDirectory(dataDir string) error {
 		return fmt.Errorf("daemon working directory: chdir %s: %w", dataDir, err)
 	}
 	return nil
+}
+
+// usagePricing resolves the P3-E rate card once for this daemon.
+//
+// A rate card that fails to parse is a configuration error worth surfacing, but
+// it is never worth refusing to start over: the embedded catalog stays in
+// force, the operator sees the warning, and every model it does not cover
+// reports cost=unknown rather than a guess.
+func usagePricing(dataDir string, log *slog.Logger) *pricing.Table {
+	table, err := pricing.Load(dataDir)
+	if err != nil {
+		if log != nil {
+			log.Warn("usage rate card ignored; falling back to the embedded catalog",
+				"file", pricing.RateCardFileName, "err", err)
+		}
+		return pricing.Embedded()
+	}
+	return table
+}
+
+// usageEvidenceSource opens the P2 baseline evidence tree for reading.
+//
+// It returns nil rather than failing when the tree cannot be opened: a daemon
+// whose evidence directory does not exist yet, or whose data dir is configured
+// somewhere the reader refuses, must still serve token usage. The context
+// section is then simply absent, which the API renders as "no context data
+// recorded" — an absence, not a set of zeroes.
+func usageEvidenceSource(log *slog.Logger) *baselineevidence.DirSource {
+	source, err := baselineevidence.NewDefaultDirSource()
+	if err != nil {
+		if log != nil {
+			log.Warn("assembled-context evidence is unreadable; usage will report tokens only", "err", err)
+		}
+		return nil
+	}
+	return source
+}
+
+// authsvcCreator adapts authsvc.Manager to rbac.UserCreator. P4-B does not
+// reimplement account creation -- password hashing, uniqueness and the
+// single-owner index all belong to the identity layer P4-A finished -- so this
+// is the one place the two input structs are translated between, exactly like
+// federatedSessionIssuer below.
+type authsvcCreator struct{ mgr authsvc.Manager }
+
+// CreateUser implements rbac.UserCreator.
+func (c authsvcCreator) CreateUser(ctx context.Context, in rbac.CreateUserInput) (domain.User, error) {
+	return c.mgr.CreateUser(ctx, authsvc.CreateUserInput{
+		DisplayName: in.DisplayName,
+		Email:       in.Email,
+		Username:    in.Username,
+		Password:    in.Password,
+		Role:        in.Role,
+	})
+}
+
+// federatedSessionIssuer adapts authsvc.Manager to ssosvc.SessionIssuer. The
+// two declare the same operations with their own input structs, so that
+// neither service package has to import the other; this is the one place the
+// translation lives.
+type federatedSessionIssuer struct{ mgr authsvc.Manager }
+
+func (f federatedSessionIssuer) CreateFederatedUser(ctx context.Context, in ssosvc.FederatedUserInput) (domain.User, error) {
+	return f.mgr.CreateFederatedUser(ctx, authsvc.FederatedUserInput{
+		DisplayName: in.DisplayName,
+		Email:       in.Email,
+		Username:    in.Username,
+		PreferOwner: in.PreferOwner,
+	})
+}
+
+func (f federatedSessionIssuer) CreateSessionAs(ctx context.Context, userID domain.UserID, method domain.AuthMethod, issuer, subject string) (string, domain.AuthSession, error) {
+	return f.mgr.CreateSessionAs(ctx, userID, method, issuer, subject)
+}
+
+// priorSupervisorEndpoint is the supervisor endpoint of the incarnation that last
+// wrote runFilePath, marked Exited only when that process is not alive. Called
+// with the run-file lock held, so no live daemon can be writing this run-file.
+// An unreadable or identity-less run-file yields no prior: nothing is cleaned up.
+func priorSupervisorEndpoint(runFilePath string, alive func(int) bool) *supervisor.Prior {
+	prior, err := runfile.Read(runFilePath)
+	if err != nil || prior == nil || prior.InstanceID == "" || prior.SupervisorAddress == "" {
+		return nil
+	}
+	return &supervisor.Prior{
+		InstanceID: prior.InstanceID,
+		Address:    prior.SupervisorAddress,
+		Exited:     prior.PID > 0 && !alive(prior.PID),
+	}
 }

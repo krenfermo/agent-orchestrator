@@ -17,6 +17,7 @@ export type CommandGroupId = "current" | "attention" | "projects" | "sessions" |
 
 export type NavigateTarget =
 	| { to: "/settings" }
+	| { to: "/workflows"; search: { projectId?: string } }
 	| { to: "/projects/$projectId"; params: { projectId: string } }
 	| { to: "/projects/$projectId/settings"; params: { projectId: string } }
 	| { to: "/projects/$projectId/sessions/$sessionId"; params: { projectId: string; sessionId: string } };
@@ -177,6 +178,21 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 		: undefined;
 	const currentSession = currentSessionId ? findSession(workspaces, currentSessionId)?.session : undefined;
 	const isProjectRestarting = Boolean(currentProject && restartingProjectIds?.has(currentProject.id));
+
+	// P8: "New work" is the one entry point for starting a workflow (Task,
+	// Autonomous or Master). It opens the creation form — with the current
+	// project preselected when there is one — and creates nothing by itself.
+	items.push({
+		id: "current-new-work",
+		group: "current",
+		title: t("command.newWork"),
+		subtitle: currentProject?.name,
+		keywords: ["workflow", "task", "autonomous", "master", "work"],
+		action: {
+			kind: "navigate",
+			target: { to: "/workflows", search: currentProject ? { projectId: currentProject.id } : {} },
+		},
+	});
 
 	items.push({
 		id: "current-new-task",

@@ -27,6 +27,7 @@ type Server struct {
 
 	shutdownRequested chan struct{}
 	shutdownOnce      sync.Once
+	supervisorAddress string
 }
 
 // NewWithDeps constructs a Server with API dependencies supplied by the daemon
@@ -75,6 +76,10 @@ func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager,
 	return srv, nil
 }
 
+// SetSupervisorAddress records this instance's supervisor endpoint so Run
+// publishes it in the run-file's single atomic write. Call before Run.
+func (s *Server) SetSupervisorAddress(addr string) { s.supervisorAddress = addr }
+
 // Addr returns the actual bound address (useful when the configured port was 0
 // and the OS chose one — primarily in tests).
 func (s *Server) Addr() net.Addr { return s.listen.Addr() }
@@ -96,13 +101,21 @@ func (s *Server) Run(ctx context.Context) error {
 		Owner:                 os.Getenv("AO_OWNER"),
 		AppRunID:              s.cfg.AppRunID,
 		BrowserRuntimeAddress: os.Getenv("AO_BROWSER_RUNTIME_ADDRESS"),
+		SupervisorAddress:     s.supervisorAddress,
+		// P9: the identity discovery proves a daemon by.
+		FormatVersion:  runfile.CurrentFormatVersion,
+		InstanceID:     s.cfg.DaemonInstanceID,
+		InstallationID: s.cfg.InstallationID,
+		DataDir:        s.cfg.DataDir,
 	}
 	if err := runfile.Write(s.cfg.RunFilePath, info); err != nil {
 		_ = s.listen.Close()
 		return fmt.Errorf("write run-file: %w", err)
 	}
 	defer func() {
-		if err := runfile.RemoveIfOwned(s.cfg.RunFilePath, info.PID); err != nil {
+		// Removed only while it still describes THIS incarnation: a successor
+		// that already rewrote it keeps its handshake.
+		if _, err := runfile.RemoveIfMatches(s.cfg.RunFilePath, info); err != nil {
 			s.log.Warn("failed to remove run-file", "path", s.cfg.RunFilePath, "err", err)
 		}
 	}()

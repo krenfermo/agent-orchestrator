@@ -110,6 +110,12 @@
 	--color-accent-strong: var(--primary);
 	--color-danger-strong: var(--destructive);
 
+	/* Provider brand identity (presentational only — see providerVisualIdentity
+	   in frontend/src/renderer/lib/provider-visual-identity.ts). Restrained,
+	   never used for semantic success/error/warning meaning. */
+	--color-provider-anthropic: #c96442;
+	--color-provider-openai: #4ade80;
+
 	/* Board lane signals, matched to the landing hero's board preview. */
 	--color-status-working: #60a5fa;
 	--color-status-needs-you: #fb923c;
@@ -465,7 +471,7 @@
 	--size-settings-footer-button-padding-x: 20px;
 	--color-settings-footer-button-primary-fg: var(--primary-foreground);
 	--size-settings-dialog: 575px;
-	--size-settings-dialog-wide: 920px;
+	--size-settings-dialog-wide: 1180px;
 	--size-settings-dialog-height: 680px;
 	--size-settings-dialog-max-h: 680px;
 	--color-border-settings-dialog: oklch(1 0 0 / 3%);
@@ -540,10 +546,20 @@
 	--color-term-magenta: #c678dd;
 	--color-term-cyan: #56b6c2;
 	--color-term-white: #d7dae0;
-	--color-term-selection-dark: rgb(77 141 255 / 0.3);
-	--color-term-selection-light: rgb(37 99 235 / 0.25);
-	--color-term-selection-inactive: rgb(128 128 128 / 0.2);
-	--color-term-selection-inactive-light: rgb(128 128 128 / 0.15);
+	/* Terminal selection. Opaque on purpose: the previous low-alpha washes
+	   composited against the dark plate (#101317) down to ~#22375d, which is
+	   nearly indistinguishable from the unselected background. xterm paints the
+	   selection into the WebGL/canvas cell grid, so the pair below is the only
+	   thing that makes a drag visible — each background clears 3:1 against its
+	   terminal plate and carries its foreground at >=4.5:1. Inactive (pane
+	   unfocused) is dimmer but still legible with the same foreground, since
+	   xterm has no separate inactive foreground slot. */
+	--color-term-selection-dark: #3468cc;
+	--color-term-selection-foreground-dark: #f5f8ff;
+	--color-term-selection-inactive: #35486a;
+	--color-term-selection-light: #1f5fbe;
+	--color-term-selection-foreground-light: #ffffff;
+	--color-term-selection-inactive-light: #4e7099;
 	--color-term-bright-black: #7f8792;
 	--color-term-bright-red: #ff7b7c;
 	--color-term-bright-green: #62df91;
@@ -579,6 +595,8 @@
 	--bridge-warning: var(--color-warning);
 	--bridge-danger: var(--color-danger);
 	--bridge-danger-strong: var(--color-danger-strong);
+	--bridge-provider-anthropic: var(--color-provider-anthropic);
+	--bridge-provider-openai: var(--color-provider-openai);
 	--bridge-status-working: var(--color-status-working);
 	--bridge-status-needs-you: var(--color-status-needs-you);
 	--bridge-status-in-review: var(--color-status-in-review);
@@ -706,6 +724,11 @@
 	--color-accent-dim: var(--chart-1);
 	--color-accent-strong: var(--primary);
 	--color-danger-strong: var(--destructive);
+
+	/* Provider brand identity — deepened slightly so it holds contrast on a
+	   light canvas, same restrained-presentational-only role as dark. */
+	--color-provider-anthropic: #b3542f;
+	--color-provider-openai: #16a34a;
 
 	/* Same lane hues as dark, deepened so they hold contrast on a light canvas. */
 	--color-status-working: #2563eb;

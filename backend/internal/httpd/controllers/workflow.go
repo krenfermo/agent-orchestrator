@@ -1,0 +1,2467 @@
+package controllers
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
+	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
+	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
+	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
+)
+
+// WorkflowOwnershipStore backs Checkpoint 8P-A's minimal workflow-run
+// ownership scoping — see OwnershipStore's own doc comment in projects.go
+// for the same reasoning applied to workflow runs.
+type WorkflowOwnershipStore interface {
+	GetWorkflowRunOwner(ctx context.Context, id string) (*domain.UserID, error)
+	SetWorkflowRunOwner(ctx context.Context, id string, owner domain.UserID) (bool, error)
+}
+
+// WorkflowProjectIDParam is the {projectId} path parameter for the
+// project-scoped workflow-run creation route.
+type WorkflowProjectIDParam struct {
+	ProjectID string `path:"projectId" description:"Project identifier (registry key)."`
+}
+
+// WorkflowIDParam is the {workflowId} path parameter for workflow-run routes.
+type WorkflowIDParam struct {
+	WorkflowID string `path:"workflowId" description:"Workflow run identifier."`
+}
+
+// WorkflowTaskParam addresses one planned task of a master run.
+type WorkflowTaskParam struct {
+	WorkflowID string `path:"workflowId" description:"Master workflow run identifier."`
+	TaskID     string `path:"taskId" description:"Planned task identifier (workflow_tasks.id)."`
+}
+
+// ListWorkflowsQuery is the query string accepted by GET /api/v1/workflows.
+type ListWorkflowsQuery struct {
+	ProjectID string `query:"projectId,omitempty" description:"Project id filter."`
+	Offset    string `query:"offset,omitempty" description:"Zero-based offset into the result."`
+	Limit     string `query:"limit,omitempty" description:"Page size; defaults to 200 and is capped there."`
+}
+
+// CreateWorkflowRunRequest is the body of POST /api/v1/projects/{projectId}/workflows.
+// maxCreateWorkflowBodyBytes bounds a create-workflow request body.
+//
+// It is the objective ceiling plus 64 KiB of headroom for everything else the
+// body legitimately carries — acceptance criteria, a verification plan, the
+// strategy signals — so a request that fits the documented objective limit can
+// never be refused for being one field too large.
+const maxCreateWorkflowBodyBytes = domain.MaxWorkflowObjectiveBytes + 64*1024
+
+// CreateWorkflowRunRequest is the body of
+// POST /api/v1/projects/{projectId}/workflows.
+type CreateWorkflowRunRequest struct {
+	// Objective is the run's objective, and for the "task" strategy it is the
+	// task's full specification: multi-line, markdown-friendly, and preserved
+	// exactly as written. It is bounded at domain.MaxWorkflowObjectiveBytes
+	// (128 KiB of UTF-8) and is NEVER truncated — an over-long objective is
+	// refused with OBJECTIVE_TOO_LONG naming both sizes.
+	Objective        string                          `json:"objective" maxLength:"131072" description:"The workflow run's objective. For the task strategy this is the task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long objective is refused."`
+	Verification     WorkflowVerificationPlan        `json:"verification,omitempty"`
+	MasterPlan       bool                            `json:"masterPlan,omitempty" description:"Generate a provider-neutral master plan before execution."`
+	PlanApprovalMode domain.WorkflowPlanApprovalMode `json:"planApprovalMode,omitempty" enum:"manual,auto"`
+	// Autonomous is Checkpoint 8P-D.1's explicit per-run Manual/Autonomous
+	// choice, made in the create-workflow UI rather than only inferred from
+	// the caller's global UserExecutionPolicy.AutonomousMode setting. Nil
+	// (field omitted) preserves the pre-8P-D.1 behavior of inheriting
+	// whatever the caller's stored/default execution policy says. Non-nil
+	// overrides AutonomousMode in this run's own frozen policy snapshot only
+	// -- it never writes back to the caller's stored UserExecutionPolicy.
+	Autonomous *bool `json:"autonomous,omitempty" description:"Explicit per-run autonomous/manual override; omit to inherit the caller's execution policy."`
+	// Strategy is P1-A's canonical execution strategy for this run:
+	// "task", "autonomous", "master", or "auto" to have AO select one under
+	// its deterministic policy. Omitted (the zero value) preserves pre-P1-A
+	// behaviour exactly: masterPlan=true creates a planner-driven autonomous
+	// objective, masterPlan=false creates a bounded task -- which is what
+	// each of those already did.
+	Strategy string `json:"strategy,omitempty" enum:"task,autonomous,master,auto"`
+	// StrategySignals are the deterministic inputs AUTO selection reads. They
+	// are ignored for an explicit strategy, and every one of them is a fact
+	// the caller already knows -- no model is consulted to choose a strategy.
+	StrategySignals *WorkflowStrategySignals `json:"strategySignals,omitempty"`
+	// ApprovalPolicy is the approval concern, kept deliberately separate from
+	// execution strategy: "automatic" runs unattended, "manual" waits for a
+	// person to approve the plan and drive the run. Omitted preserves the
+	// legacy planApprovalMode/autonomous pair exactly as sent.
+	ApprovalPolicy string `json:"approvalPolicy,omitempty" enum:"automatic,manual"`
+	// AcceptanceCriteria and WriteIntent apply to the "task" strategy, whose
+	// run has no planner to derive them. WriteIntent must be declared for a
+	// read-only task: unspecified is treated as mutating everywhere, so a
+	// task that correctly changes nothing would otherwise park as ambiguous.
+	AcceptanceCriteria []string `json:"acceptanceCriteria,omitempty" description:"Acceptance criteria for a task-strategy run."`
+	WriteIntent        string   `json:"writeIntent,omitempty" enum:"mutating,read_only"`
+	// RepairPolicy is P1-B's frozen auto-repair mode for this run: "disabled"
+	// (AO never starts a Repair Agent), "suggest" (AO offers the action and
+	// waits) or "automatic" (AO may start one itself, and only for an
+	// explicitly repairable condition). Omitted freezes the safe default,
+	// "suggest" -- a repair writes code, and opting into that unattended
+	// should be a decision somebody made.
+	RepairPolicy string `json:"repairPolicy,omitempty" enum:"disabled,suggest,automatic"`
+	// AutonomyPolicy is P3-C's frozen question-autonomy mode for this run:
+	// "ask_always" (every ambiguous question goes to a person),
+	// "auto_decide_low_risk" (AO settles technical, reversible choices itself
+	// from repository evidence and records the decision) or "full_autonomy"
+	// (AO also chooses the reasonable option for non-destructive functional
+	// ambiguity). Omitted freezes the safe default, "ask_always".
+	//
+	// No mode reaches past the classifier's own refusals: a destructive,
+	// credential-touching or security-adjacent question is a person's under
+	// every one of them.
+	AutonomyPolicy string `json:"autonomyPolicy,omitempty" enum:"ask_always,auto_decide_low_risk,full_autonomy"`
+	// ReviewDepth is P5-A's frozen review-depth REQUEST for this run: how much
+	// scrutiny it asks for its delivered changes to receive. "none" runs no
+	// reviewer, "light" a bounded pass over the diff and AO's own evidence,
+	// "deep" the full independent review AO has always run. Omitting the field
+	// (or sending "auto") freezes the execution strategy's default: none for a
+	// task, light for autonomous, deep for master.
+	//
+	// It is a REQUEST, not a guarantee of cheapness. Every review's effective
+	// depth is the deeper of this request and the delivered change's own
+	// deterministic risk tier, so a change touching security, authentication,
+	// payments, migrations, concurrency, infrastructure, a public contract or
+	// dependency configuration is reviewed in full whatever is asked for here.
+	ReviewDepth string `json:"reviewDepth,omitempty" enum:"auto,none,light,deep"`
+	// Placement is P3-A §7's explicit "where should this work happen" choice,
+	// made at creation rather than only after the fact through the override
+	// route. It is recorded as a durable placement override BEFORE anything
+	// this run can execute, so the freeze consumes it and the run's frozen
+	// placement is the one the caller asked for.
+	//
+	// `direct_branch` is a STRONG ORDER, not a preference: a run created with
+	// it never silently becomes an isolated worktree. If the branch cannot be
+	// used AO waits or stops with the cause named; it does not fall back.
+	// `auto` (or omitting the field) defers to selection policy, which is the
+	// only case where AO may choose — and it records the choice so the run can
+	// say what it picked and why.
+	Placement string `json:"placement,omitempty" enum:"auto,direct_branch,isolated_worktree" description:"Where this run's work happens. direct_branch is binding: AO never falls back to a worktree."`
+	// PlacementReason is recorded on the durable request, so the audit row
+	// answers \"why\" as well as \"what\".
+	PlacementReason string `json:"placementReason,omitempty"`
+	// SessionCompaction is P7's per-run opt-in: may this run ask an agent to
+	// replace its own conversation with a summary before a fix cycle's fact
+	// pack and prompt are delivered.
+	//
+	// Tri-state on purpose, and a pointer for the same reason `autonomous` is
+	// one. OMITTED means nobody chose, and the run gets the global default,
+	// which is OFF -- there is no env var, no setting and no code path that
+	// can make an omitted field mean anything else. `false` is a recorded
+	// refusal rather than an absence, which is what lets a control run in an
+	// A/B carry a decision instead of a gap, and what lets a child inherit it.
+	// `true` opts THIS RUN ONLY in; nothing is written back to any stored
+	// policy and the next run created is unaffected.
+	//
+	// The saving compaction offers is arithmetic and large (a 39.0% reduction
+	// in billable input on the one run that was replayed) and has never been
+	// observed live, because observing it costs real money on a real defect.
+	// This field is how somebody chooses to observe it, one run at a time.
+	SessionCompaction *bool `json:"sessionCompaction,omitempty" description:"Per-run opt-in to P7 session compaction. Omit to keep the default (off); false records an explicit refusal; true applies to this run only."`
+	// ContextPerCallWarnTokens overrides, for this run only, how big a
+	// session's conversation may get on the average placed call before AO
+	// treats it as under context pressure.
+	//
+	// It is the threshold the fix-cycle lifecycle decision compares a live
+	// session against, so lowering it is how an experiment reaches the COMPACT
+	// branch without waiting for a conversation to grow past the per-strategy
+	// default (150,000 tokens for a task). Omitted keeps that default.
+	//
+	// Bounded by domain.ValidContextPerCallWarnTokens. A value outside the
+	// range is REFUSED, never clamped: a run executing against a threshold
+	// other than the one its creator named is worse than a rejected request.
+	ContextPerCallWarnTokens int64 `json:"contextPerCallWarnTokens,omitempty" minimum:"20000" maximum:"2000000" description:"Per-run override of the context-pressure threshold, in tokens. Omit to keep the execution strategy default. Out-of-range values are refused."`
+}
+
+// WorkflowStrategySignals is the bounded, deterministic input to AUTO
+// execution-strategy selection.
+type WorkflowStrategySignals struct {
+	ExpectedSteps         int    `json:"expectedSteps,omitempty" description:"Caller's step estimate; 0 means no estimate."`
+	RequiresDecomposition bool   `json:"requiresDecomposition,omitempty" description:"The objective must be broken down before anything can execute."`
+	RepositoryCount       int    `json:"repositoryCount,omitempty" description:"How many repositories the work spans."`
+	MultiWorkstream       bool   `json:"multiWorkstream,omitempty" description:"Several coordinated workstreams under one initiative."`
+	SuppliedPlanHierarchy bool   `json:"suppliedPlanHierarchy,omitempty" description:"The caller already supplied a plan/objective hierarchy."`
+	Size                  string `json:"size,omitempty" enum:"small,medium,large"`
+}
+
+// WorkflowExecutionStrategyView is the read-only projection of a run's frozen
+// execution-strategy selection. Every field answers a question a lifecycle
+// component or an operator may ask about a run in flight: what was asked for,
+// what is actually running, who decided, under which rules, and why.
+type WorkflowExecutionStrategyView struct {
+	// RequestedStrategy is what the create request asked for, including
+	// "auto". Empty for an inherited or recovered selection, which nobody
+	// requested.
+	RequestedStrategy string `json:"requestedStrategy,omitempty" enum:"task,autonomous,master,auto"`
+	// EffectiveStrategy is what this run executes under. It never changes.
+	EffectiveStrategy string `json:"effectiveStrategy" enum:"task,autonomous,master"`
+	// SelectionSource is how EffectiveStrategy was decided: chosen by a
+	// caller, selected by policy, inherited from a parent, or recovered by
+	// mapping a pre-P1-A run from its own durable facts.
+	SelectionSource string `json:"selectionSource" enum:"explicit,policy,inherited,recovered"`
+	// PolicyVersion is the selection-policy version in force at the decision.
+	PolicyVersion string `json:"policyVersion,omitempty"`
+	// ReasonCode is the stable explanation code for the decision.
+	ReasonCode string `json:"reasonCode,omitempty"`
+	// ParentRunID and Depth place a child inside its bounded hierarchy.
+	ParentRunID string `json:"parentRunId,omitempty"`
+	Depth       int    `json:"depth,omitempty"`
+}
+
+// WorkflowVerificationPlan is the API projection of a task's verification
+// plan: the commands to run and the files expected to exist.
+type WorkflowVerificationPlan struct {
+	Commands []WorkflowVerificationCommand `json:"commands,omitempty"`
+	Files    []WorkflowVerificationFile    `json:"files,omitempty"`
+}
+
+// WorkflowVerificationCommand is one command in a verification plan.
+type WorkflowVerificationCommand struct {
+	Command          string   `json:"command"`
+	Args             []string `json:"args,omitempty"`
+	WorkingDirectory string   `json:"workingDirectory,omitempty"`
+	TimeoutSeconds   int      `json:"timeoutSeconds,omitempty"`
+	RequiredExitCode int      `json:"requiredExitCode"`
+	RetrySafe        bool     `json:"retrySafe"`
+}
+
+// WorkflowVerificationFile is one file a verification plan expects to find.
+type WorkflowVerificationFile struct {
+	Path         string  `json:"path"`
+	Exists       bool    `json:"exists"`
+	ExactContent *string `json:"exactContent,omitempty"`
+	SHA256       string  `json:"sha256,omitempty"`
+}
+
+// WorkflowAttemptView is one execution attempt of a workflow step.
+type WorkflowAttemptView struct {
+	ID            string                        `json:"id"`
+	AttemptNumber int64                         `json:"attemptNumber"`
+	Harness       string                        `json:"harness,omitempty"`
+	Model         string                        `json:"model,omitempty"`
+	StartedAt     time.Time                     `json:"startedAt"`
+	FinishedAt    *time.Time                    `json:"finishedAt,omitempty"`
+	Outcome       domain.WorkflowAttemptOutcome `json:"outcome,omitempty" enum:"succeeded,failed,cancelled"`
+	ErrorClass    domain.WorkflowErrorClass     `json:"errorClass,omitempty" enum:"rate_limited,auth,transient,tool,test_failed,review_changes_requested,session_create_failed,agent_start_failed,prompt_delivery_failed,runtime_failed,worker_terminated_unexpectedly,ambiguous_worker_state,reviewer_launch_failed,fix_budget_exhausted,verify_command_failed,verify_timeout,verify_environment_error,verify_artifact_missing,verify_artifact_mismatch,verify_workspace_changed,verify_ambiguous,capacity_exhausted,binary_missing,provider_auth_required,provider_workspace_trust_required,provider_preflight_failed"`
+	RetryAfter    *time.Time                    `json:"retryAfter,omitempty"`
+}
+
+// WorkflowStepView is one step in a workflow run, with its recorded attempts
+// and the facts from its latest durable checkpoint (Checkpoint 8B), when any.
+type WorkflowStepView struct {
+	ID              string                   `json:"id"`
+	Kind            domain.WorkflowStepKind  `json:"kind" enum:"plan,work,review,fix,verify,advance"`
+	Ordinal         int64                    `json:"ordinal"`
+	DependsOnStepID string                   `json:"dependsOnStepId,omitempty"`
+	State           domain.WorkflowStepState `json:"state" enum:"pending,ready,running,waiting,completed,failed,cancelled"`
+	AssignedHarness string                   `json:"assignedHarness,omitempty"`
+	SessionID       string                   `json:"sessionId,omitempty"`
+	ReviewRunID     string                   `json:"reviewRunId,omitempty"`
+	CreatedAt       time.Time                `json:"createdAt"`
+	UpdatedAt       time.Time                `json:"updatedAt"`
+	CompletedAt     *time.Time               `json:"completedAt,omitempty"`
+	Attempts        []WorkflowAttemptView    `json:"attempts"`
+	// Branch, WorktreePath, and HeadSHA come from the step's latest
+	// workflow_checkpoint row, when one exists (Checkpoint 8B).
+	Branch       string `json:"branch,omitempty"`
+	WorktreePath string `json:"worktreePath,omitempty"`
+	HeadSHA      string `json:"headSha,omitempty"`
+	NextAction   string `json:"nextAction,omitempty"`
+	// Reviewer, Verdict, Target, and FindingsSummary surface the review
+	// step's live review_run facts (Checkpoint 8C), fetched at read time —
+	// never persisted into workflow_checkpoints beyond the review_run_id
+	// reference itself.
+	Reviewer        string                     `json:"reviewer,omitempty"`
+	Verdict         string                     `json:"verdict,omitempty" enum:",approved,changes_requested"`
+	Target          string                     `json:"target,omitempty"`
+	FindingsSummary string                     `json:"findingsSummary,omitempty"`
+	Verification    *workflowcore.VerifyResult `json:"verification,omitempty"`
+	// ReviewPolicy surfaces Checkpoint 8I's durable REQUIRED/SKIPPED
+	// decision for a review step, independent of whether a reviewer ever
+	// actually ran — the frontend uses this to distinguish "Reviewed: No —
+	// policy skipped" from "Claude approved" rather than inferring it from
+	// the absence of Reviewer/Verdict.
+	ReviewPolicy *workflowcore.ReviewPolicyDecision `json:"reviewPolicy,omitempty"`
+	// Routing surfaces Checkpoint 8P-C.1's persisted ExecutionRouter
+	// decision for this step (worker/reviewer/planner/decision-resolver
+	// roles) -- read back verbatim from the routing_decision checkpoint
+	// already written at dispatch time, never recomputed for display. Nil
+	// for a step kind that never routes (e.g. verify/advance) or one that
+	// hasn't dispatched yet.
+	Routing *RoutingDecisionView `json:"routing,omitempty"`
+	// FixDelivery surfaces the durable evidence for this fix step's newest
+	// dispatched cycle — which review verdict authorized it, which findings
+	// travelled and whether they were embedded verbatim in the delivered
+	// prompt, the attempt/session it is bound to, and what the transport could
+	// prove about the submit. Read back verbatim from the dispatch checkpoints;
+	// nothing here is recomputed for display and no prompt text is exposed.
+	// Nil for a non-fix step or one that has never dispatched.
+	FixDelivery *FixDeliveryView `json:"fixDelivery,omitempty"`
+}
+
+// FixDeliveryView is the wire shape of workflow.FixDeliveryReport. It is
+// deliberately all non-secret: identifiers, counts, sizes, digests and a
+// bounded findings snippet no longer than the review step's own
+// findingsSummary. The fix prompt itself is never persisted or returned.
+type FixDeliveryView struct {
+	State        string    `json:"state" enum:"intent_recorded,dispatched,transport_retry,loaded_not_submitted"`
+	DispatchedAt time.Time `json:"dispatchedAt"`
+
+	ReviewRunID     string `json:"reviewRunId,omitempty"`
+	ReviewVerdict   string `json:"reviewVerdict,omitempty" enum:",approved,changes_requested"`
+	ReviewTargetSHA string `json:"reviewTargetSha,omitempty"`
+
+	FindingsSource   string `json:"findingsSource,omitempty" enum:",review_run,verification"`
+	FindingsCount    int    `json:"findingsCount"`
+	FindingsBytes    int    `json:"findingsBytes"`
+	FindingsDigest   string `json:"findingsDigest,omitempty"`
+	FindingsEmbedded bool   `json:"findingsEmbedded"`
+	FindingsSnippet  string `json:"findingsSnippet,omitempty"`
+
+	CycleNumber      int    `json:"cycleNumber"`
+	FixAttemptID     string `json:"fixAttemptId,omitempty"`
+	TransportAttempt int    `json:"transportAttempt,omitempty"`
+	SessionID        string `json:"sessionId,omitempty"`
+	// Generation is the durable identity of the dispatch that produced this
+	// delivery, and ReviewGeneration the review authority it was bound to.
+	// Empty means a delivery recorded before fix dispatch carried an identity.
+	Generation       string `json:"generation,omitempty"`
+	ReviewGeneration string `json:"reviewGeneration,omitempty"`
+	// Redelivery is 0 for the original dispatch, N for the Nth re-delivery.
+	Redelivery int `json:"redelivery,omitempty"`
+
+	PromptBytes   int    `json:"promptBytes"`
+	Transport     string `json:"transport,omitempty"`
+	ContextPack   bool   `json:"contextPack"`
+	PromptReceipt string `json:"promptReceipt,omitempty"`
+	Submission    string `json:"submission,omitempty"`
+	Acknowledged  bool   `json:"acknowledged"`
+	ReceiptMatch  string `json:"receiptMatch,omitempty" enum:",match,other,none"`
+
+	TerminalErrorClass string `json:"terminalErrorClass,omitempty"`
+	TerminalOutcome    string `json:"terminalOutcome,omitempty"`
+	NextAction         string `json:"nextAction,omitempty"`
+	Reason             string `json:"reason,omitempty"`
+}
+
+func fixDeliveryView(r *workflowcore.FixDeliveryReport) *FixDeliveryView {
+	if r == nil {
+		return nil
+	}
+	return &FixDeliveryView{
+		State:              string(r.State),
+		DispatchedAt:       r.DispatchedAt,
+		ReviewRunID:        r.ReviewRunID,
+		ReviewVerdict:      r.ReviewVerdict,
+		ReviewTargetSHA:    r.ReviewTargetSHA,
+		FindingsSource:     r.FindingsSource,
+		FindingsCount:      r.FindingsCount,
+		FindingsBytes:      r.FindingsBytes,
+		FindingsDigest:     r.FindingsDigest,
+		FindingsEmbedded:   r.FindingsEmbedded,
+		FindingsSnippet:    r.FindingsSnippet,
+		CycleNumber:        r.CycleNumber,
+		FixAttemptID:       r.FixAttemptID,
+		TransportAttempt:   r.TransportAttempt,
+		SessionID:          r.SessionID,
+		Generation:         r.Generation,
+		ReviewGeneration:   r.ReviewGeneration,
+		Redelivery:         r.Redelivery,
+		PromptBytes:        r.PromptBytes,
+		Transport:          string(r.Transport),
+		ContextPack:        r.ContextPack,
+		PromptReceipt:      r.PromptReceipt,
+		Submission:         string(r.Submission),
+		Acknowledged:       r.Acknowledged,
+		ReceiptMatch:       r.ReceiptMatch,
+		TerminalErrorClass: string(r.TerminalErrorClass),
+		TerminalOutcome:    string(r.TerminalOutcome),
+		NextAction:         r.NextAction,
+		Reason:             r.Reason,
+	}
+}
+
+// RoutingProfileView is safe, display-only metadata for a provider profile
+// referenced by a routing decision (Checkpoint 8P-C.1 §15) -- never a
+// runtime-home path, credential, or secret ciphertext. Nil when the
+// decision predates profile-level routing (harness-only) or the profile
+// could no longer be resolved for the run's owner.
+type RoutingProfileView struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	Harness     string `json:"harness"`
+	DisplayName string `json:"displayName"`
+	Model       string `json:"model,omitempty"`
+}
+
+// RoutingDecisionView is the wire shape of a domain.RoutingDecision
+// (Checkpoint 8P-C.1 §14). Only fields actually persisted/derivable are
+// populated -- an unknown value stays omitted, never fabricated.
+type RoutingDecisionView struct {
+	Role              string               `json:"role"`
+	Complexity        string               `json:"complexity,omitempty"`
+	PreferredHarness  string               `json:"preferredHarness,omitempty"`
+	SelectedHarness   string               `json:"selectedHarness,omitempty"`
+	PreferredProfile  *RoutingProfileView  `json:"preferredProfile,omitempty"`
+	SelectedProfile   *RoutingProfileView  `json:"selectedProfile,omitempty"`
+	FallbackProfiles  []RoutingProfileView `json:"fallbackProfiles,omitempty"`
+	FallbackUsed      bool                 `json:"fallbackUsed"`
+	Waiting           bool                 `json:"waiting"`
+	ReasonCodes       []string             `json:"reasonCodes,omitempty"`
+	PolicyVersion     string               `json:"policyVersion,omitempty"`
+	CapacityByProfile map[string]string    `json:"capacityByProfile,omitempty"`
+}
+
+func routingDecisionView(d domain.RoutingDecision, profiles map[domain.ProviderProfileID]domain.ProviderProfile) *RoutingDecisionView {
+	view := &RoutingDecisionView{
+		Role:             string(d.Role),
+		Complexity:       d.Complexity,
+		PreferredHarness: string(d.PreferredHarness),
+		SelectedHarness:  string(d.SelectedHarness),
+		Waiting:          d.Waiting,
+		PolicyVersion:    d.PolicyVersion,
+	}
+	for _, r := range d.ReasonCodes {
+		view.ReasonCodes = append(view.ReasonCodes, string(r))
+	}
+	if d.PreferredProfileID != "" {
+		view.PreferredProfile = routingProfileView(d.PreferredProfileID, profiles)
+	}
+	if d.SelectedProfileID != "" {
+		view.SelectedProfile = routingProfileView(d.SelectedProfileID, profiles)
+		view.FallbackUsed = d.PreferredProfileID != "" && d.SelectedProfileID != d.PreferredProfileID
+	}
+	for _, id := range d.FallbackProfileOrder {
+		if p := routingProfileView(id, profiles); p != nil {
+			view.FallbackProfiles = append(view.FallbackProfiles, *p)
+		}
+	}
+	if len(d.CapacityStateByProfile) > 0 {
+		view.CapacityByProfile = make(map[string]string, len(d.CapacityStateByProfile))
+		for id, state := range d.CapacityStateByProfile {
+			view.CapacityByProfile[string(id)] = string(state)
+		}
+	}
+	return view
+}
+
+func routingProfileView(id domain.ProviderProfileID, profiles map[domain.ProviderProfileID]domain.ProviderProfile) *RoutingProfileView {
+	p, ok := profiles[id]
+	if !ok {
+		return nil
+	}
+	return &RoutingProfileView{
+		ID: string(p.ID), Provider: p.Provider, Harness: string(p.Harness),
+		DisplayName: p.DisplayName, Model: p.DefaultModel,
+	}
+}
+
+// WorkflowRunView is a workflow run summary (no step/attempt fan-out).
+type WorkflowRunView struct {
+	ID          string                  `json:"id"`
+	ProjectID   string                  `json:"projectId"`
+	Objective   string                  `json:"objective"`
+	State       domain.WorkflowRunState `json:"state" enum:"pending,running,waiting,needs_attention,completed,failed,cancelled"`
+	CreatedAt   time.Time               `json:"createdAt"`
+	UpdatedAt   time.Time               `json:"updatedAt"`
+	CompletedAt *time.Time              `json:"completedAt,omitempty"`
+	CancelledAt *time.Time              `json:"cancelledAt,omitempty"`
+	// Origin marks a run AO created for itself rather than one the project
+	// asked for. Today the only value is "incident_repair" — Checkpoint
+	// 8P-E.21 — and it exists so the Board can group AO's automatic repairs
+	// away from the project's ordinary work instead of interleaving them, and
+	// so the run page can say what this run is and link back to the incident
+	// that authorised it. Empty for every ordinary run.
+	Origin *WorkflowRunOriginView `json:"origin,omitempty"`
+	// ArchivedAt is set once a human has cancelled and archived the run. It is
+	// a presentation fact, not an execution one: an archived run is absent from
+	// the active Board and present in the archived view, and every one of its
+	// durable rows is retained.
+	ArchivedAt *time.Time `json:"archivedAt,omitempty"`
+	// NextAction is the run's last-known next action across all its steps'
+	// checkpoints (e.g. "start_review"), informational only (Checkpoint 8B).
+	NextAction string `json:"nextAction,omitempty"`
+	// NextWakeAt/WaitReason/WakeAttemptCount are Checkpoint 8N.1's minimal
+	// telemetry surface for a durable capacity wait: the soonest scheduled
+	// automatic retry, why the run is waiting, and how many times this exact
+	// wait has already retried. All zero-value (NextWakeAt nil, WaitReason
+	// "", WakeAttemptCount 0) when no wake is currently open for this run —
+	// never a fabricated estimate.
+	NextWakeAt       *time.Time `json:"nextWakeAt,omitempty"`
+	WaitReason       string     `json:"waitReason,omitempty"`
+	WakeAttemptCount int64      `json:"wakeAttemptCount,omitempty"`
+	// ExecutionMode is Checkpoint 8P-D's read-only surface of this run's
+	// frozen execution policy snapshot: "autonomous" or "manual", decided at
+	// run creation time and never re-derived from a later Settings change.
+	ExecutionMode string `json:"executionMode" enum:"autonomous,manual"`
+	// ExecutionStrategy is P1-A's frozen execution-strategy selection for this
+	// run. Absent only for a pre-P1-A run this response could not map without
+	// a second query -- the run's next boot reconciliation records the
+	// mapping durably and it is present from then on.
+	ExecutionStrategy *WorkflowExecutionStrategyView `json:"executionStrategy,omitempty"`
+	// ReviewDepth is P5-A's frozen review-depth REQUEST for this run, and the
+	// source that set it. It is what the run asked for, never what a
+	// particular review resolved to: the effective depth of any one review is
+	// the deeper of this request and that change's own risk tier, and lives on
+	// the review step's durable decision rather than on the run.
+	ReviewDepth *WorkflowReviewDepthView `json:"reviewDepth,omitempty"`
+	// ContextEconomy is P7's frozen context-economy configuration for this
+	// run: whether it may compact a session's conversation before a fix cycle,
+	// where that choice came from, and the conversation size AO treats as
+	// context pressure. Present for any run whose policy snapshot is readable,
+	// because "compaction is off and nobody asked otherwise" is an answer a
+	// person auditing a run needs stated rather than inferred from silence.
+	ContextEconomy *WorkflowContextEconomyView `json:"contextEconomy,omitempty"`
+	// MaxFixCycles is the run's frozen fix-cycle budget (P8): how many
+	// review->fix cycles the automatic loop may dispatch before it stops and
+	// asks a person. It is the ceiling only. The cycle a run is on is the fix
+	// step's fixDelivery.cycleNumber (its newest delivery); the enforced
+	// "spent" count is folded from distinct fix_dispatched checkpoints and is
+	// not projected. Absent when the policy snapshot is unreadable -- a budget
+	// this response cannot read is one it must not claim to know.
+	MaxFixCycles *int `json:"maxFixCycles,omitempty"`
+	// Recovery is P1-B's deterministic recovery assessment. It is populated
+	// only by the routes a person explicitly took -- recovery, resume,
+	// continue, plan reuse/regenerate, repair -- because deciding it probes
+	// the project's planner context, and doing that on every Board poll would
+	// be a real cost for an answer nobody asked for.
+	Recovery *WorkflowRecoveryView `json:"recovery,omitempty"`
+	// BranchWait is Checkpoint 8P-E.11's structured waiting_for_branch state
+	// for a direct-branch run queued behind another workflow. Present only
+	// while the run is genuinely waiting on a branch, so the board renders a
+	// real wait or nothing -- never a fabricated "inactive".
+	BranchWait *WorkflowBranchWaitView `json:"branchWait,omitempty"`
+	// Phase, Attention, AttentionReason and AttentionAction are Checkpoint
+	// 8P-E.12's derived lifecycle projection, computed by the same
+	// workflow.DeriveLifecycle the project Board uses so the two surfaces can
+	// never disagree about what a run is doing. Phase is the mapping
+	// document's vocabulary; Attention separates a problem AO is still
+	// handling itself from one that genuinely needs the user.
+	Phase           string `json:"phase" enum:"queued,planning,running,reviewing,fixing,verifying,waiting,waiting_for_capacity,retrying,blocked,needs_attention,completed,failed,cancelled"`
+	Attention       string `json:"attention,omitempty" enum:"ao_internal,human_decision"`
+	AttentionReason string `json:"attentionReason,omitempty"`
+	AttentionAction string `json:"attentionAction,omitempty"`
+	// LastActivityAt is the workflow's own newest durable timestamp — never the
+	// worker session's activity state, because an idle worker during a review
+	// is not an idle workflow.
+	LastActivityAt time.Time `json:"lastActivityAt"`
+	// CanContinue is the backend's authoritative answer to "would POST
+	// /continue advance this run". The UI renders its Continue/Reanudar control
+	// from this flag alone and must never re-derive the rule from state/phase
+	// strings — see workflow.canContinueRun for the rules and why they live
+	// there.
+	CanContinue bool `json:"canContinue"`
+	// AttentionWorkflowID names the run a person should actually act on when
+	// this run's stop merely mirrors another's (an objective reflecting the task
+	// that stopped). Empty for a stop the run owns itself.
+	AttentionWorkflowID string `json:"attentionWorkflowId,omitempty"`
+	// CapacityWait is the normalized provider-capacity wait projection: which
+	// role is blocked, the normalized reason, when the next automatic attempt
+	// is, whether a real provider reset is known, and each candidate provider's
+	// health evidence with its age. Present only while the run is genuinely
+	// parked on capacity.
+	CapacityWait *WorkflowCapacityWaitView `json:"capacityWait,omitempty"`
+	// Repair is what AO's repair machinery is doing about this run's stop. It
+	// is present on every run (a run with no repair reports zeroes) so the UI
+	// can tell three states apart that wf-724a1e97 rendered identically: a
+	// repair working, a repair spent, and a run waiting for the fresh
+	// authoritative review of a change AO has already adopted.
+	Repair *WorkflowRepairStateView `json:"repair,omitempty"`
+	// Stage, RequiresHuman, AutomaticActionActive and SummaryCode are the
+	// COMPACT human projection — the four values a card needs to say what AO is
+	// doing and whether it is the user's turn. They are the same derivation the
+	// full `presentation` object carries, so a card, a list row and the run page
+	// can never disagree.
+	//
+	// P3-B closed the one surface that used to omit them. GET /api/v1/workflows
+	// read run ROWS, which cannot tell `running` from `reviewing`, so the same
+	// workflow read "running" in the list, "reviewing" on the board and
+	// "correcting" on its page at the same instant. The list now derives them
+	// from the same projection as everything else.
+	Stage                 string `json:"stage,omitempty" enum:"preparing,planning,working,reviewing,correcting,verifying,integrating,waiting,needs_attention,completed,cancelled,failed"`
+	RequiresHuman         bool   `json:"requiresHuman,omitempty"`
+	AutomaticActionActive bool   `json:"automaticActionActive,omitempty"`
+	SummaryCode           string `json:"summaryCode,omitempty"`
+	// RecommendedAction is the one thing AO suggests, so a list row can say
+	// "Sign in" instead of only "needs attention". Empty when nothing is
+	// required of anyone.
+	RecommendedAction string `json:"recommendedAction,omitempty" enum:"continue,cancel,repair,commit_and_continue,view_changes,view_blocking_workflow,wait,authenticate,revalidate_plan,regenerate_plan,open_session,integrate,use_isolated_worktree"`
+	// LastMeaningfulActivityAt is when the run last did something a person
+	// would recognise as having happened. Unlike LastActivityAt it does not
+	// move for bookkeeping.
+	LastMeaningfulActivityAt *time.Time `json:"lastMeaningfulActivityAt,omitempty"`
+	// RepairOfWorkflowID names the run this one is an automatic repair of. A
+	// list is flat, so the link is what keeps a repair distinguishable from
+	// work somebody asked for.
+	RepairOfWorkflowID string `json:"repairOfWorkflowId,omitempty"`
+	// WorkerLiveness is the running agent's own clocks, read live while a step
+	// is running. It is a THIRD clock beside lastMeaningfulActivityAt (the
+	// workflow's last durable act) and the session's transition clock -- see
+	// WorkerLivenessResponse. Absent when there is no running agent to ask.
+	//
+	// A surface that wants to say "silent" or "stuck" must read this and
+	// nothing else. lastMeaningfulActivityAt is correct and is not a liveness
+	// figure: a work step in progress writes no checkpoints, so it stands
+	// still for the whole of a twenty-minute turn by design.
+	WorkerLiveness *WorkerLivenessResponse `json:"workerLiveness,omitempty"`
+}
+
+// WorkflowRepairStateView is the wire form of workflow.RepairLifecycle.
+type WorkflowRepairStateView struct {
+	// Active reports a repair generation still in flight. While it is true,
+	// duplicate Resume/Repair requests converge on this generation instead of
+	// creating another.
+	Active bool `json:"active"`
+	// Attempt/Budget are the "attempt N of M" a person reads.
+	Attempt int `json:"attempt"`
+	Budget  int `json:"budget"`
+	// RunID names the repair run, when there is one.
+	RunID string `json:"runId,omitempty"`
+	// Exhausted reports every repair attempt spent: the next step is a person's.
+	Exhausted bool `json:"exhausted"`
+	// WaitingForFreshReview reports that AO adopted a workspace state that
+	// appeared after the stop and is waiting for its one fresh authoritative
+	// review. Neither stopped nor fixing.
+	WaitingForFreshReview bool `json:"waitingForFreshReview"`
+	// Quiescent reports a repair that exists, is unfinished, and has been
+	// proven unable to write: parked for a person, with its branch handed back
+	// and its origin no longer waiting on it. Distinct from both active and
+	// exhausted, and re-derived on every read rather than latched.
+	Quiescent bool `json:"quiescent"`
+	// QuiescenceReason is AO's own sentence about why the newest generation
+	// counts as live or as quiescent.
+	QuiescenceReason string `json:"quiescenceReason,omitempty"`
+	// CessionChain is where this run's branch is when a repair chain has it.
+	// Absent when no branch of this run's is out.
+	CessionChain *WorkflowBranchCessionChainView `json:"cessionChain,omitempty"`
+}
+
+// WorkflowBranchCessionChainView is the wire form of
+// workflow.BranchCessionChain: a branch handed down a chain of repairs, and
+// whether AO can bring it back by itself.
+type WorkflowBranchCessionChainView struct {
+	// OriginRunID is the run the branch unwinds back to; CurrentHolderRunID is
+	// the run that has it right now.
+	OriginRunID        string `json:"originRunId"`
+	CurrentHolderRunID string `json:"currentHolderRunId"`
+	// Depth is how many repair hops separate them: 1 for a single cession, 2
+	// for the repair-of-repair shape.
+	Depth int `json:"depth"`
+	// Returnable reports that AO can fold the deepest hop now, with no human
+	// action of any kind.
+	Returnable bool `json:"returnable"`
+	// BlockedReason names the missing fact when it cannot:
+	// holder_can_still_write, legacy_unprovable_branch_cession,
+	// previous_owner_not_authoritative, or branch_moved_on. Detail is AO's own
+	// sentence about it, including the quiescence clause that refused.
+	BlockedReason string `json:"blockedReason,omitempty" enum:"holder_can_still_write,legacy_unprovable_branch_cession,previous_owner_not_authoritative,branch_moved_on"`
+	Detail        string `json:"detail,omitempty"`
+	// LockID/Branch/RepoPath name what is held; Kind is the evidence the
+	// deepest hop rests on (`ceded` for a recorded hand-over, `custody` for a
+	// repair that took its origin's branch itself).
+	LockID   string `json:"lockId,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+	RepoPath string `json:"repoPath,omitempty"`
+	Kind     string `json:"kind,omitempty" enum:"ceded,custody"`
+}
+
+// WorkflowCapacityWaitView is the wire form of workflow.CapacityWait.
+type WorkflowCapacityWaitView struct {
+	Role string `json:"role,omitempty"`
+	// Reason is the normalized cause, not a wake reason: provider_health_stale
+	// (a past failure whose window expired — AO is re-probing),
+	// provider_cooldown, provider_unavailable, or no_eligible_provider.
+	Reason string `json:"reason" enum:"provider_health_stale,provider_cooldown,provider_unavailable,no_eligible_provider"`
+	// IndependenceRequired records that review independence additionally forbids
+	// falling back to the implementer's own provider, however available it is.
+	IndependenceRequired bool `json:"independenceRequired,omitempty"`
+	// NextAttemptAt is the soonest scheduled automatic retry; KnownResetAt is
+	// non-nil only when a provider actually reported its own reset time.
+	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
+	KnownResetAt  *time.Time `json:"knownResetAt,omitempty"`
+	Attempt       int64      `json:"attempt,omitempty"`
+	// Probing is true when AO is actively re-evaluating a blocked provider
+	// rather than waiting out a clock.
+	Probing   bool                               `json:"probing,omitempty"`
+	Providers []WorkflowCapacityWaitProviderView `json:"providers,omitempty"`
+}
+
+// WorkflowCapacityWaitProviderView is one candidate provider's capacity
+// evidence, including how old the observation behind it is.
+type WorkflowCapacityWaitProviderView struct {
+	ProfileID   string `json:"profileId"`
+	Provider    string `json:"provider,omitempty"`
+	Harness     string `json:"harness,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
+	Capacity    string `json:"capacity" enum:"available,limited,cooldown,unavailable,unknown"`
+	HealthState string `json:"healthState,omitempty" enum:"available,cooldown,unavailable,unknown"`
+	// HealthReason and FailureClass are the durable observation's own words —
+	// e.g. "agent_start_failed (unknown)" — never re-worded here.
+	HealthReason string `json:"healthReason,omitempty"`
+	FailureClass string `json:"failureClass,omitempty"`
+	// ObservedAt is when that observation was recorded; HealthAgeSeconds is its
+	// age at response time, so the UI never has to compute a duration against a
+	// clock that may not match the daemon's.
+	ObservedAt       *time.Time `json:"observedAt,omitempty"`
+	HealthAgeSeconds int64      `json:"healthAgeSeconds,omitempty"`
+	// Recovery is how this state can clear: cooldown (time-boxed), probe (a
+	// capacity probe can prove it), or manual (a human must change credentials
+	// or configuration).
+	Recovery      string     `json:"recovery,omitempty" enum:"cooldown,probe,manual"`
+	CooldownUntil *time.Time `json:"cooldownUntil,omitempty"`
+	ProbeEligible bool       `json:"probeEligible,omitempty"`
+}
+
+func workflowCapacityWaitView(w *workflowcore.CapacityWait, now time.Time) *WorkflowCapacityWaitView {
+	if w == nil {
+		return nil
+	}
+	view := &WorkflowCapacityWaitView{
+		Role:                 string(w.Role),
+		Reason:               string(w.Reason),
+		IndependenceRequired: w.IndependenceRequired,
+		NextAttemptAt:        w.NextAttemptAt,
+		KnownResetAt:         w.KnownResetAt,
+		Attempt:              w.Attempt,
+		Probing:              w.Probing,
+	}
+	for _, p := range w.Providers {
+		entry := WorkflowCapacityWaitProviderView{
+			ProfileID: string(p.ProfileID), Provider: p.Provider, Harness: string(p.Harness),
+			DisplayName: p.DisplayName, Capacity: string(p.Capacity),
+			HealthState: string(p.HealthState), HealthReason: p.HealthReason,
+			FailureClass: string(p.FailureClass), ObservedAt: p.ObservedAt,
+			Recovery: string(p.Recovery), CooldownUntil: p.CooldownUntil,
+			ProbeEligible: p.ProbeEligible,
+		}
+		if p.ObservedAt != nil {
+			if age := now.Sub(*p.ObservedAt); age > 0 {
+				entry.HealthAgeSeconds = int64(age.Seconds())
+			}
+		}
+		view.Providers = append(view.Providers, entry)
+	}
+	return view
+}
+
+// WorkflowBranchWaitView names the branch a run is queued on and the workflow
+// that currently owns it.
+type WorkflowBranchWaitView struct {
+	Branch              string `json:"branch"`
+	RepoPath            string `json:"repoPath,omitempty"`
+	HeldByWorkflowRunID string `json:"heldByWorkflowRunId,omitempty"`
+	HeldBySessionID     string `json:"heldBySessionId,omitempty"`
+	// HeldByState, HeldByReason and AutoResume are Checkpoint 8P-E.13A's
+	// resolved-at-read-time answer to "is this queue moving?". AutoResume=false
+	// means the branch is held by a workflow that has stopped for a human
+	// decision and is protecting uncommitted work — the one case where a queued
+	// run genuinely needs someone to act on the OTHER workflow.
+	HeldByState  string `json:"heldByState,omitempty" enum:"pending,running,waiting,needs_attention,completed,failed,cancelled"`
+	HeldByReason string `json:"heldByReason,omitempty"`
+	AutoResume   bool   `json:"autoResume,omitempty"`
+}
+
+func workflowBranchWaitView(w *workflowcore.BranchWait) *WorkflowBranchWaitView {
+	if w == nil {
+		return nil
+	}
+	return &WorkflowBranchWaitView{
+		Branch:              w.Branch,
+		RepoPath:            w.RepoPath,
+		HeldByWorkflowRunID: w.HeldByWorkflowRunID,
+		HeldBySessionID:     w.HeldBySessionID,
+		HeldByState:         w.HeldByState,
+		HeldByReason:        w.HeldByReason,
+		AutoResume:          w.AutoResume,
+	}
+}
+
+// WorkflowRunDetailView is a workflow run plus its steps and their attempts.
+type WorkflowRunDetailView struct {
+	Run   WorkflowRunView    `json:"run"`
+	Steps []WorkflowStepView `json:"steps"`
+	Plan  *WorkflowPlanView  `json:"plan,omitempty"`
+	Tasks []WorkflowTaskView `json:"tasks,omitempty"`
+	// Usage is Checkpoint 8J's usage/telemetry/session-refresh section. Nil
+	// only when the controller has no UsageReader wired (headless/test
+	// configurations without a usage summary service) — otherwise always
+	// present, with per-field null/"unknown" markers rather than omission.
+	Usage *WorkflowUsageResponse `json:"usage,omitempty"`
+	// Questions is Checkpoint 8K-A's durable question list (any state, most
+	// recent last) — omitted entirely when the controller has no
+	// QuestionsReader wired, empty (not omitted) when wired but the run has
+	// never had a question.
+	Questions []WorkflowQuestionResponse `json:"questions,omitempty"`
+	// IntegrationState is Checkpoint 8M.1's git integration summary — present
+	// only for master runs (Plan != nil).
+	IntegrationState *WorkflowIntegrationStateView `json:"integrationState,omitempty"`
+	// Resume is P1-B's report of what a resume actually did: the durable
+	// obligation that was outstanding and whether AO discharged it. Present
+	// only on a resume response.
+	Resume *WorkflowResumeView `json:"resume,omitempty"`
+	// PlanReuse is the plan's reuse classification. Present only on a plan
+	// reuse/regenerate response.
+	PlanReuse *WorkflowPlanReuseView `json:"planReuse,omitempty"`
+	// Presentation is P3-A's human status projection: the stage, whether a
+	// person is actually needed, whether AO is already acting, the progression,
+	// the execution location, the bounded timeline, the offered actions, and
+	// every technical value they replace at the top of the screen. Nil only
+	// when the deployment wires no workflow service at all.
+	Presentation *WorkflowPresentationView `json:"presentation,omitempty"`
+	// Advice is P3-C's deterministic answer to "what do I do now": the category,
+	// whether a person is needed, what AO is doing about it by itself, the
+	// offered and refused actions with their reasons, and the authority proof a
+	// later click is revalidated against. Derived from the SAME RunDetail the
+	// presentation above is derived from, so the page and the /advice route can
+	// never disagree. Nil only when the deployment wires no advisor capability.
+	Advice *WorkflowAdviceView `json:"advice,omitempty"`
+}
+
+// WorkflowIntegrationStateView is Checkpoint 8M.1's read-only surface of
+// workflowcore.MasterIntegrationSummary.
+type WorkflowIntegrationStateView struct {
+	RefName         string `json:"refName"`
+	CurrentSHA      string `json:"currentSha,omitempty"`
+	TasksIntegrated int    `json:"tasksIntegrated"`
+	LatestTaskID    string `json:"latestTaskId,omitempty"`
+	Status          string `json:"status"`
+	ErrorClass      string `json:"errorClass,omitempty"`
+}
+
+// WorkflowPlanView is the API projection of a run's plan record.
+type WorkflowPlanView struct {
+	Status               domain.WorkflowPlanStatus       `json:"status"`
+	ApprovalMode         domain.WorkflowPlanApprovalMode `json:"approvalMode"`
+	Provider             string                          `json:"provider,omitempty"`
+	Model                string                          `json:"model,omitempty"`
+	PromptContextVersion string                          `json:"promptContextVersion"`
+	PlanHash             string                          `json:"planHash,omitempty"`
+	ErrorClass           string                          `json:"errorClass,omitempty"`
+	// CommandStatus is the planner command's own state, which the plan status
+	// alone does not give: `invalid` + `failed` + errorClass planner_ambiguous
+	// is the exact triple the CP7 reopen is for, and a caller cannot recognise
+	// it without this field.
+	CommandStatus domain.WorkflowPlanCommandStatus `json:"commandStatus,omitempty"`
+	// UpdatedAt is the plan ROW's version, and the value a CP7 reopen must send
+	// back as observedPlanUpdatedAt. It is not a generation and not a token: it
+	// identifies the row state this view was rendered from, so a reopen computed
+	// against a state that has since been overwritten is refused.
+	UpdatedAt  time.Time                    `json:"updatedAt"`
+	Generated  *workflowcore.MasterPlan     `json:"generated,omitempty"`
+	Validation *workflowcore.PlanValidation `json:"validation,omitempty"`
+}
+
+// WorkflowTaskView is the API projection of a single planned task.
+type WorkflowTaskView struct {
+	ID                  string                        `json:"id"`
+	Number              int64                         `json:"number"`
+	Title               string                        `json:"title"`
+	Description         string                        `json:"description"`
+	Dependencies        []string                      `json:"dependencies"`
+	AcceptanceCriteria  []string                      `json:"acceptanceCriteria"`
+	Verify              workflowcore.VerificationPlan `json:"verify"`
+	State               domain.WorkflowTaskState      `json:"state"`
+	ExecutionWorkflowID string                        `json:"executionWorkflowId,omitempty"`
+	// Planner is everything the plan decided about this task and everything
+	// that has happened to it since: execution strategy, dependency and
+	// integration ordering, waiting reason, dispatch wave, probable write
+	// scope, AO worktree/branch, and integration state. Absent only for a run
+	// with no planner projection at all.
+	Planner *WorkflowTaskPlannerView `json:"planner,omitempty"`
+}
+
+// WorkflowRunResponse is the body of create/get/cancel (200/201).
+type WorkflowRunResponse struct {
+	Workflow WorkflowRunDetailView `json:"workflow"`
+}
+
+// ListWorkflowsResponse is the body of GET /api/v1/workflows.
+type ListWorkflowsResponse struct {
+	Workflows []WorkflowRunView `json:"workflows"`
+	// Total is how many runs the filter matched before paging. Present because
+	// the endpoint gained a page bound when its rows gained a derived stage:
+	// projecting unbounded history on every poll is not a thing to do quietly.
+	Total  int `json:"total"`
+	Offset int `json:"offset"`
+	Limit  int `json:"limit"`
+}
+
+// workflowRunSummaryView projects one list row from the shared human model.
+//
+// It copies out of the SAME Presentation the Board card and the run detail page
+// render. Nothing here re-derives anything, which is the entire point: a list
+// that computed its own stage is how the three surfaces disagreed.
+func workflowRunSummaryView(s workflowcore.RunSummary) WorkflowRunView {
+	view := workflowRunView(s.Run, "")
+	if s.Strategy != "" {
+		view.ExecutionStrategy = executionStrategyView(workflowcore.RecordedExecutionStrategy(s.Run))
+	}
+	p := s.Presentation
+	view.Stage = string(p.Stage)
+	view.RequiresHuman = p.RequiresHuman
+	view.AutomaticActionActive = p.AutomaticActionActive
+	view.SummaryCode = p.SummaryCode
+	view.RecommendedAction = string(p.RecommendedAction)
+	view.Phase = string(p.Technical.Phase)
+	view.Attention = string(p.Technical.Attention)
+	view.AttentionReason = p.Technical.AttentionReason
+	view.AttentionAction = p.Technical.AttentionDetail
+	view.WaitReason = p.Technical.WaitReason
+	view.NextWakeAt = p.Technical.NextWakeAt
+	view.RepairOfWorkflowID = s.RepairOfRunID
+	if !p.LastMeaningfulActivityAt.IsZero() {
+		at := p.LastMeaningfulActivityAt
+		view.LastMeaningfulActivityAt = &at
+		view.LastActivityAt = at
+	}
+	return view
+}
+
+func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView {
+	return WorkflowRunView{
+		ID:            run.ID,
+		ProjectID:     run.ProjectID,
+		Objective:     run.Objective,
+		State:         run.State,
+		CreatedAt:     run.CreatedAt,
+		UpdatedAt:     run.UpdatedAt,
+		CompletedAt:   run.CompletedAt,
+		CancelledAt:   run.CancelledAt,
+		ArchivedAt:    run.ArchivedAt,
+		NextAction:    nextAction,
+		ExecutionMode: executionModeForRun(run),
+		// Recorded-only here: a summary view has no plan-row fact in hand and
+		// must not go and fetch one per run just to label a list. A legacy run
+		// simply omits the field until boot reconciliation records its mapping.
+		ExecutionStrategy: executionStrategyView(workflowcore.RecordedExecutionStrategy(run)),
+		ReviewDepth:       reviewDepthView(run),
+		ContextEconomy:    contextEconomyView(run),
+		MaxFixCycles:      maxFixCyclesForRun(run),
+	}
+}
+
+// maxFixCyclesForRun projects the frozen fix-cycle budget, or nil when the
+// snapshot cannot be read or carries no positive budget. For a readable
+// snapshot it is the same field the coordinator enforces. For an unreadable
+// one the coordinator falls back to DefaultWorkflowPolicy (policyForRun); this
+// view reports "not recorded" rather than restating that default as a fact
+// about the run.
+func maxFixCyclesForRun(run domain.WorkflowRun) *int {
+	if run.PolicySnapshot == "" || run.PolicySnapshot == "{}" {
+		return nil
+	}
+	var p domain.WorkflowPolicy
+	if err := json.Unmarshal([]byte(run.PolicySnapshot), &p); err != nil || p.MaxFixCycles <= 0 {
+		return nil
+	}
+	n := p.MaxFixCycles
+	return &n
+}
+
+// WorkflowContextEconomyView is the read-only projection of a run's frozen P7
+// context-economy configuration.
+type WorkflowContextEconomyView struct {
+	// SessionCompactionEnabled is the flag every dispatch path actually reads.
+	SessionCompactionEnabled bool `json:"sessionCompactionEnabled"`
+	// CompactionSource is how that flag came to hold its value: "explicit" (a
+	// caller chose it for this run), "inherited" (a child carrying its parent
+	// objective's choice), or absent, which means nobody ever chose and the
+	// run is on the global default. Absent is NOT the same as "explicit
+	// false"; the whole reason this field is projected is that those two are
+	// different facts.
+	CompactionSource string `json:"compactionSource,omitempty" enum:"explicit,inherited"`
+	// CompactionRequestedBy and CompactionParentRunId carry the rest of the
+	// audit record: who asked, and for an inherited choice, which objective it
+	// came from.
+	CompactionRequestedBy string `json:"compactionRequestedBy,omitempty"`
+	CompactionParentRunID string `json:"compactionParentRunId,omitempty"`
+	// ContextPerCallWarnTokens is the EFFECTIVE threshold this run is judged
+	// against -- the per-run override when one was frozen and is in range, and
+	// the execution strategy's own default otherwise. It is reported resolved
+	// rather than raw so a reader never has to know which of the two produced
+	// it in order to know what the run is running under.
+	ContextPerCallWarnTokens int64 `json:"contextPerCallWarnTokens,omitempty"`
+	// ContextPerCallOverridden says which of those two it was.
+	ContextPerCallOverridden bool `json:"contextPerCallOverridden,omitempty"`
+}
+
+// contextEconomyView projects a run's frozen context-economy configuration. A
+// run whose policy snapshot is unreadable projects nothing rather than the
+// defaults, for the same reason reviewDepthView does: a configuration this
+// response cannot read is one it must not claim to know.
+func contextEconomyView(run domain.WorkflowRun) *WorkflowContextEconomyView {
+	if run.PolicySnapshot == "" || run.PolicySnapshot == "{}" {
+		return nil
+	}
+	var p domain.WorkflowPolicy
+	if err := json.Unmarshal([]byte(run.PolicySnapshot), &p); err != nil {
+		return nil
+	}
+	budget := p.EffectiveUsageBudgetPolicy()
+	// The same WithOverrides the lifecycle decision and the advisory both go
+	// through, so this view reports the threshold that is genuinely in force
+	// -- including the case where a stored override is out of range and is
+	// therefore NOT in force.
+	profile := domain.UsageBudgetProfileFor(p.Strategy.Effective).WithOverrides(budget)
+	return &WorkflowContextEconomyView{
+		SessionCompactionEnabled: p.SessionCompactionEnabled,
+		CompactionSource:         string(p.CompactionProvenance.Source),
+		CompactionRequestedBy:    p.CompactionProvenance.RequestedBy,
+		CompactionParentRunID:    p.CompactionProvenance.ParentRunID,
+		ContextPerCallWarnTokens: profile.ContextPerCallTokens,
+		ContextPerCallOverridden: domain.ValidContextPerCallWarnTokens(budget.WorkflowContextPerCallWarnTokens),
+	}
+}
+
+// WorkflowReviewDepthView is the read-only projection of a run's frozen
+// review-depth request.
+type WorkflowReviewDepthView struct {
+	// RequestedDepth is the depth this run asks its reviews to run at.
+	RequestedDepth string `json:"requestedDepth" enum:"none,light,deep"`
+	// Source is whether a person named it ("explicit"), the execution
+	// strategy's default supplied it ("policy"), or the run predates the model
+	// and is being read as the depth it already ran at ("recovered").
+	Source string `json:"source,omitempty" enum:"explicit,policy,recovered"`
+	// PolicyVersion is the depth-policy version in force when it was frozen.
+	PolicyVersion string `json:"policyVersion,omitempty"`
+}
+
+// reviewDepthView projects a run's frozen review-depth request. A run whose
+// policy snapshot is unreadable projects nothing rather than a default: a
+// depth this response cannot state is a depth it should not claim to know.
+func reviewDepthView(run domain.WorkflowRun) *WorkflowReviewDepthView {
+	if run.PolicySnapshot == "" || run.PolicySnapshot == "{}" {
+		return nil
+	}
+	var p domain.WorkflowPolicy
+	if err := json.Unmarshal([]byte(run.PolicySnapshot), &p); err != nil {
+		return nil
+	}
+	depth := p.EffectiveReviewDepthPolicy()
+	return &WorkflowReviewDepthView{
+		RequestedDepth: string(depth.Requested),
+		Source:         string(depth.Source),
+		PolicyVersion:  depth.Version,
+	}
+}
+
+// executionStrategyView projects a frozen selection, or nil when there is
+// none to project. It never substitutes a default: a run with no recorded
+// strategy is a run whose strategy this response cannot state, and saying so
+// is the honest answer.
+func executionStrategyView(sel domain.ExecutionStrategySelection, recorded bool) *WorkflowExecutionStrategyView {
+	if !recorded {
+		return nil
+	}
+	return &WorkflowExecutionStrategyView{
+		RequestedStrategy: string(sel.Requested),
+		EffectiveStrategy: string(sel.Effective),
+		SelectionSource:   string(sel.Source),
+		PolicyVersion:     sel.PolicyVersion,
+		ReasonCode:        string(sel.Reason),
+		ParentRunID:       sel.ParentRunID,
+		Depth:             sel.Depth,
+	}
+}
+
+// executionModeForRun decodes a run's durable policy_snapshot to surface
+// Checkpoint 8P-D's frozen AutonomousMode flag as a stable "autonomous"/
+// "manual" string, without exposing the rest of the internal policy
+// snapshot shape over the API. Mirrors workflowcore's own
+// policyForRun/DefaultWorkflowPolicy fallback: an empty/unparseable/pre-8P-C
+// snapshot defaults to "manual", matching the safe-default requirement that
+// AutonomousMode's own zero value is false.
+func executionModeForRun(run domain.WorkflowRun) string {
+	if run.PolicySnapshot != "" && run.PolicySnapshot != "{}" {
+		var p domain.WorkflowPolicy
+		if err := json.Unmarshal([]byte(run.PolicySnapshot), &p); err == nil && p.Execution.AutonomousMode {
+			return "autonomous"
+		}
+	}
+	return "manual"
+}
+
+// WorkflowsController owns the /workflows routes. A nil Svc returns 501.
+type WorkflowsController struct {
+	Svc workflowsvc.Manager
+	// UsageReader backs Checkpoint 8J's Usage section. Optional: nil leaves
+	// WorkflowRunDetailView.Usage unset rather than failing the request, so
+	// a headless/test daemon without usage wiring keeps working unchanged.
+	UsageReader SessionUsageLookup
+	// QuestionsReader backs Checkpoint 8K-A's Questions section, embedded
+	// into every run-detail response the same way UsageReader is. Optional:
+	// nil leaves WorkflowRunDetailView.Questions unset.
+	QuestionsReader WorkflowQuestionsService
+	// Ownership backs Checkpoint 8P-A's ownership scoping. Nil preserves
+	// pre-8P-A unscoped behavior exactly.
+	Ownership WorkflowOwnershipStore
+	// TrustedLocal mirrors config.Config.TrustedLocalMode; scoping is only
+	// enforced when this is false — see ProjectsController's own field for
+	// the identical reasoning.
+	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it replaces the 8P-A/8P-B
+	// owner-equality checks with the canonical permission evaluator; a zero
+	// Guard preserves the pre-P4-B behavior exactly.
+	Guard Guard
+	// ProviderProfiles backs Checkpoint 8P-C.1's routing-decision profile
+	// display metadata (safe fields only -- see RoutingProfileView). Nil
+	// leaves every StepDetail.Routing.*Profile field unset; the raw
+	// harness/reason-code fields still surface.
+	ProviderProfiles providerprofilesvc.Manager
+	// UsageLedger backs P3-E's canonical token/cost ledger: the run's totals,
+	// its role and repair breakdown, and the budget it is measured against.
+	// Optional in exactly the way UsageReader is -- nil leaves the ledger
+	// sections unset rather than failing the request.
+	//
+	// It is what makes the run total CORRECT, not merely richer. The 8J view
+	// asked the per-session reader once per step and added the answers, and
+	// because a repair is delivered into the worker's own session, a run with
+	// one worker and two fix steps counted that session's tokens three times.
+	UsageLedger UsageLedgerService
+	// UsageContext backs the AO-ASSEMBLED context section: how much context AO
+	// built, what it was made of, and what project memory contributed. Separate
+	// from UsageLedger because the two measure different quantities -- what AO
+	// sent versus what a provider reported receiving -- and must never be added.
+	UsageContext UsageContextService
+	// UsageDynamics backs the context-SHAPE section: how many provider calls a
+	// run made, how far its conversation grew, which step carried the cost, and
+	// what AO advises about that. Optional in exactly the same way -- nil
+	// leaves the section unset rather than failing the request.
+	//
+	// Separate from both readers above because it measures a third quantity.
+	// The ledger says what was spent, the context reader says what AO sent, and
+	// this says how the conversation MOVED; adding any two of them produces a
+	// number that is none of them.
+	UsageDynamics UsageDynamicsService
+	// UsageExploration backs Frente 3 / 3C: what each agent of a run looked
+	// at (files read, searches, edits) beside what it spent, and the run's
+	// quality signals. Optional; nil answers 501.
+	UsageExploration UsageExplorationService
+	// boardUsage memoizes the per-project usage fold for a few seconds. The
+	// Board polls every two seconds while anything moves, and the fold covers
+	// the project's whole append-only ledger -- see workflow_board_usage.go.
+	boardUsage boardUsageCache
+}
+
+func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail workflowcore.RunDetail) WorkflowRunDetailView {
+	// Checkpoint 8P-C.1: resolve the run owner's provider profiles ONCE
+	// (never per-step) for routing-decision display metadata. Unresolvable
+	// (no Ownership/ProviderProfiles wired, run unowned, or the lookup
+	// fails) simply means every RoutingDecisionView surfaces harness/reason
+	// data with no *Profile display fields -- never blocks the response.
+	var ownedProfiles map[domain.ProviderProfileID]domain.ProviderProfile
+	if c.Ownership != nil && c.ProviderProfiles != nil {
+		if owner, err := c.Ownership.GetWorkflowRunOwner(ctx, detail.Run.ID); err == nil && owner != nil {
+			if profiles, err := c.ProviderProfiles.List(ctx, *owner); err == nil {
+				ownedProfiles = make(map[domain.ProviderProfileID]domain.ProviderProfile, len(profiles))
+				for _, p := range profiles {
+					ownedProfiles[p.ID] = p
+				}
+			}
+		}
+	}
+	steps := make([]WorkflowStepView, 0, len(detail.Steps))
+	for _, sd := range detail.Steps {
+		step := sd.Step
+		dependsOn := ""
+		if step.DependsOnStepID != nil {
+			dependsOn = *step.DependsOnStepID
+		}
+		sessionID := ""
+		if step.SessionID != nil {
+			sessionID = *step.SessionID
+		}
+		reviewRunID := ""
+		if step.ReviewRunID != nil {
+			reviewRunID = *step.ReviewRunID
+		}
+		attempts := make([]WorkflowAttemptView, 0, len(sd.Attempts))
+		for _, a := range sd.Attempts {
+			attempts = append(attempts, WorkflowAttemptView{
+				ID:            a.ID,
+				AttemptNumber: a.AttemptNumber,
+				Harness:       a.Harness,
+				Model:         a.Model,
+				StartedAt:     a.StartedAt,
+				FinishedAt:    a.FinishedAt,
+				Outcome:       a.Outcome,
+				ErrorClass:    a.ErrorClass,
+				RetryAfter:    a.RetryAfter,
+			})
+		}
+		var branch, worktreePath, headSHA, nextAction string
+		var verification *workflowcore.VerifyResult
+		if sd.LatestCheckpoint != nil {
+			branch = sd.LatestCheckpoint.Branch
+			worktreePath = sd.LatestCheckpoint.WorktreePath
+			headSHA = sd.LatestCheckpoint.HeadSHA
+			nextAction = sd.LatestCheckpoint.NextAction
+			if step.Kind == domain.WorkflowStepVerify && sd.LatestCheckpoint.DurablePhase == "verify_result" {
+				var result workflowcore.VerifyResult
+				if json.Unmarshal([]byte(sd.LatestCheckpoint.RetryState), &result) == nil {
+					verification = &result
+				}
+			}
+		}
+		var reviewer, verdict, target, findings string
+		if sd.Review != nil {
+			reviewer = string(sd.Review.Harness)
+			verdict = string(sd.Review.Verdict)
+			target = sd.Review.Target
+			findings = sd.Review.FindingsSummary
+		}
+		var routing *RoutingDecisionView
+		if sd.Routing != nil {
+			routing = routingDecisionView(*sd.Routing, ownedProfiles)
+		}
+		steps = append(steps, WorkflowStepView{
+			ID:              step.ID,
+			Kind:            step.Kind,
+			Ordinal:         step.Ordinal,
+			DependsOnStepID: dependsOn,
+			State:           step.State,
+			AssignedHarness: step.AssignedHarness,
+			SessionID:       sessionID,
+			ReviewRunID:     reviewRunID,
+			CreatedAt:       step.CreatedAt,
+			UpdatedAt:       step.UpdatedAt,
+			CompletedAt:     step.CompletedAt,
+			Attempts:        attempts,
+			Branch:          branch,
+			WorktreePath:    worktreePath,
+			HeadSHA:         headSHA,
+			NextAction:      nextAction,
+			Reviewer:        reviewer,
+			Verdict:         verdict,
+			Target:          target,
+			FindingsSummary: findings,
+			Verification:    verification,
+			ReviewPolicy:    sd.ReviewPolicy,
+			Routing:         routing,
+			FixDelivery:     fixDeliveryView(sd.FixDelivery),
+		})
+	}
+	runView := workflowRunView(detail.Run, detail.NextAction)
+	// The detail response DOES have the one extra durable fact the legacy
+	// mapping needs -- whether this run owns a plan row -- so it can state a
+	// pre-P1-A run's strategy without a second query and without guessing.
+	if runView.ExecutionStrategy == nil {
+		runView.ExecutionStrategy = executionStrategyView(
+			workflowcore.LegacyExecutionStrategy(detail.Run, detail.Plan != nil, detail.Run.UpdatedAt), true)
+	}
+	runView.NextWakeAt = detail.NextWakeAt
+	runView.WaitReason = detail.WaitReason
+	runView.WakeAttemptCount = detail.WakeAttemptCount
+	runView.BranchWait = workflowBranchWaitView(detail.BranchWait)
+	// Checkpoint 8P-E.12: one derivation, two surfaces. The Board and this
+	// detail view both read workflow.DeriveLifecycle, so a run can never be
+	// "Reviewing" on one screen and "Inactive" on the other.
+	life := workflowcore.DeriveLifecycle(workflowcore.LifecycleInput{Detail: detail, Questions: detail.Questions})
+	runView.Phase = string(life.Phase)
+	runView.Attention = string(life.Attention)
+	runView.AttentionReason = life.AttentionReason
+	runView.AttentionAction = life.AttentionAction
+	runView.LastActivityAt = life.LastActivityAt
+	runView.CanContinue = life.CanContinue
+	// Checkpoint 8P-E.21: label AO's own repair runs so neither the Board nor a
+	// person mistakes one for work the project asked for.
+	if adv, ok := c.incidentAdvisor(); ok {
+		if origin, isRepair := adv.RepairOriginFor(ctx, detail.Run.ID); isRepair {
+			runView.Origin = &WorkflowRunOriginView{
+				Kind: origin.Origin, IncidentID: origin.IncidentID,
+				SourceWorkflowID: origin.SourceRunID, ApprovedBy: origin.ApprovedBy,
+			}
+		}
+	}
+	runView.AttentionWorkflowID = life.AttentionWorkflowID
+	runView.CapacityWait = workflowCapacityWaitView(detail.CapacityWait, time.Now().UTC())
+	runView.Repair = &WorkflowRepairStateView{
+		Active: detail.Repair.Active, Attempt: detail.Repair.Attempt, Budget: detail.Repair.Budget,
+		RunID: detail.Repair.RunID, Exhausted: detail.Repair.Exhausted,
+		WaitingForFreshReview: detail.Repair.WaitingForFreshReview,
+		Quiescent:             detail.Repair.Quiescent,
+		QuiescenceReason:      detail.Repair.QuiescenceReason,
+	}
+	if chain := detail.Repair.CessionChain; chain != nil {
+		runView.Repair.CessionChain = &WorkflowBranchCessionChainView{
+			OriginRunID: chain.OriginRunID, CurrentHolderRunID: chain.CurrentHolderRunID,
+			Depth: chain.Depth, Returnable: chain.Returnable,
+			BlockedReason: chain.BlockedReason, Detail: chain.Detail,
+			LockID: chain.LockID, Branch: chain.Branch, RepoPath: chain.RepoPath, Kind: chain.Kind,
+		}
+	}
+	// P3-A: one projection, derived from the same durable facts the lifecycle
+	// is derived from, so the board card, the task card and this page can never
+	// tell three different stories about one run.
+	placements, overrides, admission := c.presentationInputs(ctx, detail.Run.ID)
+	presentation := workflowcore.DerivePresentation(workflowcore.PresentationInput{
+		Detail: detail, Lifecycle: life, Placements: placements,
+		Overrides: overrides, Admission: admission, Now: time.Now().UTC(),
+	})
+	presentationView := workflowPresentationView(presentation)
+	runView.Stage = presentationView.Stage
+	runView.RequiresHuman = presentationView.RequiresHuman
+	runView.AutomaticActionActive = presentationView.AutomaticActionActive
+	runView.SummaryCode = presentationView.SummaryCode
+	// P3-B: the same two fields the Board card and the list row carry, from the
+	// same value, so a person who sees "Sign in" on a card sees "Sign in" here.
+	runView.RecommendedAction = presentationView.RecommendedAction
+	if !presentation.LastMeaningfulActivityAt.IsZero() {
+		at := presentation.LastMeaningfulActivityAt
+		runView.LastMeaningfulActivityAt = &at
+	}
+	if live := workerLivenessResponse(detail.WorkerLiveness, time.Now().UTC()); live != nil {
+		runView.WorkerLiveness = live
+	}
+	if reader, ok := c.Svc.(workflowsvc.RepairOriginReader); ok {
+		if originID, _, isRepair := reader.RepairRunOrigin(ctx, detail.Run.ID); isRepair {
+			runView.RepairOfWorkflowID = originID
+		}
+	}
+	if runView.RepairOfWorkflowID == "" && runView.Origin != nil {
+		// The Incident Advisor's own marker is the other way a run can be a
+		// repair. Both are read, and neither is preferred over the other beyond
+		// this order, so a run carrying either is labelled rather than passed
+		// off as ordinary work.
+		runView.RepairOfWorkflowID = runView.Origin.SourceWorkflowID
+	}
+	view := WorkflowRunDetailView{Run: runView, Steps: steps, Presentation: &presentationView}
+	// P3-C §24: the same advice the /advice route serves, from the detail
+	// already in hand. A failure to compute it degrades to omitting the field:
+	// advice is an addition to this page, and losing it must never cost a
+	// caller the run itself.
+	if advisor, ok := c.Svc.(workflowsvc.AdvisorManager); ok {
+		if advice, aerr := advisor.AdviceForDetail(ctx, detail); aerr == nil {
+			adviceView := workflowAdviceView(advice)
+			view.Advice = &adviceView
+		}
+	}
+	if detail.Plan != nil {
+		pv := WorkflowPlanView{Status: detail.Plan.Status, ApprovalMode: detail.Plan.ApprovalMode, Provider: detail.Plan.Provider, Model: detail.Plan.Model, PromptContextVersion: detail.Plan.PromptContextVersion, PlanHash: detail.Plan.PlanHash, ErrorClass: detail.Plan.ErrorClass, CommandStatus: detail.Plan.CommandStatus, UpdatedAt: detail.Plan.UpdatedAt}
+		var generated workflowcore.MasterPlan
+		if detail.Plan.GeneratedPlanJSON != "" && detail.Plan.GeneratedPlanJSON != "{}" && json.Unmarshal([]byte(detail.Plan.GeneratedPlanJSON), &generated) == nil {
+			pv.Generated = &generated
+		}
+		var validation workflowcore.PlanValidation
+		if detail.Plan.ValidationJSON != "" && detail.Plan.ValidationJSON != "{}" && json.Unmarshal([]byte(detail.Plan.ValidationJSON), &validation) == nil {
+			pv.Validation = &validation
+		}
+		view.Plan = &pv
+	}
+	if detail.IntegrationState != nil {
+		view.IntegrationState = &WorkflowIntegrationStateView{
+			RefName:         detail.IntegrationState.RefName,
+			CurrentSHA:      detail.IntegrationState.CurrentSHA,
+			TasksIntegrated: detail.IntegrationState.TasksIntegrated,
+			LatestTaskID:    detail.IntegrationState.LatestTaskID,
+			Status:          detail.IntegrationState.Status,
+			ErrorClass:      detail.IntegrationState.ErrorClass,
+		}
+	}
+	planIDByTask := map[string]string{}
+	for _, task := range detail.Tasks {
+		planIDByTask[task.ID] = task.PlanStepID
+	}
+	planner := workflowTaskPlannerViews(detail.TaskPlanner)
+	for _, task := range detail.Tasks {
+		var criteria []string
+		var verify workflowcore.VerificationPlan
+		_ = json.Unmarshal([]byte(task.AcceptanceCriteriaJSON), &criteria)
+		_ = json.Unmarshal([]byte(task.VerifyJSON), &verify)
+		deps := make([]string, 0, len(task.Dependencies))
+		for _, dep := range task.Dependencies {
+			if id := planIDByTask[dep]; id != "" {
+				deps = append(deps, id)
+			}
+		}
+		execID := ""
+		if task.ExecutionRunID != nil {
+			execID = *task.ExecutionRunID
+		}
+		view.Tasks = append(view.Tasks, WorkflowTaskView{ID: task.PlanStepID, Number: task.Ordinal, Title: task.Title, Description: task.Description, Dependencies: deps, AcceptanceCriteria: criteria, Verify: verify, State: task.State, ExecutionWorkflowID: execID, Planner: workflowTaskPlannerView(planner[task.ID], planIDByTask)})
+	}
+	var questionsForRun []domain.WorkflowQuestion
+	if c.QuestionsReader != nil {
+		if qs, err := c.QuestionsReader.ListByRun(ctx, detail.Run.ID); err == nil {
+			questionsForRun = qs
+			view.Questions = enrichedQuestionResponses(ctx, c.QuestionsReader, qs)
+		}
+	}
+	if c.UsageReader != nil || c.UsageLedger != nil {
+		var ledger *domain.WorkflowUsageLedger
+		if l, ok := c.runUsageLedger(ctx, detail.Run); ok {
+			ledger = &l
+		}
+		usageView := BuildWorkflowUsageView(ctx, detail, c.UsageReader, ledger)
+		if c.QuestionsReader != nil {
+			// Checkpoint 8K-B pass 3: Decisions telemetry is derived
+			// read-time from the same questions list plus every resolution
+			// attempt ever recorded for this run — no new store reads
+			// beyond what QuestionsReader already exposes.
+			if resolutions, err := c.QuestionsReader.ListResolutionsByRun(ctx, detail.Run.ID); err == nil {
+				usageView.Decisions = BuildDecisionsUsageView(questionsForRun, resolutions)
+			}
+		}
+		usage := workflowUsageResponse(usageView)
+		if usage.Tokens != nil {
+			usage.Tokens.Context = c.runUsageContext(ctx, detail.Run.ID)
+		}
+		view.Usage = &usage
+	}
+	return view
+}
+
+// WorkflowRunOriginView explains a run AO created for itself.
+type WorkflowRunOriginView struct {
+	// Kind is the closed vocabulary of AO-created runs. "incident_repair" is
+	// currently the only member.
+	Kind string `json:"kind"`
+	// IncidentID and SourceWorkflowID are what this run is a repair OF and
+	// where it came from, so a reader is never stranded in an unexplained run.
+	IncidentID       string `json:"incidentId,omitempty"`
+	SourceWorkflowID string `json:"sourceWorkflowId,omitempty"`
+	ApprovedBy       string `json:"approvedBy,omitempty"`
+}
+
+func (c *WorkflowsController) scopingEnforced() bool {
+	return !c.TrustedLocal && c.Ownership != nil
+}
+
+func (c *WorkflowsController) stampOwner(r *http.Request, id string, autonomousOverride *bool) {
+	if c.Ownership == nil {
+		return
+	}
+	user, ok := identity.FromContext(r.Context())
+	if !ok {
+		return
+	}
+	_, _ = c.Ownership.SetWorkflowRunOwner(r.Context(), id, user.ID)
+	// Checkpoint 8P-C: embed the caller's execution policy into the
+	// just-created run's policy snapshot, using the same resolved identity
+	// stampOwner just used -- never a second identity lookup. Optional
+	// (type-asserted): a Svc predating 8P-C simply skips this, leaving the
+	// run on its default policy_snapshot exactly as before. Checkpoint
+	// 8P-D.1: autonomousOverride carries the create request's explicit
+	// per-run Manual/Autonomous choice (nil when the request omitted it, in
+	// which case the caller's stored/default policy applies unchanged).
+	if applier, ok := c.Svc.(workflowsvc.ExecutionPolicyApplier); ok {
+		_ = applier.ApplyExecutionPolicySnapshot(r.Context(), id, user.ID, autonomousOverride)
+	}
+}
+
+func (c *WorkflowsController) runVisible(ctx context.Context, id string, current domain.UserID) bool {
+	owner, err := c.Ownership.GetWorkflowRunOwner(ctx, id)
+	if err != nil {
+		return false
+	}
+	return owner == nil || *owner == current
+}
+
+// runFilter returns the predicate a list handler applies to each row. It
+// resolves the caller's authority ONCE and then decides every row in memory,
+// which is what keeps a hundred-run page at a fixed query cost instead of a
+// per-row ownership lookup. A run's project id comes from the row that is
+// already loaded, so filtering costs no extra read at all.
+//
+// With no Guard wired it degrades to 8P-A's per-run owner check, unchanged.
+func (c *WorkflowsController) runFilter(r *http.Request) (func(ctx context.Context, runID string, project domain.ProjectID) bool, error) {
+	if c.Guard.Enabled() {
+		sub, ok := c.Guard.Subject(r)
+		if !ok {
+			return nil, identity.Unauthorized()
+		}
+		return func(_ context.Context, _ string, project domain.ProjectID) bool {
+			return sub.Allows(domain.PermWorkflowRead, domain.ProjectResource(project))
+		}, nil
+	}
+	if !c.scopingEnforced() {
+		return func(context.Context, string, domain.ProjectID) bool { return true }, nil
+	}
+	user, err := identity.Require(r)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, runID string, _ domain.ProjectID) bool {
+		return c.runVisible(ctx, runID, user.ID)
+	}, nil
+}
+
+// authorizeRun is this controller's single run-scoped authorization gate. With
+// P4-B's Guard wired it resolves the run's PROJECT and asks the canonical
+// evaluator; without it, it falls back to 8P-A's owner-equality check. Both
+// answer a denial with 404, so a run id nobody may reach is indistinguishable
+// from one that does not exist.
+func (c *WorkflowsController) authorizeRun(w http.ResponseWriter, r *http.Request, perm domain.Permission, id string) bool {
+	if c.Guard.Enabled() {
+		return c.Guard.AllowWorkflowRun(w, r, perm, id)
+	}
+	if !c.scopingEnforced() {
+		return true
+	}
+	user, err := identity.Require(r)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if !c.runVisible(r.Context(), id, user.ID) {
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "WORKFLOW_NOT_FOUND", "workflow run not found", nil)
+		return false
+	}
+	return true
+}
+
+// run wraps a handler addressed by {workflowId} with the permission it needs.
+// Applying the gate in Register rather than inside forty handlers is what
+// makes the authorization model READABLE: the route table below is also the
+// permission table, and a new route that forgets a permission does not
+// compile into an unguarded endpoint -- it does not compile at all.
+func (c *WorkflowsController) run(perm domain.Permission, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !c.authorizeRun(w, r, perm, chi.URLParam(r, "workflowId")) {
+			return
+		}
+		h(w, r)
+	}
+}
+
+// project wraps a handler addressed by {projectId} with the permission it
+// needs.
+func (c *WorkflowsController) project(perm domain.Permission, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if c.Guard.Enabled() {
+			id := domain.ProjectID(chi.URLParam(r, "projectId"))
+			if !c.Guard.AllowProject(w, r, perm, id, "PROJECT_NOT_FOUND", "project not found") {
+				return
+			}
+		}
+		h(w, r)
+	}
+}
+
+// Register mounts the workflow routes on the supplied router.
+func (c *WorkflowsController) Register(r chi.Router) {
+	r.Post("/projects/{projectId}/workflows", c.project(domain.PermWorkflowRun, c.create))
+	r.Get("/projects/{projectId}/board", c.project(domain.PermWorkflowRead, c.board))
+	r.Get("/workflows/{workflowId}", c.run(domain.PermWorkflowRead, c.get))
+	r.Get("/workflows", c.list)
+	r.Post("/workflows/{workflowId}/cancel", c.run(domain.PermWorkflowCancel, c.cancel))
+	r.Post("/workflows/{workflowId}/cancel-archive", c.run(domain.PermWorkflowCancel, c.cancelAndArchive))
+	r.Get("/projects/{projectId}/board/history", c.project(domain.PermWorkflowRead, c.boardHistory))
+	r.Post("/workflows/{workflowId}/start", c.run(domain.PermWorkflowRun, c.start))
+	r.Post("/workflows/{workflowId}/continue", c.run(domain.PermWorkflowRun, c.continueRun))
+
+	// P1-B: the recovery surface, as named operations rather than one
+	// ambiguous continue. /continue keeps working unchanged and now reports
+	// which recovery action it took.
+	// P3-E: the canonical usage ledger for one run, and the project rollup.
+	// Separate routes rather than only an embedded section: a client polling a
+	// cost figure must not have to fetch the whole run detail to get it.
+	r.Get("/workflows/{workflowId}/usage", c.run(domain.PermUsageRead, c.getWorkflowUsage))
+	r.Get("/workflows/{workflowId}/exploration", c.run(domain.PermUsageRead, c.getWorkflowExploration))
+	r.Get("/projects/{projectId}/usage", c.project(domain.PermUsageRead, c.getProjectUsage))
+	r.Get("/workflows/{workflowId}/recovery", c.run(domain.PermWorkflowRead, c.getRecovery))
+	// P3-C §24: the "what do I do now" surface, composed on the server so no
+	// client has to compose it itself. A strict read.
+	r.Get("/workflows/{workflowId}/advice", c.run(domain.PermWorkflowRead, c.getAdvice))
+	// P1-D: the frozen placement, the provider-attempt chain, and the one
+	// admission answer to "why has this not launched" -- one route, because
+	// they are three legs of one question.
+	r.Get("/workflows/{workflowId}/placement", c.run(domain.PermWorkflowRead, c.getPlacement))
+	// P1-E: the two WRITE routes over that same placement. An override is a
+	// request consumed at the freeze; a transition is an explicit, quiesced,
+	// audited replacement of one generation by another. Neither can re-point a
+	// running obligation -- see workflow_placement_override.go.
+	r.Post("/workflows/{workflowId}/placement/override", c.run(domain.PermWorkflowRepair, c.requestPlacementOverride))
+	r.Post("/workflows/{workflowId}/placement/transition", c.run(domain.PermWorkflowRepair, c.transitionPlacement))
+	r.Post("/workflows/{workflowId}/resume", c.run(domain.PermWorkflowRun, c.resume))
+	r.Post("/workflows/{workflowId}/plan/reuse", c.run(domain.PermWorkflowRun, c.reusePlan))
+	r.Post("/workflows/{workflowId}/plan/regenerate", c.run(domain.PermWorkflowRun, c.regeneratePlan))
+	r.Post("/workflows/{workflowId}/repair", c.run(domain.PermWorkflowRepair, c.repair))
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/resume", c.run(domain.PermWorkflowRun, c.resumeTask))
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception", c.run(domain.PermWorkflowRepair, c.authorizeFreshReviewException))
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/amend", c.run(domain.PermWorkflowRun, c.amendTaskCriterion))
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review", c.run(domain.PermWorkflowRun, c.resumeAmendedTaskReview))
+
+	// Checkpoint 8P-E.18 — the Incident Advisor behind the "¿Qué hago?" control.
+	// Four routes rather than one, because the split IS the authorization
+	// model: proposing and executing must not be reachable through the same
+	// capability. See workflow_incident.go.
+	r.Get("/workflows/{workflowId}/incident", c.run(domain.PermWorkflowRead, c.getIncident))
+	r.Post("/workflows/{workflowId}/incident/diagnose", c.run(domain.PermWorkflowRepair, c.diagnoseIncident))
+	r.Post("/workflows/{workflowId}/incident/diagnosis", c.run(domain.PermWorkflowRepair, c.submitIncidentDiagnosis))
+	r.Post("/workflows/{workflowId}/incident/execute", c.run(domain.PermWorkflowRepair, c.executeIncidentAction))
+	// P3-A §17. Two routes, because seeing what is pending must not require the
+	// ability to commit it.
+	r.Get("/workflows/{workflowId}/pending-changes", c.run(domain.PermWorkflowRead, c.getPendingChanges))
+	r.Post("/workflows/{workflowId}/pending-changes/commit", c.run(domain.PermWorkflowRun, c.commitPendingChanges))
+	r.Post("/workflows/{workflowId}/plan/generate", c.run(domain.PermWorkflowRun, c.generatePlan))
+	r.Get("/workflows/{workflowId}/plan", c.run(domain.PermWorkflowRead, c.get))
+	r.Post("/workflows/{workflowId}/plan/approve", c.run(domain.PermWorkflowRun, c.approvePlan))
+	r.Post("/workflows/{workflowId}/plan/reject", c.run(domain.PermWorkflowRun, c.rejectPlan))
+
+	// The operator-only recovery routes. They are separate from /continue on
+	// purpose: /continue is also the wake poller's entry point, and both of
+	// these actions DISCARD something AO deliberately refused to act on (an
+	// approval whose commit cannot be proven; a planner whose result cannot be
+	// judged). An automatic caller reaching either one turns a fail-closed stop
+	// into an unattended loop, so they are reachable only by an explicit human
+	// action and each is bounded on its own durable counter.
+	r.Post("/workflows/{workflowId}/recover/review-provenance", c.run(domain.PermWorkflowRepair, c.recoverReviewProvenance))
+	r.Post("/workflows/{workflowId}/plan/reopen", c.run(domain.PermWorkflowRepair, c.reopenAmbiguousPlan))
+	(&WorkflowQuestionsController{Svc: c.QuestionsReader, Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}).Register(r)
+}
+
+func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/projects/{projectId}/workflows")
+		return
+	}
+	projectID := strings.TrimSpace(chi.URLParam(r, "projectId"))
+	// P2-E B3: a Task specification may be long, and the body is bounded so
+	// "long" cannot become "unbounded". The cap is the objective limit plus
+	// room for the rest of the request (criteria, verification plan), and
+	// MaxBytesReader stops the read rather than buffering a hostile body to
+	// find out how big it is.
+	r.Body = http.MaxBytesReader(w, r.Body, maxCreateWorkflowBodyBytes)
+	var in CreateWorkflowRunRequest
+	if err := decodeJSON(r, &in); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			envelope.WriteAPIError(w, r, http.StatusRequestEntityTooLarge, "bad_request", "OBJECTIVE_TOO_LONG",
+				fmt.Sprintf("La instrucción de la tarea supera el máximo permitido: el cuerpo de la petición excede %d bytes.",
+					maxCreateWorkflowBodyBytes), nil)
+			return
+		}
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	// Validated BEFORE anything is created, alongside the strategy and the
+	// approval policy, so an over-long specification is refused rather than
+	// producing a run whose objective nobody can read back in full. It is
+	// never truncated -- see domain.ValidateWorkflowObjective.
+	objective, objErr := domain.ValidateWorkflowObjective(in.Objective)
+	switch {
+	case errors.Is(objErr, domain.ErrObjectiveTooLong):
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "OBJECTIVE_TOO_LONG",
+			domain.ObjectiveTooLongMessage(in.Objective), nil)
+		return
+	case objErr != nil && !errors.Is(objErr, domain.ErrObjectiveEmpty):
+		// An empty objective keeps its existing downstream handling; anything
+		// else (invalid UTF-8) is refused here.
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_OBJECTIVE", objErr.Error(), nil)
+		return
+	}
+	if objective != "" {
+		in.Objective = objective
+	}
+	verification := workflowcore.VerificationPlan{}
+	for _, check := range in.Verification.Commands {
+		verification.Commands = append(verification.Commands, workflowcore.VerificationCommandCheck{Command: check.Command, Args: check.Args, WorkingDirectory: check.WorkingDirectory, TimeoutSeconds: check.TimeoutSeconds, RequiredExitCode: check.RequiredExitCode, RetrySafe: check.RetrySafe})
+	}
+	for _, check := range in.Verification.Files {
+		verification.Files = append(verification.Files, workflowcore.VerificationFileCheck{Path: check.Path, Exists: check.Exists, ExactContent: check.ExactContent, SHA256: check.SHA256})
+	}
+	// P1-A: resolve the execution strategy BEFORE anything is created, so the
+	// run's creation write is the one that freezes it. An invalid request is
+	// rejected here rather than producing a run nobody can explain.
+	strategy, invalid := resolveCreateStrategy(in, time.Now().UTC())
+	if invalid != "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_EXECUTION_STRATEGY", invalid, nil)
+		return
+	}
+	approvalMode, autonomousOverride, invalidApproval := resolveApprovalPolicy(in)
+	if invalidApproval != "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_APPROVAL_POLICY", invalidApproval, nil)
+		return
+	}
+	var repairMode domain.RepairMode
+	if raw := strings.TrimSpace(in.RepairPolicy); raw != "" {
+		repairMode = domain.NormalizeRepairMode(raw)
+		if !repairMode.Valid() {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_REPAIR_POLICY",
+				"repairPolicy must be one of: disabled, suggest, automatic", nil)
+			return
+		}
+	}
+
+	var reviewDepth domain.ReviewDepth
+	if raw := strings.TrimSpace(in.ReviewDepth); raw != "" {
+		requested := domain.NormalizeRequestedReviewDepth(raw)
+		if !requested.Valid() {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_REVIEW_DEPTH",
+				"reviewDepth must be one of: auto, none, light, deep", nil)
+			return
+		}
+		// "auto" names no depth: it asks for the strategy default, which
+		// creation already froze. Leaving reviewDepth empty here is what makes
+		// the apply below a no-op for it.
+		if explicit, ok := requested.Explicit(); ok {
+			reviewDepth = explicit
+		}
+	}
+
+	var autonomyMode domain.QuestionAutonomyMode
+	if raw := strings.TrimSpace(in.AutonomyPolicy); raw != "" {
+		autonomyMode = domain.NormalizeQuestionAutonomyMode(raw)
+		if !autonomyMode.Valid() {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_AUTONOMY_POLICY",
+				"autonomyPolicy must be one of: ask_always, auto_decide_low_risk, full_autonomy", nil)
+			return
+		}
+	}
+
+	// P3-A §7: validated before anything is created. An unreadable placement is
+	// refused rather than coerced to a default -- silently substituting `auto`
+	// would give the caller a placement they did not ask for with no signal.
+	var placementRequest domain.PlacementOverrideRequest
+	if raw := strings.TrimSpace(in.Placement); raw != "" {
+		placementRequest = domain.PlacementOverrideRequest(strings.ToLower(raw))
+		if !placementRequest.IsKnown() {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_PLACEMENT",
+				"placement must be one of: auto, direct_branch, isolated_worktree", nil)
+			return
+		}
+	}
+
+	// P7: validated BEFORE anything is created, like every other policy field
+	// above. A threshold the daemon would have to substitute is refused here
+	// rather than silently replaced with the profile default, because a run
+	// created against a threshold nobody asked for is precisely the outcome an
+	// explicit override exists to prevent.
+	if in.ContextPerCallWarnTokens != 0 && !domain.ValidContextPerCallWarnTokens(in.ContextPerCallWarnTokens) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_CONTEXT_PER_CALL_TOKENS",
+			fmt.Sprintf("contextPerCallWarnTokens must be between %d and %d, or omitted to use the execution strategy default",
+				domain.MinContextPerCallWarnTokens, domain.MaxContextPerCallWarnTokens), nil)
+		return
+	}
+	// And the capability itself, in the same window and for a sharper reason.
+	// Whether this daemon can freeze a context-economy choice is a STATIC
+	// property of its own wiring -- it does not depend on the run, so asking
+	// after creating one is asking too late. Refusing here leaves nothing
+	// behind; refusing afterwards leaves a run the caller was told did not
+	// happen, and an autonomous run left behind that way starts executing on
+	// its own kickoff wake while its creator holds an error response.
+	//
+	// That is not hypothetical: it is exactly what the first real canary
+	// request did. wf-88e71ef2 was created, refused with 501, and had reached
+	// a dispatched fix cycle before anybody noticed it existed.
+	contextEconomySvc, hasContextEconomy := c.Svc.(workflowsvc.ContextEconomyManager)
+	if (in.SessionCompaction != nil || in.ContextPerCallWarnTokens != 0) && !hasContextEconomy {
+		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "CONTEXT_ECONOMY_NOT_SUPPORTED",
+			"this daemon cannot honour an explicit session-compaction or context-pressure choice", nil)
+		return
+	}
+
+	// A TASK run has no planner to derive its checks, so an empty or unusable
+	// verification plan is not a smaller task -- it is a run that does the whole
+	// job and then fails at Verify with verify_ambiguous, six steps after the
+	// only moment anybody could have fixed it. That is exactly how
+	// wf-aee38f69-081c-48d1-a3a4-53430ca70682 died: plan artifact verification
+	// `{}`, work succeeded, review approved, verify refused.
+	//
+	// The rule applied here is verify's OWN rule (VerificationPlan.Validate),
+	// not a second one written for the API: a plan accepted at creation is a
+	// plan the verify step can execute. Nothing is inferred from the objective
+	// prose -- AO does not invent checks, so a caller who names none is refused
+	// rather than given commands it did not ask for.
+	//
+	// Planned strategies are untouched: their planner produces the plan, and it
+	// does not exist yet at creation.
+	if strategy.Effective == domain.ExecutionStrategyTask {
+		if verr := verification.Validate(); verr != nil {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "VERIFICATION_REQUIRED",
+				"A task run must declare how it will be verified: "+
+					strings.TrimPrefix(verr.Error(), workflowcore.ErrInvalid.Error()+": "), nil)
+			return
+		}
+	}
+
+	var detail workflowcore.RunDetail
+	var err error
+	strategySvc, hasStrategySvc := c.Svc.(workflowsvc.StrategyManager)
+	if strategy.Effective.Planned() {
+		plannerSvc, ok := c.Svc.(workflowsvc.PlannerManager)
+		if !ok {
+			apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/projects/{projectId}/workflows")
+			return
+		}
+		if hasStrategySvc {
+			detail, err = strategySvc.CreateObjectiveRunWithStrategy(r.Context(), projectID, strings.TrimSpace(in.Objective), approvalMode, strategy)
+		} else {
+			detail, err = plannerSvc.CreateObjectiveRun(r.Context(), projectID, strings.TrimSpace(in.Objective), approvalMode)
+		}
+	} else if hasStrategySvc {
+		detail, err = strategySvc.CreateTaskRun(r.Context(), workflowcore.TaskRunRequest{
+			ProjectID:          projectID,
+			Objective:          strings.TrimSpace(in.Objective),
+			Strategy:           strategy,
+			AcceptanceCriteria: in.AcceptanceCriteria,
+			WriteIntent:        domain.NormalizeWorkflowWriteIntent(in.WriteIntent),
+			Verification:       verification,
+		})
+	} else {
+		detail, err = c.Svc.CreateRun(r.Context(), projectID, strings.TrimSpace(in.Objective), verification)
+	}
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	// P3-A §7: record the placement choice BEFORE the owner stamp, because the
+	// stamp may schedule an autonomous kickoff. A request written after that
+	// wake could lose a race with the freeze it is supposed to decide, and
+	// losing that race is precisely how an explicit \"current branch\" becomes a
+	// worktree nobody asked for.
+	if placementRequest != "" {
+		if svc, ok := c.Svc.(workflowsvc.PlacementOverrideManager); ok {
+			if _, perr := svc.RequestPlacementOverride(r.Context(), workflowcore.PlacementOverrideRequestInput{
+				RunID:       detail.Run.ID,
+				Requested:   placementRequest,
+				RequestedBy: operatorIdentity(r),
+				Reason:      strings.TrimSpace(in.PlacementReason),
+			}); perr != nil {
+				// The run exists and its placement is not what the caller
+				// asked for. Refusing to report that would hand back a run
+				// that will work somewhere the caller did not choose, which is
+				// the whole failure this field exists to close.
+				writeWorkflowError(w, r, perr)
+				return
+			}
+		} else if placementRequest.Explicit() {
+			envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "PLACEMENT_NOT_SUPPORTED",
+				"this daemon cannot honour an explicit placement choice", nil)
+			return
+		}
+	}
+	c.stampOwner(r, detail.Run.ID, autonomousOverride)
+	// P1-B: freeze this run's auto-repair mode, immediately after creation and
+	// before anything can run, mirroring the execution-policy stamp above.
+	// Creation already wrote the safe default, so a request that named nothing
+	// (or a deployment without the capability) is unaffected.
+	if repairMode != "" {
+		if svc, ok := c.Svc.(workflowsvc.RecoveryManager); ok {
+			_ = svc.ApplyRepairPolicy(r.Context(), detail.Run.ID, repairMode)
+		}
+	}
+	// P3-C: and this run's question-autonomy mode, in the same window and for
+	// the same reason. Creation already wrote the safe default (ask_always), so
+	// a request that named nothing is unaffected.
+	if autonomyMode != "" {
+		if svc, ok := c.Svc.(workflowsvc.AdvisorManager); ok {
+			_ = svc.ApplyAutonomyPolicy(r.Context(), detail.Run.ID, autonomyMode)
+		}
+	}
+	// P5-A: and this run's review-depth request, in the same window and for the
+	// same reason. Creation already froze the strategy's default, so a request
+	// that named nothing (or said "auto") is unaffected.
+	if reviewDepth != "" {
+		if svc, ok := c.Svc.(workflowsvc.ReviewDepthManager); ok {
+			_ = svc.ApplyReviewDepthPolicy(r.Context(), detail.Run.ID, reviewDepth)
+		}
+	}
+	// P7: and this run's context-economy choices, in the same window.
+	// Creation already wrote the safe defaults -- compaction off, the
+	// strategy's own context-pressure threshold -- so a request that named
+	// neither is unaffected and never reaches this block at all.
+	//
+	// But a request that DID name one is reported on rather than swallowed,
+	// which is where these two part company with the repair/autonomy/depth
+	// freezes above. Those three are preferences: a lost freeze leaves the run
+	// on a default that is a legitimate way to run, and the caller can see
+	// what it got and change it. An explicit sessionCompaction is not a
+	// preference -- it is the independent variable of a measurement. A `true`
+	// silently becoming `false` after a 201 does not produce a worse run, it
+	// produces a control run wearing a treatment run's label, and every figure
+	// taken from the pair afterwards is wrong with nothing on disk saying so.
+	// An explicit `false` matters for the mirror-image reason: it is the
+	// control arm's recorded refusal, and an unrecorded run is not a control.
+	//
+	// So this follows the `placement` precedent a few lines above rather than
+	// its immediate neighbours: the run exists and its policy is not what the
+	// caller asked for, and refusing to say so would hand back a run that
+	// contradicts the request that made it. The run is left pending with
+	// compaction OFF, which is the safe direction; the error is what stops it
+	// from being mistaken for an opted-in one.
+	if hasContextEconomy {
+		if in.SessionCompaction != nil {
+			if err := contextEconomySvc.ApplySessionCompactionPolicy(r.Context(), detail.Run.ID, *in.SessionCompaction, operatorIdentity(r)); err != nil {
+				writeWorkflowError(w, r, err)
+				return
+			}
+		}
+		if in.ContextPerCallWarnTokens != 0 {
+			if err := contextEconomySvc.ApplyContextPerCallWarnTokens(r.Context(), detail.Run.ID, in.ContextPerCallWarnTokens); err != nil {
+				writeWorkflowError(w, r, err)
+				return
+			}
+		}
+	}
+	// Re-fetch after stampOwner: it just wrote the caller's (possibly
+	// per-run-overridden) execution policy into this run's policy_snapshot
+	// and may have scheduled an autonomous-kickoff wake -- `detail` above
+	// was read before that write, so returning it as-is would hand the
+	// client a response whose executionMode/nextWakeAt/waitReason are one
+	// write behind the row this same request just produced (caught in
+	// Checkpoint 8P-D.1's real create-an-autonomous-run smoke test).
+	if refreshed, refreshErr := c.Svc.GetRun(r.Context(), detail.Run.ID); refreshErr == nil {
+		detail = refreshed
+	}
+	envelope.WriteJSON(w, http.StatusCreated, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// resolveCreateStrategy turns a create request into the frozen selection the
+// run will carry, or returns a human-readable reason the request is invalid.
+//
+// Two populations, and neither is guessed at:
+//
+//   - A request that names a strategy (or "auto") goes through
+//     domain.SelectExecutionStrategy, the whole deterministic policy.
+//   - A request that names none is a pre-P1-A client. Its `masterPlan` flag
+//     already decided the same thing implicitly, so it is mapped to the
+//     strategy that flag has always meant -- a planner-driven autonomous
+//     objective, or a bounded task -- and recorded as a policy selection.
+//     Nothing about what those clients get changes; it is only written down.
+func resolveCreateStrategy(in CreateWorkflowRunRequest, now time.Time) (domain.ExecutionStrategySelection, string) {
+	if in.WriteIntent != "" && domain.NormalizeWorkflowWriteIntent(in.WriteIntent) == domain.WorkflowWriteIntentUnspecified {
+		return domain.ExecutionStrategySelection{}, "writeIntent must be one of: mutating, read_only"
+	}
+	if raw := strings.TrimSpace(in.Strategy); raw != "" {
+		requested := domain.NormalizeRequestedExecutionStrategy(raw)
+		if !requested.Valid() {
+			return domain.ExecutionStrategySelection{}, "strategy must be one of: task, autonomous, master, auto"
+		}
+		signals, serr := strategySignals(in.StrategySignals)
+		if serr != "" {
+			return domain.ExecutionStrategySelection{}, serr
+		}
+		return domain.SelectExecutionStrategy(requested, signals, now), ""
+	}
+	sel := domain.ExecutionStrategySelection{
+		Source:        domain.ExecutionStrategyPolicy,
+		PolicyVersion: domain.ExecutionStrategyPolicyVersion,
+		At:            now,
+	}
+	if in.MasterPlan {
+		sel.Effective, sel.Reason = domain.ExecutionStrategyAutonomous, domain.ExecutionStrategyReasonMultiStepProject
+	} else {
+		sel.Effective, sel.Reason = domain.ExecutionStrategyTask, domain.ExecutionStrategyReasonBoundedWork
+	}
+	return sel, ""
+}
+
+// strategySignals validates and converts the AUTO inputs.
+func strategySignals(in *WorkflowStrategySignals) (domain.ExecutionStrategySignals, string) {
+	if in == nil {
+		return domain.ExecutionStrategySignals{}, ""
+	}
+	size := domain.NormalizeExecutionWorkSize(in.Size)
+	if !size.Valid() {
+		return domain.ExecutionStrategySignals{}, "strategySignals.size must be one of: small, medium, large"
+	}
+	if in.ExpectedSteps < 0 || in.RepositoryCount < 0 {
+		return domain.ExecutionStrategySignals{}, "strategySignals counts must not be negative"
+	}
+	return domain.ExecutionStrategySignals{
+		ExpectedSteps:         in.ExpectedSteps,
+		RequiresDecomposition: in.RequiresDecomposition,
+		RepositoryCount:       in.RepositoryCount,
+		MultiWorkstream:       in.MultiWorkstream,
+		SuppliedPlanHierarchy: in.SuppliedPlanHierarchy,
+		Size:                  size,
+	}, ""
+}
+
+// resolveApprovalPolicy is the OTHER half of P1-A's separation: approval is
+// not a strategy. "automatic" means the plan is approved and the run proceeds
+// unattended; "manual" means a person approves the plan and drives the run.
+//
+// It maps onto the two durable facts that already carry that meaning -- the
+// plan's approval mode and the frozen AutonomousMode flag -- so no new column
+// is invented for a concept the storage already holds. A request that omits
+// approvalPolicy keeps sending those two fields itself, exactly as before.
+func resolveApprovalPolicy(in CreateWorkflowRunRequest) (domain.WorkflowPlanApprovalMode, *bool, string) {
+	switch strings.ToLower(strings.TrimSpace(in.ApprovalPolicy)) {
+	case "":
+		return in.PlanApprovalMode, in.Autonomous, ""
+	case "automatic":
+		automatic := true
+		return domain.WorkflowPlanApprovalAuto, &automatic, ""
+	case "manual":
+		manual := false
+		return domain.WorkflowPlanApprovalManual, &manual, ""
+	default:
+		return "", nil, "approvalPolicy must be one of: automatic, manual"
+	}
+}
+
+func (c *WorkflowsController) generatePlan(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/generate")
+		return
+	}
+	plannerSvc, ok := c.Svc.(workflowsvc.PlannerManager)
+	if !ok {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/generate")
+		return
+	}
+	detail, err := plannerSvc.GeneratePlan(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+func (c *WorkflowsController) approvePlan(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/approve")
+		return
+	}
+	plannerSvc, ok := c.Svc.(workflowsvc.PlannerManager)
+	if !ok {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/approve")
+		return
+	}
+	detail, err := plannerSvc.ApprovePlan(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+func (c *WorkflowsController) rejectPlan(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/reject")
+		return
+	}
+	plannerSvc, ok := c.Svc.(workflowsvc.PlannerManager)
+	if !ok {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/reject")
+		return
+	}
+	detail, err := plannerSvc.RejectPlan(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+func (c *WorkflowsController) get(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/workflows/{workflowId}")
+		return
+	}
+	// Authorization already happened in the route wrapper (see Register).
+	workflowID := chi.URLParam(r, "workflowId")
+	detail, err := c.Svc.GetRun(r.Context(), workflowID)
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+func (c *WorkflowsController) list(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/workflows")
+		return
+	}
+	projectID := strings.TrimSpace(r.URL.Query().Get("projectId"))
+	offset, limit := listPaging(r)
+	// P3-B §3: the list projects the same human status model as everything
+	// else. A daemon whose service predates the projection falls back to the
+	// run rows, which is less informative but never contradictory — the fields
+	// simply stay empty rather than carrying a second opinion.
+	if lister, ok := c.Svc.(workflowsvc.RunSummaryLister); ok {
+		summaries, total, err := lister.ListRunSummaries(r.Context(), workflowcore.ListRunSummariesFilter{
+			ProjectID: projectID, Offset: offset, Limit: limit,
+		})
+		if err != nil {
+			writeWorkflowError(w, r, err)
+			return
+		}
+		views := make([]WorkflowRunView, 0, len(summaries))
+		visible, err := c.runFilter(r)
+		if err != nil {
+			envelope.WriteError(w, r, err)
+			return
+		}
+		for _, summary := range summaries {
+			if !visible(r.Context(), summary.Run.ID, domain.ProjectID(summary.Run.ProjectID)) {
+				continue
+			}
+			views = append(views, workflowRunSummaryView(summary))
+		}
+		envelope.WriteJSON(w, http.StatusOK, ListWorkflowsResponse{
+			Workflows: views, Total: total, Offset: offset, Limit: limit,
+		})
+		return
+	}
+	filter := workflowsvc.ListFilter{ProjectID: projectID}
+	runs, err := c.Svc.ListRuns(r.Context(), filter)
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	allowed, err := c.runFilter(r)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	visible := make([]domain.WorkflowRun, 0, len(runs))
+	for _, run := range runs {
+		if allowed(r.Context(), run.ID, domain.ProjectID(run.ProjectID)) {
+			visible = append(visible, run)
+		}
+	}
+	runs = visible
+	views := make([]WorkflowRunView, 0, len(runs))
+	for _, run := range runs {
+		views = append(views, workflowRunView(run, ""))
+	}
+	envelope.WriteJSON(w, http.StatusOK, ListWorkflowsResponse{
+		Workflows: views, Total: len(views), Offset: 0, Limit: 0,
+	})
+}
+
+// listPaging reads the list endpoint's page, defaulting rather than refusing.
+func listPaging(r *http.Request) (offset, limit int) {
+	limit = workflowsvc.ListPageLimit
+	values := r.URL.Query()
+	if n, err := strconv.Atoi(strings.TrimSpace(values.Get("offset"))); err == nil && n > 0 {
+		offset = n
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(values.Get("limit"))); err == nil && n > 0 {
+		if n > workflowsvc.ListPageLimit {
+			n = workflowsvc.ListPageLimit
+		}
+		limit = n
+	}
+	return offset, limit
+}
+
+func (c *WorkflowsController) cancel(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/cancel")
+		return
+	}
+	detail, err := c.Svc.CancelRun(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// cancelAndArchive stops a workflow (cascading to its children) and moves it
+// off the active Board.
+//
+// Deliberately NOT a DELETE: nothing is removed. The route is a POST on the run
+// because it is a lifecycle command with side effects on child runs, branch
+// locks and wake schedules, and because retrying it must be safe — the
+// underlying operation is idempotent, so a repeated request returns the same
+// 200 rather than a 409.
+func (c *WorkflowsController) cancelAndArchive(w http.ResponseWriter, r *http.Request) {
+	archiver, ok := c.Svc.(workflowsvc.RunArchiver)
+	if c.Svc == nil || !ok {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/cancel-archive")
+		return
+	}
+	detail, err := archiver.CancelAndArchiveRun(r.Context(), chi.URLParam(r, "workflowId"))
+	if errors.Is(err, workflowsvc.ErrArchiveUnsupported) {
+		// The service exposes the action but its store cannot archive: the
+		// same answer as a controller with no archiver wired at all.
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/cancel-archive")
+		return
+	}
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+func (c *WorkflowsController) start(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/start")
+		return
+	}
+	detail, err := c.Svc.StartRun(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+func (c *WorkflowsController) continueRun(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/continue")
+		return
+	}
+	runID := chi.URLParam(r, "workflowId")
+	// P3-C §15: the same authority revalidation Repair takes. A Continue that
+	// arrives while AO is already repairing this run is refused with the reason
+	// rather than re-entering a resume path the repair owns. The body stays
+	// optional, so every existing caller is unaffected.
+	var authority WorkflowActionAuthorityRequest
+	_ = decodeJSON(r, &authority)
+	if c.refuseStaleAction(w, r, runID, workflowcore.ActionContinue, authority.authority()) {
+		return
+	}
+	detail, err := c.Svc.ContinueRun(r.Context(), runID)
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	view := c.workflowRunDetailView(r.Context(), detail)
+	// P1-B §K: /continue stays exactly as compatible as it was, and stops
+	// being undocumented magic -- its response now says which recovery action
+	// AO took and what, if anything, is still owed. Best-effort: a deployment
+	// without the recovery capability answers precisely as it did before.
+	if svc, ok := c.Svc.(workflowsvc.RecoveryManager); ok {
+		if assessment, aerr := svc.AssessRecovery(r.Context(), runID); aerr == nil {
+			view.Run.Recovery = workflowRecoveryView(assessment)
+		}
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: view})
+}
+
+// resumeTask releases one task parked in needs_attention after a person has
+// dealt with what parked it — the explicit human half of the task-level
+// attention state.
+//
+// POST rather than PATCH, and idempotent rather than conditional: resuming a
+// task that is not parked returns the run unchanged with 200. A retried request
+// or a double-clicked button must never produce a second integration attempt,
+// and making that true of the operation itself is more robust than making the
+// caller careful.
+func (c *WorkflowsController) resumeTask(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/tasks/{taskId}/resume")
+		return
+	}
+	detail, err := c.Svc.ResumeTask(r.Context(), chi.URLParam(r, "workflowId"), chi.URLParam(r, "taskId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// AuthorizeFreshReviewExceptionRequest authorizes ONE additional integration
+// fresh review for a task whose ordinary budget is spent.
+//
+// ApprovedBy and Reason are required for the same reason they are on an
+// amendment: this widens a guard, and a widening nobody can be asked about
+// afterwards is indistinguishable from the guard not being there.
+type AuthorizeFreshReviewExceptionRequest struct {
+	ApprovedBy string `json:"approvedBy"`
+	Reason     string `json:"reason"`
+	// Reauthorize authorizes a SECOND grant for a workspace state that already
+	// has one. Without it such a request returns the existing grant unchanged.
+	Reauthorize bool `json:"reauthorize,omitempty"`
+}
+
+func (c *WorkflowsController) authorizeFreshReviewException(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception")
+		return
+	}
+	var body AuthorizeFreshReviewExceptionRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeWorkflowError(w, r, fmt.Errorf("%w: malformed request body", workflowcore.ErrInvalid))
+		return
+	}
+	exception, err := c.Svc.AuthorizeIntegrationFreshReviewException(r.Context(), workflowcore.IntegrationFreshReviewExceptionRequest{
+		MasterRunID: chi.URLParam(r, "workflowId"),
+		TaskID:      chi.URLParam(r, "taskId"),
+		ApprovedBy:  body.ApprovedBy,
+		Reason:      body.Reason,
+		Reauthorize: body.Reauthorize,
+	})
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, exception)
+}
+
+// AmendTaskCriterionRequest is one human-approved amendment of one acceptance
+// criterion (migration 0132).
+//
+// ApprovedBy is a required field rather than an inferred identity because the
+// whole legitimacy of the mechanism rests on a person having said yes to THIS
+// change: an amendment attributed to whoever happened to hold the session token
+// is an amendment nobody can be asked about afterwards.
+type AmendTaskCriterionRequest struct {
+	CriterionIndex int `json:"criterionIndex"`
+	// OriginalCriterion, when given, must match the text currently at that
+	// index — the caller's proof it is amending the criterion it means to.
+	OriginalCriterion string `json:"originalCriterion,omitempty"`
+	// AmendedCriterion replaces it. Omit or leave empty to declare the
+	// criterion obsolete and remove it.
+	AmendedCriterion string `json:"amendedCriterion,omitempty"`
+	// Reason and Evidence are both required: an amendment must say why the
+	// criterion stopped describing reality and offer something checkable.
+	Reason     string   `json:"reason"`
+	Evidence   []string `json:"evidence"`
+	ApprovedBy string   `json:"approvedBy"`
+}
+
+// AmendTaskCriterionResponse returns the recorded amendment and the run as it
+// then stands — with its review re-opened.
+type AmendTaskCriterionResponse struct {
+	Amendment WorkflowTaskCriterionAmendmentView `json:"amendment"`
+	Workflow  WorkflowRunDetailView              `json:"workflow"`
+}
+
+// WorkflowTaskCriterionAmendmentView is the read-only projection of one
+// amendment: what the criterion was, what it became, who approved it and why.
+type WorkflowTaskCriterionAmendmentView struct {
+	ID                    string    `json:"id"`
+	TaskID                string    `json:"taskId"`
+	CriterionIndex        int64     `json:"criterionIndex"`
+	OriginalCriterion     string    `json:"originalCriterion"`
+	AmendedCriterion      string    `json:"amendedCriterion,omitempty"`
+	Disposition           string    `json:"disposition" enum:"amended,declared_obsolete"`
+	Reason                string    `json:"reason"`
+	Evidence              []string  `json:"evidence"`
+	ApprovedBy            string    `json:"approvedBy"`
+	SupersededReviewRunID string    `json:"supersededReviewRunId,omitempty"`
+	CreatedAt             time.Time `json:"createdAt"`
+}
+
+// amendTaskCriterion is the supported alternative to editing the database by
+// hand or replanning an entire objective when a criterion has gone stale.
+//
+// It never approves the work. It records the amendment, applies it, and
+// re-opens an independent review under criteria that describe reality.
+func (c *WorkflowsController) amendTaskCriterion(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/amend")
+		return
+	}
+	var body AmendTaskCriterionRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "WORKFLOW_INVALID", "Malformed amendment body", nil)
+		return
+	}
+	amendment, detail, err := c.Svc.AmendTaskCriterion(r.Context(), workflowsvc.TaskCriterionAmendment{
+		RunID:             chi.URLParam(r, "workflowId"),
+		TaskID:            chi.URLParam(r, "taskId"),
+		CriterionIndex:    body.CriterionIndex,
+		OriginalCriterion: body.OriginalCriterion,
+		AmendedCriterion:  body.AmendedCriterion,
+		Reason:            body.Reason,
+		Evidence:          body.Evidence,
+		ApprovedBy:        body.ApprovedBy,
+	})
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, AmendTaskCriterionResponse{
+		Amendment: WorkflowTaskCriterionAmendmentView{
+			ID: amendment.ID, TaskID: amendment.TaskID, CriterionIndex: amendment.CriterionIndex,
+			OriginalCriterion: amendment.OriginalCriterion, AmendedCriterion: amendment.AmendedCriterion,
+			Disposition: string(amendment.Disposition), Reason: amendment.Reason,
+			Evidence: amendment.Evidence, ApprovedBy: amendment.ApprovedBy,
+			SupersededReviewRunID: amendment.SupersededReviewRunID, CreatedAt: amendment.CreatedAt,
+		},
+		Workflow: c.workflowRunDetailView(r.Context(), detail),
+	})
+}
+
+// resumeAmendedTaskReview finishes an amendment whose fresh review never
+// opened — a daemon that died between the amendment and the re-open, or a
+// re-open that was itself wrong. It records no second amendment; it re-applies
+// the consequences of the one already on file, idempotently.
+func (c *WorkflowsController) resumeAmendedTaskReview(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review")
+		return
+	}
+	detail, err := c.Svc.ResumeAmendedTaskReview(r.Context(), chi.URLParam(r, "workflowId"), chi.URLParam(r, "taskId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// ReopenAmbiguousPlanRequest carries the plan row version the caller observed.
+//
+// It is required, and it is the entire safety property of the reopen: it says
+// "this is the row I looked at", so a second ambiguity, an approval-mode change
+// or any other write to the row since makes the reopen match nothing and
+// refuse. It is a ROW VERSION, not a generation and not a token — nothing mints
+// a generation for a planner run, and no copy of this field anywhere may
+// describe it as one.
+type ReopenAmbiguousPlanRequest struct {
+	ObservedPlanUpdatedAt time.Time `json:"observedPlanUpdatedAt" description:"The plan's updatedAt as your view read it. A reopen carrying a version the row no longer has is refused."`
+}
+
+// recoverReviewProvenance is the operator recovery for a run parked because AO
+// cannot prove — and could not reconstruct — the commit its approved review
+// target was read at. It discards that approval and asks for exactly one fresh
+// review of the live workspace; it never attests a commit.
+func (c *WorkflowsController) recoverReviewProvenance(w http.ResponseWriter, r *http.Request) {
+	svc, ok := c.Svc.(workflowsvc.OperatorRecoverer)
+	if c.Svc == nil || !ok {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/recover/review-provenance")
+		return
+	}
+	detail, err := svc.RecoverUnprovableApprovedHead(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// reopenAmbiguousPlan is CP7's human-only reopen of an objective whose planner
+// was in flight across a daemon restart.
+func (c *WorkflowsController) reopenAmbiguousPlan(w http.ResponseWriter, r *http.Request) {
+	svc, ok := c.Svc.(workflowsvc.OperatorRecoverer)
+	if c.Svc == nil || !ok {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/plan/reopen")
+		return
+	}
+	var in ReopenAmbiguousPlanRequest
+	if err := decodeJSON(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	detail, err := svc.ReopenAmbiguousPlan(r.Context(), chi.URLParam(r, "workflowId"), in.ObservedPlanUpdatedAt)
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+func writeWorkflowError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, workflowsvc.ErrInvalid):
+		envelope.WriteAPIError(w, r, http.StatusUnprocessableEntity, "unprocessable", "WORKFLOW_INVALID", err.Error(), nil)
+	case errors.Is(err, workflowsvc.ErrNotFound):
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "WORKFLOW_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, workflowsvc.ErrAlreadyTerminal):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "WORKFLOW_ALREADY_TERMINAL", err.Error(), nil)
+	case errors.Is(err, workflowsvc.ErrPlanLocked):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "WORKFLOW_PLAN_LOCKED", err.Error(), nil)
+	default:
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "WORKFLOW_OPERATION_FAILED", "Workflow operation failed", nil)
+	}
+}

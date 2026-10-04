@@ -172,7 +172,7 @@ func TestWriteSSEEventSanitizesEventNameNewlines(t *testing.T) {
 	e := testCDCEvent(1)
 	e.Type = cdc.EventType("session_updated\nid: 999\rdata: injected")
 
-	if err := writeSSEEvent(rec, rec, e, &sentSeq); err != nil {
+	if err := writeSSEEvent(rec, rec, e, &sentSeq, nil); err != nil {
 		t.Fatalf("writeSSEEvent: %v", err)
 	}
 

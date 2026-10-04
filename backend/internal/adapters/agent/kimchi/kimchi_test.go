@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters"
@@ -693,7 +694,7 @@ func TestGetAgentHooksWritesSettingsFile(t *testing.T) {
 		"ao hooks kimchi post-tool-use",
 		"ao hooks kimchi post-tool-use-failure",
 	} {
-		if !contains(content, cmd) {
+		if !contains(content, kimchiHookArgs(cmd)) {
 			t.Errorf("settings missing hook command %q", cmd)
 		}
 	}
@@ -702,6 +703,13 @@ func TestGetAgentHooksWritesSettingsFile(t *testing.T) {
 	if _, err := os.Stat(gitignore); err != nil {
 		t.Fatalf("gitignore not created: %v", err)
 	}
+}
+
+// kimchiHookArgs is the installed form of a canonical `ao hooks kimchi ...`
+// command minus its executable: installs resolve the leading `ao` to an
+// absolute launcher path, so only the argument tail is a stable substring.
+func kimchiHookArgs(command string) string {
+	return strings.TrimPrefix(command, "ao ")
 }
 
 func TestGetAgentHooksIdempotent(t *testing.T) {
@@ -723,7 +731,7 @@ func TestGetAgentHooksIdempotent(t *testing.T) {
 	}
 
 	content := string(data)
-	count := countOccurrences(content, "ao hooks kimchi session-start")
+	count := countOccurrences(content, kimchiHookArgs("ao hooks kimchi session-start"))
 	if count != 1 {
 		t.Fatalf("session-start hook duplicated: found %d occurrences", count)
 	}

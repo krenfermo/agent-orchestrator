@@ -50,7 +50,7 @@ func (c *commandContext) stopDaemon(ctx context.Context, opts stopOptions) (daem
 	if err != nil {
 		return daemonStatus{}, err
 	}
-	st, err := c.inspectDaemon(ctx)
+	st, cands, err := c.discoverDaemon(ctx, cfg)
 	if err != nil {
 		return daemonStatus{}, err
 	}
@@ -58,10 +58,22 @@ func (c *commandContext) stopDaemon(ctx context.Context, opts stopOptions) (daem
 	case stateStopped:
 		return st, nil
 	case stateStale:
-		if err := runfile.Remove(cfg.RunFilePath); err != nil {
-			return daemonStatus{}, err
+		// Every stale location is cleared, and each only while it still names
+		// the dead incarnation that was inspected -- a daemon starting right now
+		// keeps the run-file it just wrote.
+		for _, cand := range cands {
+			if cand.State != stateStale || cand.info == nil {
+				continue
+			}
+			if _, err := runfile.RemoveIfMatches(cand.RunFile, *cand.info); err != nil {
+				return daemonStatus{}, err
+			}
 		}
-		return daemonStatus{State: stateStopped, RunFile: cfg.RunFilePath, DataDir: cfg.DataDir}, nil
+		return daemonStatus{State: stateStopped, RunFile: st.RunFile, DataDir: cfg.DataDir}, nil
+	case stateForeign:
+		return daemonStatus{}, fmt.Errorf("the run-file at %s belongs to another AO installation (%s); not stopping it", st.RunFile, st.Error)
+	case stateUnverified:
+		return daemonStatus{}, fmt.Errorf("pid %d is alive but is not provably this installation's daemon: %s", st.PID, st.Error)
 	}
 	if !st.owned {
 		if st.Error != "" {
@@ -73,7 +85,15 @@ func (c *commandContext) stopDaemon(ctx context.Context, opts stopOptions) (daem
 	if err := c.requestShutdown(ctx, st.Port); err != nil {
 		return daemonStatus{}, fmt.Errorf("request daemon shutdown: %w", err)
 	}
-	return c.waitForStopped(ctx, st.PID, cfg.RunFilePath, cfg.DataDir, opts.timeout)
+	return c.waitForDaemonExit(ctx, daemonIdentity{pid: st.PID, instance: st.InstanceID, port: st.Port}, st.RunFile, cfg.DataDir, opts.timeout)
+}
+
+// daemonIdentity is what `ao stop` verified before asking a daemon to exit, and
+// what it re-verifies to decide the daemon is gone.
+type daemonIdentity struct {
+	pid      int
+	instance string
+	port     int
 }
 
 func (c *commandContext) requestShutdown(ctx context.Context, port int) error {
@@ -96,6 +116,15 @@ func (c *commandContext) requestShutdown(ctx context.Context, port int) error {
 }
 
 func (c *commandContext) waitForStopped(ctx context.Context, pid int, runFilePath, dataDir string, timeout time.Duration) (daemonStatus, error) {
+	return c.waitForDaemonExit(ctx, daemonIdentity{pid: pid}, runFilePath, dataDir, timeout)
+}
+
+// waitForDaemonExit polls until the verified daemon is gone, within timeout.
+// "Gone" is the process exiting, or its run-file removed AND its probe no longer
+// answering as that incarnation. A run-file is only ever removed while it still
+// names the incarnation that was stopped.
+func (c *commandContext) waitForDaemonExit(ctx context.Context, id daemonIdentity, runFilePath, dataDir string, timeout time.Duration) (daemonStatus, error) {
+	pid := id.pid
 	if timeout <= 0 {
 		timeout = defaultStopTimeout
 	}
@@ -117,7 +146,7 @@ func (c *commandContext) waitForStopped(ctx context.Context, pid int, runFilePat
 			// stopped. A concurrent `ao start` may have already written a new
 			// run-file for a different daemon; removing that would corrupt its
 			// handshake and make a live daemon look stopped.
-			if info != nil && info.PID == pid {
+			if info != nil && info.PID == pid && (id.instance == "" || info.InstanceID == "" || info.InstanceID == id.instance) {
 				if err := runfile.Remove(runFilePath); err != nil {
 					return daemonStatus{}, err
 				}
@@ -137,6 +166,16 @@ func (c *commandContext) waitForStopped(ctx context.Context, pid int, runFilePat
 			// background workers slower than the stop timeout, and failing here
 			// made `ao stop` spuriously report failure (issue #2214).
 			if !c.deps.Now().Before(deadline) {
+				// P9: the marker is gone and the PID lingers. If the port still
+				// answers as the very incarnation that was asked to stop, it did
+				// not stop, whatever the file says.
+				if id.port > 0 {
+					if probe, perr := c.readProbe(ctx, id.port, "healthz"); perr == nil &&
+						verifyProbeOwner(probe, pid, "healthz") == nil &&
+						(id.instance == "" || probe.InstanceID == "" || probe.InstanceID == id.instance) {
+						return daemonStatus{}, fmt.Errorf("daemon pid %d removed its run-file but is still serving on port %d", pid, id.port)
+					}
+				}
 				return daemonStatus{State: stateStopped, RunFile: runFilePath, DataDir: dataDir}, nil
 			}
 			c.deps.Sleep(100 * time.Millisecond)

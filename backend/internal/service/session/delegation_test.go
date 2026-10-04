@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -271,4 +272,60 @@ func TestDelegateTaskReturnsBeforeTitleRequestCompletes(t *testing.T) {
 
 func runInline(work func()) {
 	work()
+}
+
+// TestDelegateTaskSendsTheWorkerTheWholeSpecificationButTheTitleAgentAnExcerpt
+// is the context-window half of raising the brief ceiling to 128 KiB.
+//
+// The worker is the one doing the work and must receive the specification
+// entire. The orchestrator is only being asked to pick a <=20 character title,
+// and sending it the whole thing a second time would spend a context window on
+// a naming errand.
+func TestDelegateTaskSendsTheWorkerTheWholeSpecificationButTheTitleAgentAnExcerpt(t *testing.T) {
+	st := newFakeStore()
+	st.projects["ao"] = domain.ProjectRecord{ID: "ao"}
+	st.sessions["orch"] = domain.SessionRecord{ID: "orch", ProjectID: "ao", Kind: domain.KindOrchestrator, CreatedAt: time.Now().UTC()}
+	cmd := &fakeCommander{}
+	svc := &Service{store: st, manager: cmd, runBackground: runInline}
+
+	// Multibyte on purpose: the excerpt is cut on a byte budget, so it must
+	// stop on a rune boundary rather than halfway through a character.
+	brief := "Implementar RBAC en MEDUSA.\n" + strings.Repeat("especificación detallada ñ\n", 4000)
+	if len(brief) <= delegatedTaskTitleBriefBytes {
+		t.Fatalf("fixture is not long enough to exercise the excerpt: %d bytes", len(brief))
+	}
+
+	if _, err := svc.DelegateTask(context.Background(), DelegateTaskInput{ProjectID: "ao", Brief: brief}); err != nil {
+		t.Fatalf("DelegateTask: %v", err)
+	}
+
+	if cmd.spawnedCfg.Prompt != brief {
+		t.Fatalf("the worker received %d bytes of a %d byte specification — it must get all of it",
+			len(cmd.spawnedCfg.Prompt), len(brief))
+	}
+	msg := cmd.sentMessages[0]
+	if len(msg) > delegatedTaskTitleBriefBytes*2 {
+		t.Fatalf("the title request carries %d bytes; the excerpt cap is %d",
+			len(msg), delegatedTaskTitleBriefBytes)
+	}
+	if !strings.Contains(msg, "Implementar RBAC en MEDUSA.") {
+		t.Fatalf("the excerpt dropped the opening line, which is what names the task:\n%s", msg)
+	}
+	if !strings.Contains(msg, "the worker has the full specification") {
+		t.Fatalf("the title request does not say the brief is an excerpt:\n%s", msg)
+	}
+	if !utf8.ValidString(msg) {
+		t.Fatal("the excerpt was cut through the middle of a multibyte character")
+	}
+}
+
+// TestBriefExcerptLeavesAShortBriefAlone keeps the excerpt invisible for the
+// ordinary case: a normal one-line brief is passed through untouched and
+// unannotated.
+func TestBriefExcerptLeavesAShortBriefAlone(t *testing.T) {
+	brief := "Arreglar el botón de pago"
+	got, truncated := briefExcerpt(brief, delegatedTaskTitleBriefBytes)
+	if truncated || got != brief {
+		t.Fatalf("briefExcerpt(%q) = %q, %v; want the brief unchanged", brief, got, truncated)
+	}
 }

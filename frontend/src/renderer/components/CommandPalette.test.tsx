@@ -470,7 +470,7 @@ describe("CommandPalette actions", () => {
 			expect(selected?.textContent).not.toContain("No current project");
 			expect(selected?.getAttribute("aria-disabled")).not.toBe("true");
 		});
-		fireEvent.click(screen.getByText("New task"));
+		fireEvent.click(screen.getByText("New session"));
 		expect(navigateMock).not.toHaveBeenCalled();
 		expect(spawnMock).not.toHaveBeenCalled();
 	});
@@ -663,7 +663,7 @@ describe("CommandPalette inline task composer", () => {
 		renderPalette();
 		act(() => useUiStore.getState().setCommandPaletteOpen(true));
 		await screen.findByPlaceholderText(/search projects/i);
-		fireEvent.click(screen.getByText("New task"));
+		fireEvent.click(screen.getByText("New session"));
 		return screen.findByTestId("task-composer");
 	}
 

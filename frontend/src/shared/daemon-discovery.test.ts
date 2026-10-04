@@ -135,3 +135,15 @@ describe("defaultRunFilePath", () => {
 		expect(defaultRunFilePath("win32", {}, "")).toBeNull();
 	});
 });
+
+describe("parseRunFile supervisorAddress", () => {
+	it("reads the published supervisor endpoint and treats its absence as none", () => {
+		const base = { pid: 1, port: 3002, startedAt: "2026-09-16T00:00:00Z" };
+		expect(parseRunFile(JSON.stringify({ ...base, supervisorAddress: "/d/supervise-0123456789abcdef.sock" }))?.supervisorAddress).toBe(
+			"/d/supervise-0123456789abcdef.sock",
+		);
+		expect(parseRunFile(JSON.stringify(base))?.supervisorAddress).toBeUndefined();
+		expect(parseRunFile(JSON.stringify({ ...base, supervisorAddress: "" }))?.supervisorAddress).toBeUndefined();
+		expect(parseRunFile(JSON.stringify({ ...base, supervisorAddress: 7 }))?.supervisorAddress).toBeUndefined();
+	});
+});

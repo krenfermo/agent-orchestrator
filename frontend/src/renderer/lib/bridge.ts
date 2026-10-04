@@ -38,6 +38,12 @@ export const aoBridge: AoBridge =
 		theme: {
 			set: async () => undefined,
 		},
+		// Outside Electron (the dev web build, preview mode) there is no main
+		// process to drive a system-browser sign-in, so the fallback reports
+		// "cancelled" and the login screen navigates the browser itself.
+		auth: {
+			ssoSignIn: async () => ({ status: "cancelled" }) as const,
+		},
 		menu: {
 			action: async () => undefined,
 			notifyShellFocus: () => undefined,
@@ -51,6 +57,7 @@ export const aoBridge: AoBridge =
 			readText: async () => (navigator.clipboard?.readText ? navigator.clipboard.readText() : ""),
 		},
 		daemon: {
+			getEnvInfo: async () => ({ isDevSandbox: false, dataDir: null, runFile: null }),
 			getStatus: async () => ({
 				state: "stopped",
 				message: "Electron preload is not available in browser preview.",

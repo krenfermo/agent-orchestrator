@@ -1,0 +1,113 @@
+-- name: InsertWorkflowQuestionResolution :one
+-- Checkpoint 8K-B (pass 1): durable row for one Decision Resolver attempt.
+-- The partial unique index on (workflow_question_id) WHERE status='running'
+-- (0105) rejects a second concurrent running attempt for the same question
+-- at the SQL layer; callers still get a normal insert error in that case.
+INSERT INTO workflow_question_resolutions (
+    id, workflow_question_id, workflow_run_id, asking_session_id, resolver_harness,
+    resolver_session_id, status, answer, reason_summary, evidence_references,
+    certainty, requires_human, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, workflow_question_id, workflow_run_id, asking_session_id, resolver_harness,
+          resolver_session_id, status, answer, reason_summary, evidence_references,
+          certainty, requires_human, created_at, updated_at, completed_at;
+
+-- name: GetWorkflowQuestionResolution :one
+SELECT id, workflow_question_id, workflow_run_id, asking_session_id, resolver_harness,
+       resolver_session_id, status, answer, reason_summary, evidence_references,
+       certainty, requires_human, created_at, updated_at, completed_at
+FROM workflow_question_resolutions
+WHERE id = ?;
+
+-- name: TransitionResolutionStatus :execrows
+-- CAS-style transition, mirroring AnswerWorkflowQuestion's compare-and-swap
+-- pattern in workflow_questions.sql: applies only if the row is currently in
+-- expected_status, so a race (e.g. a staleness sweep and a real completion
+-- landing at the same time) loses cleanly instead of corrupting the row.
+UPDATE workflow_question_resolutions
+SET status = ?, answer = ?, reason_summary = ?, evidence_references = ?,
+    certainty = ?, requires_human = ?, updated_at = ?, completed_at = ?
+WHERE id = ? AND status = sqlc.arg(expected_status);
+
+-- name: GetCurrentResolutionForQuestion :one
+-- Follows the workflow_questions.resolving_run_id pointer rather than
+-- guessing "most recent row" -- the question row is the single source of
+-- truth for which attempt is current.
+--
+-- NOTE on ordering: this query is placed after TransitionResolutionStatus in
+-- this file deliberately. While bisecting a sqlc v1.31.1 SQLite codegen bug
+-- while writing this file, some orderings/param-style combinations of the
+-- queries in this file caused sqlc to silently emit truncated/corrupted raw
+-- SQL string constants for one or more queries (no generation error, but
+-- broken query text at runtime, e.g. a missing "=" or an unterminated
+-- string literal). This ordering + placeholder style (plain "?" here,
+-- mixed "?"/sqlc.arg in TransitionResolutionStatus) was verified to
+-- generate every query in this file intact. Do not reorder or restyle
+-- these queries without re-running `npm run sqlc` and manually inspecting
+-- every `const ... = ...` block in the generated .sql.go for truncation.
+SELECT wqr.id, wqr.workflow_question_id, wqr.workflow_run_id, wqr.asking_session_id, wqr.resolver_harness,
+       wqr.resolver_session_id, wqr.status, wqr.answer, wqr.reason_summary, wqr.evidence_references,
+       wqr.certainty, wqr.requires_human, wqr.created_at, wqr.updated_at, wqr.completed_at
+FROM workflow_question_resolutions wqr
+JOIN workflow_questions wq ON wq.resolving_run_id = wqr.id
+WHERE wq.id = ?;
+
+-- name: ListRunningResolutions :many
+-- Pass 2's staleness-sweep target: every attempt currently marked running,
+-- across all runs. No sweep logic in pass 1, just the query.
+SELECT id, workflow_question_id, workflow_run_id, asking_session_id, resolver_harness,
+       resolver_session_id, status, answer, reason_summary, evidence_references,
+       certainty, requires_human, created_at, updated_at, completed_at
+FROM workflow_question_resolutions
+WHERE status = 'running'
+ORDER BY created_at;
+
+-- name: CancelRunningResolutionsByQuestion :execrows
+-- Used by the run-cancel path (mirroring CancelOpenWorkflowQuestionsByRun)
+-- to stop trusting an in-flight resolver attempt once its question/run is
+-- cancelled. A no-op (0 rows) when no attempt is currently running.
+UPDATE workflow_question_resolutions
+SET status = 'cancelled', updated_at = ?, completed_at = ?
+WHERE workflow_question_id = ? AND status = 'running';
+
+-- name: ListWorkflowQuestionResolutionsByRun :many
+-- Checkpoint 8K-B pass 3: read-time telemetry source (workflow_usage_view's
+-- resolver counters) -- every resolution attempt ever recorded for a run.
+-- Deliberately has NO trailing ORDER BY/LIMIT clause: reproduced this
+-- file's documented sqlc v1.31.1 codegen bug firsthand while writing this
+-- query, TWICE. First: a non-ASCII em-dash character used earlier in this
+-- comment block desynced sqlc's byte-offset query-text extraction for this
+-- whole file, corrupting query text across query boundaries (see
+-- queries/sessions.sql's own note on this exact sqlc 1.31 SQLite-parser
+-- bug: keep every comment in this file plain ASCII). Second, even with
+-- plain ASCII comments: ending this query's SQL body in an ORDER BY/LIMIT
+-- clause got its last two characters silently dropped by sqlc's
+-- re-serializer (e.g. "ORDER BY created_at" -> "ORDER BY created_"), no
+-- generation error either time. GetCurrentResolutionForQuestion above ends
+-- in "WHERE wq.id = ?" and is unaffected, so ending a query in "= ?" is the
+-- verified-safe shape; ending in ORDER BY/LIMIT is not. This query
+-- therefore has no ORDER BY -- the store method
+-- (ListWorkflowQuestionResolutionsByRun in
+-- workflow_question_resolutions_store.go) sorts the returned rows by
+-- CreatedAt in Go instead. Do not add a trailing ORDER BY/LIMIT to this or
+-- any other query in this file, and do not use any non-ASCII character
+-- anywhere in this file, without re-running `npm run sqlc` and manually
+-- inspecting every `const ... = ...` block in
+-- workflow_question_resolutions.sql.go for truncation/cross-query
+-- corruption.
+SELECT id, workflow_question_id, workflow_run_id, asking_session_id, resolver_harness,
+       resolver_session_id, status, answer, reason_summary, evidence_references,
+       certainty, requires_human, created_at, updated_at, completed_at
+FROM workflow_question_resolutions
+WHERE workflow_run_id = ?;
+
+-- name: SetResolutionResolverSessionID :execrows
+-- Checkpoint 8K-B (pass 2): records the resolver's launched session identity
+-- once Launch succeeds. Separate from TransitionResolutionStatus's CAS
+-- transition (that query has no resolver_session_id column) so the
+-- pending->running transition and this identity write are two small,
+-- independently-idempotent statements rather than widening the CAS query's
+-- column set.
+UPDATE workflow_question_resolutions
+SET resolver_session_id = ?
+WHERE id = ?;

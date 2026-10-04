@@ -42,6 +42,7 @@ var (
 	ErrBranchCheckedOutElsewhere = ports.ErrWorkspaceBranchCheckedOutElsewhere
 	ErrBranchNotFetched          = ports.ErrWorkspaceBranchNotFetched
 	ErrBranchInvalid             = ports.ErrWorkspaceBranchInvalid
+	ErrProbeInconclusive         = ports.ErrWorkspaceProbeInconclusive
 	// ErrWorktreeLocked is an adapter-local alias of ports.ErrWorkspaceLocked,
 	// following the same aliasing convention as the branch sentinels above.
 	ErrWorktreeLocked = ports.ErrWorkspaceLocked
@@ -145,7 +146,16 @@ func (w *Workspace) Create(ctx context.Context, cfg ports.WorkspaceConfig) (port
 	if err := w.addWorktree(ctx, repo, path, cfg.Branch, cfg.BaseBranch); err != nil {
 		return ports.WorkspaceInfo{}, err
 	}
-	return ports.WorkspaceInfo{Path: path, Branch: cfg.Branch, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID}, nil
+	// RepoPath is the repository this worktree was cut from, and it is reported
+	// on EVERY return from this adapter, not only when re-attaching. It used to
+	// be omitted here alone, which made the fact silently absent for exactly the
+	// sessions that have it least ambiguously: a freshly created worktree.
+	//
+	// It is a durable identity rather than a convenience. The session manager
+	// stores it, and "is this session's workspace the repository itself?" -- the
+	// question that decides whether a restore re-attaches a worktree or hands
+	// back the operator's own checkout -- cannot be answered without it.
+	return ports.WorkspaceInfo{Path: path, Branch: cfg.Branch, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: repo}, nil
 }
 
 // CreateWorkspaceProject materialises a root-as-repo workspace session: the
@@ -418,14 +428,14 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 	// Stage all tracked and non-ignored untracked files into the temp index.
 	// GIT_INDEX_FILE overrides the index so the real index is never touched.
 	addCmd := exec.CommandContext(ctx, w.binary, addAllTempIndexArgs(path)...)
-	addCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+	addCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		return "", commandError{args: append([]string{w.binary}, addAllTempIndexArgs(path)...), output: string(out), err: err}
 	}
 
 	// Write the staged tree to get a tree SHA.
 	writeTreeCmd := exec.CommandContext(ctx, w.binary, writeTreeArgs(path)...)
-	writeTreeCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+	writeTreeCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
 	treeOut, err := writeTreeCmd.CombinedOutput()
 	if err != nil {
 		return "", commandError{args: append([]string{w.binary}, writeTreeArgs(path)...), output: string(treeOut), err: err}
@@ -468,6 +478,152 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 		return "", fmt.Errorf("gitworktree: update-ref %q: %w", ref, err)
 	}
 	return ref, nil
+}
+
+// MaterializeIntegrationCommit captures the worktree's current tracked and
+// untracked state into a commit object under ref, using the exact same
+// temp-index plumbing as StashUncommitted (GIT_INDEX_FILE-scoped `add -A`,
+// which already respects .gitignore, then write-tree/commit-tree/update-ref)
+// so it never mutates the real working tree or index. Two additions beyond
+// StashUncommitted: paths matching excludePatterns are force-removed from the
+// temp index before write-tree (Checkpoint 8M.1 hygiene — cache artifacts
+// never enter the integration commit even when a target repo's own
+// .gitignore doesn't cover them), and the commit is stamped with AO's own
+// git identity via per-command env, never the ambient user's.
+//
+// write-tree runs before commit-tree so a no-op promotion (content identical
+// to parentSHA's tree) is detected cheaply and returns reused=true with no
+// new commit object — this is what keeps repeated/restarted promotion calls
+// idempotent without any additional locking.
+func (w *Workspace) MaterializeIntegrationCommit(ctx context.Context, info ports.WorkspaceInfo, ref, parentSHA, message string, excludePatterns []string) (string, string, bool, error) {
+	if info.Path == "" {
+		return "", "", false, fmt.Errorf("%w: empty path", ErrUnsafePath)
+	}
+	if ref == "" {
+		return "", "", false, errors.New("gitworktree: ref is required for MaterializeIntegrationCommit")
+	}
+	repo, err := w.repoPathForInfo(info)
+	if err != nil {
+		return "", "", false, err
+	}
+	path, err := w.validateManagedPath(info.Path)
+	if err != nil {
+		return "", "", false, err
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", false, fmt.Errorf("gitworktree: stale worktree %q: %w", path, ports.ErrWorkspaceStale)
+		}
+		return "", "", false, fmt.Errorf("gitworktree: stat worktree %q: %w", path, err)
+	}
+	records, err := w.listRecords(ctx, repo)
+	if err != nil {
+		return "", "", false, err
+	}
+	if _, ok := findWorktree(records, path); !ok {
+		return "", "", false, fmt.Errorf("gitworktree: worktree %q is not registered: %w", path, ports.ErrWorkspaceStale)
+	}
+
+	tmpIdx, err := os.CreateTemp("", "ao-integration-idx-*")
+	if err != nil {
+		return "", "", false, fmt.Errorf("gitworktree: reserve temp index path: %w", err)
+	}
+	tmpIdxPath := tmpIdx.Name()
+	_ = tmpIdx.Close()
+	_ = os.Remove(tmpIdxPath)
+	defer func() { _ = os.Remove(tmpIdxPath) }()
+
+	addCmd := exec.CommandContext(ctx, w.binary, addAllTempIndexArgs(path)...)
+	addCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return "", "", false, commandError{args: append([]string{w.binary}, addAllTempIndexArgs(path)...), output: string(out), err: err}
+	}
+
+	if len(excludePatterns) > 0 {
+		lsCmd := exec.CommandContext(ctx, w.binary, lsFilesTempIndexArgs(path)...)
+		lsCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
+		lsOut, err := lsCmd.CombinedOutput()
+		if err != nil {
+			return "", "", false, commandError{args: append([]string{w.binary}, lsFilesTempIndexArgs(path)...), output: string(lsOut), err: err}
+		}
+		var excluded []string
+		for _, line := range strings.Split(strings.TrimRight(string(lsOut), "\n"), "\n") {
+			if line == "" {
+				continue
+			}
+			if matchesEphemeralPattern(line, excludePatterns) {
+				excluded = append(excluded, line)
+			}
+		}
+		if len(excluded) > 0 {
+			rmArgs := updateIndexForceRemoveTempIndexArgs(path, excluded)
+			rmCmd := exec.CommandContext(ctx, w.binary, rmArgs...)
+			rmCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
+			if out, err := rmCmd.CombinedOutput(); err != nil {
+				return "", "", false, commandError{args: append([]string{w.binary}, rmArgs...), output: string(out), err: err}
+			}
+		}
+	}
+
+	writeTreeCmd := exec.CommandContext(ctx, w.binary, writeTreeArgs(path)...)
+	writeTreeCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
+	treeOut, err := writeTreeCmd.CombinedOutput()
+	if err != nil {
+		return "", "", false, commandError{args: append([]string{w.binary}, writeTreeArgs(path)...), output: string(treeOut), err: err}
+	}
+	treeSHA := strings.TrimSpace(string(treeOut))
+
+	if parentSHA != "" {
+		parentTreeOut, err := w.run(ctx, w.binary, revParseTreeArgs(path, parentSHA)...)
+		if err == nil {
+			parentTreeSHA := strings.TrimSpace(string(parentTreeOut))
+			if parentTreeSHA != "" && parentTreeSHA == treeSHA {
+				return parentSHA, treeSHA, true, nil
+			}
+		}
+	}
+
+	commitCmd := exec.CommandContext(ctx, w.binary, commitTreeArgs(path, treeSHA, parentSHA, message)...)
+	commitCmd.Env = gitEnv(
+		"GIT_AUTHOR_NAME=Agent Orchestrator", "GIT_AUTHOR_EMAIL=ao@local",
+		"GIT_COMMITTER_NAME=Agent Orchestrator", "GIT_COMMITTER_EMAIL=ao@local",
+	)
+	commitOut, err := commitCmd.CombinedOutput()
+	if err != nil {
+		return "", "", false, commandError{args: append([]string{w.binary}, commitTreeArgs(path, treeSHA, parentSHA, message)...), output: string(commitOut), err: err}
+	}
+	commitSHA := strings.TrimSpace(string(commitOut))
+
+	oldSHA := ""
+	if existing, err := w.run(ctx, w.binary, revParseVerifyArgs(path, ref)...); err == nil {
+		oldSHA = strings.TrimSpace(string(existing))
+	}
+	if _, err := w.run(ctx, w.binary, updateRefCASArgs(path, ref, commitSHA, oldSHA)...); err != nil {
+		return "", "", false, fmt.Errorf("gitworktree: update-ref %q: %w", ref, err)
+	}
+	return commitSHA, treeSHA, false, nil
+}
+
+// matchesEphemeralPattern reports whether path matches any pattern: a bare
+// name (e.g. "__pycache__", ".pytest_cache") matches a full path segment;
+// a glob (e.g. "*.pyc", ".coverage.*") matches path's basename.
+func matchesEphemeralPattern(path string, patterns []string) bool {
+	segments := strings.Split(path, "/")
+	base := segments[len(segments)-1]
+	for _, p := range patterns {
+		if strings.Contains(p, "*") {
+			if ok, _ := filepath.Match(p, base); ok {
+				return true
+			}
+			continue
+		}
+		for _, seg := range segments {
+			if seg == p {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isNotGitRepositoryError(err error) bool {
@@ -697,6 +853,7 @@ func parseObservedWorkspaceCommits(output string) []ports.WorkspaceCommit {
 func (w *Workspace) runCherryPickNoCommit(ctx context.Context, worktree, commitSHA string) error {
 	args := cherryPickNoCommitArgs(worktree, commitSHA)
 	cmd := exec.CommandContext(ctx, w.binary, args...)
+	cmd.Env = gitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return commandError{args: append([]string{w.binary}, args...), output: string(out), err: err}
@@ -1102,11 +1259,30 @@ func (w *Workspace) revParse(ctx context.Context, repo, ref string) (string, err
 	return strings.TrimSpace(string(out)), nil
 }
 
+// validateBranch asks git whether a branch name is well formed, and reports
+// the answer ONLY when git gave one.
+//
+// The distinction is the whole point. `git check-ref-format` exiting non-zero
+// is git rejecting the name: a permanent, terminal fact about the caller's
+// input. A check-ref-format process that was KILLED -- a cancelled request
+// context, a deadline, an operator, the OOM killer -- or that never started
+// rendered no verdict at all, and calling that "invalid branch name" invents a
+// permanent refusal out of a transient one.
+//
+// That is not hypothetical: `git check-ref-format --branch ao/sige-12/root`
+// came back `signal: killed`, and AO answered INVALID_BRANCH for a name git
+// accepts. The validation is unchanged -- git is still the only authority on
+// whether a name is legal, and nothing here substitutes a different branch.
+// What changed is that a probe with no answer is reported as having no answer.
 func (w *Workspace) validateBranch(ctx context.Context, repo, branch string) error {
-	if _, err := w.run(ctx, w.binary, checkRefFormatBranchArgs(repo, branch)...); err != nil {
-		return fmt.Errorf("%w: %q (%w)", ErrBranchInvalid, branch, err)
+	_, err := w.run(ctx, w.binary, checkRefFormatBranchArgs(repo, branch)...)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if !aoprocess.RenderedVerdict(ctx, err) {
+		return fmt.Errorf("%w: git check-ref-format --branch %q (%w)", ErrProbeInconclusive, branch, err)
+	}
+	return fmt.Errorf("%w: %q (%w)", ErrBranchInvalid, branch, err)
 }
 
 // errNoBaseRef is an internal sentinel: every candidate base ref is missing.
@@ -1121,7 +1297,47 @@ func (w *Workspace) resolveBaseRef(ctx context.Context, repo, branch, baseBranch
 	return w.resolveBaseRefFromDefault(ctx, repo, branch, defaultBranch)
 }
 
+// isObjectID reports whether s is a FULL git object id: 40 hex characters
+// (sha-1) or 64 (sha-256).
+//
+// Abbreviations are deliberately not accepted. An abbreviated id can become
+// ambiguous as a repository grows, and a base that resolves today and refuses
+// tomorrow is the worst kind of pin.
+func isObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 func (w *Workspace) resolveBaseRefFromDefault(ctx context.Context, repo, branch, defaultBranch string) (string, error) {
+	// A base given as an object id is the ONLY candidate, and it must be a
+	// commit that is really there.
+	//
+	// Two reasons this cannot go through the candidate list below. It names one
+	// commit, so every fallback in that list would resolve to a different tree
+	// that looked exactly as plausible — which is precisely what a caller
+	// pinning a commit is asking not to happen (workflow/repair_artifact.go
+	// cuts a repair checkout from the exact commit under review). And
+	// `rev-parse --verify` answers a full hex string with the string itself
+	// whether or not the object exists, so existence has to be asked with an
+	// explicit `^{commit}` peel or the pin proves nothing at all.
+	if isObjectID(defaultBranch) {
+		exists, err := w.refExists(ctx, repo, defaultBranch+"^{commit}")
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return defaultBranch, nil
+		}
+		return "", fmt.Errorf("%w: commit %s is not present in this repository", errNoBaseRef, defaultBranch)
+	}
 	candidates := baseRefCandidates(branch, defaultBranch)
 	for _, ref := range candidates {
 		exists, err := w.refExists(ctx, repo, ref)
@@ -1414,7 +1630,13 @@ func (w *Workspace) validateManagedPath(path string) (string, error) {
 		return "", err
 	}
 	if !inside || clean == w.managedRoot {
-		return "", fmt.Errorf("%w: %q is outside managed root %q", ErrUnsafePath, clean, w.managedRoot)
+		// Wrapped with ports.ErrWorkspaceNotManaged as well as ErrUnsafePath so a
+		// caller can tell "this path is dangerous" from "this is not my
+		// department". Every mutating caller treats both the same and refuses;
+		// only the router's read-only observation distinguishes them, because a
+		// repository outside this adapter's managed root is not unsafe to READ --
+		// it is simply the other adapter's.
+		return "", fmt.Errorf("%w: %q is outside managed root %q (%w)", ErrUnsafePath, clean, w.managedRoot, ports.ErrWorkspaceNotManaged)
 	}
 	return clean, nil
 }
@@ -1478,6 +1700,7 @@ func moveStrayPathAside(path string) (string, error) {
 
 func runCommand(ctx context.Context, binary string, args ...string) ([]byte, error) {
 	cmd := aoprocess.CommandContext(ctx, binary, args...)
+	cmd.Env = gitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, commandError{args: append([]string{binary}, args...), output: string(out), err: err}

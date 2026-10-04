@@ -4,6 +4,7 @@ import { aoBridge } from "../lib/bridge";
 import { applyDaemonStatus, readDaemonStatus, type DaemonStatus } from "../lib/daemon-status";
 import { queryClient as defaultQueryClient } from "../lib/query-client";
 import { createEventTransport } from "../lib/event-transport";
+import { isDesktopMode } from "../lib/platform-adapter";
 
 const STATUS_REFRESH_MS = 2_000;
 const READY_STATUS_REFRESH_MS = 10_000;
@@ -76,10 +77,12 @@ export function useDaemonStatus(queryClient: QueryClient = defaultQueryClient) {
 			if (active) stopTransport = createEventTransport(queryClient).connect();
 		});
 
-		const stopStatusListener = aoBridge.daemon.onStatus((nextStatus) => {
-			statusVersion += 1;
-			applyStatus(nextStatus);
-		});
+		const stopStatusListener = isDesktopMode()
+			? aoBridge.daemon.onStatus((nextStatus) => {
+				statusVersion += 1;
+				applyStatus(nextStatus);
+			})
+			: () => undefined;
 
 		return () => {
 			active = false;

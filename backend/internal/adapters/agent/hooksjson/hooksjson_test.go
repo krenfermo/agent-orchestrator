@@ -20,7 +20,7 @@ func TestReconcileHookMovesCommandToDeclaredMatcher(t *testing.T) {
 		{Matcher: &newMatcher, Hooks: []HookEntry{userNew}},
 	}
 
-	got := reconcileHook(groups, updated, &newMatcher)
+	got := reconcileHook(groups, updated, &newMatcher, ownsCommand(managed))
 	want := []MatcherGroup{
 		{Matcher: &oldMatcher, Hooks: []HookEntry{userOld}},
 		{Matcher: &newMatcher, Hooks: []HookEntry{userNew, updated}},
@@ -42,7 +42,7 @@ func TestReconcileHookDeduplicatesCommandAcrossGroups(t *testing.T) {
 		{Matcher: &targetMatcher, Hooks: []HookEntry{{Type: "command", Command: managed, Timeout: 3}}},
 	}
 
-	got := reconcileHook(groups, updated, &targetMatcher)
+	got := reconcileHook(groups, updated, &targetMatcher, ownsCommand(managed))
 	want := []MatcherGroup{
 		{Matcher: &firstMatcher, Hooks: []HookEntry{user}},
 		{Matcher: &targetMatcher, Hooks: []HookEntry{updated}},
@@ -61,13 +61,19 @@ func TestReconcileHookDropsGroupsEmptiedByMove(t *testing.T) {
 		{Matcher: &oldMatcher, Hooks: []HookEntry{{Type: "command", Command: managed, Timeout: 5}}},
 	}
 
-	got := reconcileHook(groups, updated, &newMatcher)
+	got := reconcileHook(groups, updated, &newMatcher, ownsCommand(managed))
 	want := []MatcherGroup{
 		{Matcher: &newMatcher, Hooks: []HookEntry{updated}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("reconcileHook()\nwant: %#v\n got: %#v", want, got)
 	}
+}
+
+// ownsCommand builds the ownership predicate reconcileHook takes, matching one
+// exact command the way the pre-launcher code compared commands literally.
+func ownsCommand(command string) func(string) bool {
+	return func(existing string) bool { return existing == command }
 }
 
 func TestManagerPreservesUnknownUserHookFields(t *testing.T) {
@@ -100,11 +106,12 @@ func TestManagerPreservesUnknownUserHookFields(t *testing.T) {
 		CommandPrefix: "ao hooks test ",
 		Timeout:       30,
 		Path:          func(string) string { return hooksPath },
+		Launcher:      func(string) (string, error) { return "/opt/ao/bin/ao", nil },
 		Managed: []HookSpec{
 			{Event: "Notification", Command: "ao hooks test notification"},
 		},
 	}
-	if err := manager.Install(t.Context(), workspace); err != nil {
+	if err := manager.Install(t.Context(), workspace, ""); err != nil {
 		t.Fatal(err)
 	}
 	assertUnknownUserHookFields(t, hooksPath)
@@ -141,11 +148,12 @@ func TestManagerPreservesManagedHookExtensionsOnReconcile(t *testing.T) {
 		CommandPrefix: "ao hooks test ",
 		Timeout:       30,
 		Path:          func(string) string { return hooksPath },
+		Launcher:      func(string) (string, error) { return "/opt/ao/bin/ao", nil },
 		Managed: []HookSpec{
 			{Event: "Notification", Command: "ao hooks test notification"},
 		},
 	}
-	if err := manager.Install(t.Context(), workspace); err != nil {
+	if err := manager.Install(t.Context(), workspace, ""); err != nil {
 		t.Fatal(err)
 	}
 

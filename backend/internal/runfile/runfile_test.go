@@ -3,6 +3,7 @@ package runfile
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -185,5 +186,94 @@ func TestCheckStaleNoFile(t *testing.T) {
 	}
 	if live != nil {
 		t.Errorf("CheckStale with no file = %+v, want nil", live)
+	}
+}
+
+// P9: a run-file is removed only while it still names the exact daemon the
+// caller inspected. A successor that rewrote it -- same PID reused, new start, new
+// instance -- keeps its handshake.
+func TestRemoveIfMatchesOnlyRemovesTheInspectedIncarnation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "running.json")
+	started := time.Date(2026, 9, 13, 20, 0, 0, 0, time.UTC)
+	inspected := Info{PID: 4242, Port: 3002, StartedAt: started, FormatVersion: CurrentFormatVersion,
+		InstanceID: "aod-first", InstallationID: "aoi-x", DataDir: "/d"}
+
+	for name, successor := range map[string]Info{
+		"reused pid, new start":    {PID: 4242, Port: 3002, StartedAt: started.Add(time.Minute), InstanceID: "aod-first"},
+		"same start, new instance": {PID: 4242, Port: 3002, StartedAt: started, InstanceID: "aod-second"},
+		"legacy file, other pid":   {PID: 9999, Port: 3002, StartedAt: started},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := Write(path, successor); err != nil {
+				t.Fatal(err)
+			}
+			removed, err := RemoveIfMatches(path, inspected)
+			if err != nil || removed {
+				t.Fatalf("removed=%v err=%v: a successor's run-file was deleted", removed, err)
+			}
+			if got, _ := Read(path); got == nil {
+				t.Fatal("the successor's run-file is gone")
+			}
+		})
+	}
+	if err := Write(path, inspected); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := RemoveIfMatches(path, inspected)
+	if err != nil || !removed {
+		t.Fatalf("removed=%v err=%v, want the inspected incarnation's file removed", removed, err)
+	}
+	if removed, err := RemoveIfMatches(path, inspected); err != nil || removed {
+		t.Fatalf("second remove = %v/%v, want an idempotent no-op", removed, err)
+	}
+}
+
+func TestRunFileRoundTripsIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "running.json")
+	want := Info{PID: 1, Port: 2, StartedAt: time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC),
+		FormatVersion: CurrentFormatVersion, InstanceID: "aod-1", InstallationID: "aoi-1", DataDir: "/data"}
+	if err := Write(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil || got == nil || !got.SameDaemon(want) || got.InstallationID != want.InstallationID || got.DataDir != want.DataDir || got.FormatVersion != CurrentFormatVersion {
+		t.Fatalf("round trip = %+v, %v", got, err)
+	}
+}
+
+// The supervisor address is additive: written when set, absent (and parsed as
+// empty) in files from daemons that predate it.
+func TestSupervisorAddressIsOptionalAndRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "running.json")
+	want := Info{PID: 7, Port: 3002, StartedAt: time.Now().UTC().Truncate(time.Second), FormatVersion: CurrentFormatVersion,
+		InstanceID: "aod-1", InstallationID: "aoi-1", DataDir: "/d", SupervisorAddress: "/d/supervise-0123456789abcdef.sock"}
+	if err := Write(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil || got == nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.SupervisorAddress != want.SupervisorAddress {
+		t.Fatalf("supervisorAddress = %q, want %q", got.SupervisorAddress, want.SupervisorAddress)
+	}
+
+	old := filepath.Join(dir, "old.json")
+	if err := os.WriteFile(old, []byte(`{"pid":7,"port":3002,"startedAt":"2026-09-14T00:00:00Z","formatVersion":2,"instanceId":"aod-1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Read(old)
+	if err != nil || legacy == nil || legacy.SupervisorAddress != "" || legacy.InstanceID != "aod-1" {
+		t.Fatalf("pre-supervisorAddress run-file: %+v, %v", legacy, err)
+	}
+
+	noSup := Info{PID: 7, Port: 3002, StartedAt: want.StartedAt}
+	if err := Write(path, noSup); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "supervisorAddress") {
+		t.Fatalf("empty supervisorAddress was written: %s", raw)
 	}
 }

@@ -8,6 +8,7 @@ package gen
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -17,10 +18,44 @@ const countUnreadNotifications = `-- name: CountUnreadNotifications :one
 SELECT COUNT(*)
 FROM notifications
 WHERE status = 'unread'
+  AND recipient = CAST(?1 AS TEXT)
 `
 
-func (q *Queries) CountUnreadNotifications(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countUnreadNotifications)
+// Served by idx_notifications_recipient_status: the unread badge must never
+// read the full notification history.
+func (q *Queries) CountUnreadNotifications(ctx context.Context, recipient string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countUnreadNotifications, recipient)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countUnreadNotificationsInProjects = `-- name: CountUnreadNotificationsInProjects :one
+SELECT COUNT(*)
+FROM notifications
+WHERE status = 'unread'
+  AND recipient = CAST(?1 AS TEXT)
+  AND project_id IN (/*SLICE:project_ids*/?)
+`
+
+type CountUnreadNotificationsInProjectsParams struct {
+	Recipient  string
+	ProjectIds []domain.ProjectID
+}
+
+func (q *Queries) CountUnreadNotificationsInProjects(ctx context.Context, arg CountUnreadNotificationsInProjectsParams) (int64, error) {
+	query := countUnreadNotificationsInProjects
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.Recipient)
+	if len(arg.ProjectIds) > 0 {
+		for _, v := range arg.ProjectIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", strings.Repeat(",?", len(arg.ProjectIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", "NULL", 1)
+	}
+	row := q.db.QueryRowContext(ctx, query, queryParams...)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -31,74 +66,204 @@ SELECT COUNT(*)
 FROM notifications
 WHERE resolved_at IS NULL
   AND type IN ('needs_input', 'ready_to_merge')
+  AND recipient = CAST(?1 AS TEXT)
 `
 
-func (q *Queries) CountUnresolvedNotifications(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countUnresolvedNotifications)
+func (q *Queries) CountUnresolvedNotifications(ctx context.Context, recipient string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countUnresolvedNotifications, recipient)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countUnresolvedNotificationsInProjects = `-- name: CountUnresolvedNotificationsInProjects :one
+SELECT COUNT(*)
+FROM notifications
+WHERE resolved_at IS NULL
+  AND type IN ('needs_input', 'ready_to_merge')
+  AND recipient = CAST(?1 AS TEXT)
+  AND project_id IN (/*SLICE:project_ids*/?)
+`
+
+type CountUnresolvedNotificationsInProjectsParams struct {
+	Recipient  string
+	ProjectIds []domain.ProjectID
+}
+
+func (q *Queries) CountUnresolvedNotificationsInProjects(ctx context.Context, arg CountUnresolvedNotificationsInProjectsParams) (int64, error) {
+	query := countUnresolvedNotificationsInProjects
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.Recipient)
+	if len(arg.ProjectIds) > 0 {
+		for _, v := range arg.ProjectIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", strings.Repeat(",?", len(arg.ProjectIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", "NULL", 1)
+	}
+	row := q.db.QueryRowContext(ctx, query, queryParams...)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const createNotification = `-- name: CreateNotification :one
+
 INSERT INTO notifications (
-    id, session_id, project_id, pr_url, type, title, body, status, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+    id, session_id, project_id, workflow_run_id, task_id, pr_url, dedupe_key,
+    type, title, body, status, created_at, read_at,
+    recipient, severity, delivery_state, source, source_event_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 `
 
 type CreateNotificationParams struct {
-	ID        string
-	SessionID domain.SessionID
-	ProjectID domain.ProjectID
-	PRURL     string
-	Type      domain.NotificationType
-	Title     string
-	Body      string
-	Status    domain.NotificationStatus
-	CreatedAt time.Time
+	ID            string
+	SessionID     *domain.SessionID
+	ProjectID     domain.ProjectID
+	WorkflowRunID string
+	TaskID        string
+	PRURL         string
+	DedupeKey     string
+	Type          domain.NotificationType
+	Title         string
+	Body          string
+	Status        domain.NotificationStatus
+	CreatedAt     time.Time
+	ReadAt        sql.NullTime
+	Recipient     domain.NotificationRecipient
+	Severity      domain.NotificationSeverity
+	DeliveryState domain.NotificationDeliveryState
+	Source        domain.NotificationSource
+	SourceEventID string
 }
 
+// Notification queries.
+//
+// Every list and count is scoped by recipient. AO is single-user today and the
+// only value written is 'local', so this changes no result -- it exists so the
+// authority boundary is in the SQL rather than in a caller's discipline, and so
+// P4-B/P4-C add principals without revisiting every query. See
+// domain.NotificationRecipient.
 func (q *Queries) CreateNotification(ctx context.Context, arg CreateNotificationParams) (Notification, error) {
 	row := q.db.QueryRowContext(ctx, createNotification,
 		arg.ID,
 		arg.SessionID,
 		arg.ProjectID,
+		arg.WorkflowRunID,
+		arg.TaskID,
 		arg.PRURL,
+		arg.DedupeKey,
 		arg.Type,
 		arg.Title,
 		arg.Body,
 		arg.Status,
 		arg.CreatedAt,
+		arg.ReadAt,
+		arg.Recipient,
+		arg.Severity,
+		arg.DeliveryState,
+		arg.Source,
+		arg.SourceEventID,
 	)
 	var i Notification
 	err := row.Scan(
 		&i.ID,
 		&i.SessionID,
 		&i.ProjectID,
+		&i.WorkflowRunID,
 		&i.PRURL,
+		&i.DedupeKey,
 		&i.Type,
 		&i.Title,
 		&i.Body,
 		&i.Status,
 		&i.CreatedAt,
 		&i.ResolvedAt,
+		&i.Recipient,
+		&i.TaskID,
+		&i.Severity,
+		&i.ReadAt,
+		&i.DeliveryState,
+		&i.Source,
+		&i.SourceEventID,
 	)
 	return i, err
 }
 
-const getOpenNotificationByDedupe = `-- name: GetOpenNotificationByDedupe :one
-SELECT id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+const getNotificationByEventDedupe = `-- name: GetNotificationByEventDedupe :one
+SELECT id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 FROM notifications
-WHERE session_id = ?
-  AND type = ?
-  AND pr_url = ?
+WHERE type = ?1
+  AND dedupe_key = CAST(?2 AS TEXT)
+LIMIT 1
+`
+
+type GetNotificationByEventDedupeParams struct {
+	Type      domain.NotificationType
+	DedupeKey string
+}
+
+// The permanent, event-scoped counterpart to GetOpenNotificationByDedupe: it
+// matches whether or not the row is still open, so one completion event can
+// never produce a second notification -- not on a retry, not after a restart.
+func (q *Queries) GetNotificationByEventDedupe(ctx context.Context, arg GetNotificationByEventDedupeParams) (Notification, error) {
+	row := q.db.QueryRowContext(ctx, getNotificationByEventDedupe, arg.Type, arg.DedupeKey)
+	var i Notification
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.ProjectID,
+		&i.WorkflowRunID,
+		&i.PRURL,
+		&i.DedupeKey,
+		&i.Type,
+		&i.Title,
+		&i.Body,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ResolvedAt,
+		&i.Recipient,
+		&i.TaskID,
+		&i.Severity,
+		&i.ReadAt,
+		&i.DeliveryState,
+		&i.Source,
+		&i.SourceEventID,
+	)
+	return i, err
+}
+
+const getNotificationProject = `-- name: GetNotificationProject :one
+SELECT project_id FROM notifications WHERE id = ?
+`
+
+// GetNotificationProject answers "which project is this notification about",
+// which is the only question the acknowledgement routes need in order to
+// refuse one belonging to a project the caller cannot see. Deliberately
+// narrower than fetching the row: the caller must not learn the title of a
+// notification it is about to be told does not exist.
+func (q *Queries) GetNotificationProject(ctx context.Context, id string) (domain.ProjectID, error) {
+	row := q.db.QueryRowContext(ctx, getNotificationProject, id)
+	var project_id domain.ProjectID
+	err := row.Scan(&project_id)
+	return project_id, err
+}
+
+const getOpenNotificationByDedupe = `-- name: GetOpenNotificationByDedupe :one
+SELECT id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
+FROM notifications
+WHERE COALESCE(session_id, '') = CAST(?1 AS TEXT)
+  AND type = ?2
+  AND pr_url = ?3
+  AND dedupe_key = ''
   AND (status = 'unread' OR resolved_at IS NULL)
 LIMIT 1
 `
 
 type GetOpenNotificationByDedupeParams struct {
-	SessionID domain.SessionID
+	SessionID string
 	Type      domain.NotificationType
 	PRURL     string
 }
@@ -110,37 +275,53 @@ func (q *Queries) GetOpenNotificationByDedupe(ctx context.Context, arg GetOpenNo
 		&i.ID,
 		&i.SessionID,
 		&i.ProjectID,
+		&i.WorkflowRunID,
 		&i.PRURL,
+		&i.DedupeKey,
 		&i.Type,
 		&i.Title,
 		&i.Body,
 		&i.Status,
 		&i.CreatedAt,
 		&i.ResolvedAt,
+		&i.Recipient,
+		&i.TaskID,
+		&i.Severity,
+		&i.ReadAt,
+		&i.DeliveryState,
+		&i.Source,
+		&i.SourceEventID,
 	)
 	return i, err
 }
 
 const listNotificationsPage = `-- name: ListNotificationsPage :many
-SELECT id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+SELECT id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 FROM notifications
-WHERE (
-    CAST(?1 AS TEXT) = ''
-    OR created_at < ?2
-    OR (created_at = ?2 AND id < CAST(?1 AS TEXT))
+WHERE recipient = CAST(?1 AS TEXT)
+  AND (
+    CAST(?2 AS TEXT) = ''
+    OR created_at < ?3
+    OR (created_at = ?3 AND id < CAST(?2 AS TEXT))
   )
 ORDER BY created_at DESC, id DESC
-LIMIT ?3
+LIMIT ?4
 `
 
 type ListNotificationsPageParams struct {
+	Recipient       string
 	BeforeID        string
 	BeforeCreatedAt time.Time
 	PageLimit       int64
 }
 
 func (q *Queries) ListNotificationsPage(ctx context.Context, arg ListNotificationsPageParams) ([]Notification, error) {
-	rows, err := q.db.QueryContext(ctx, listNotificationsPage, arg.BeforeID, arg.BeforeCreatedAt, arg.PageLimit)
+	rows, err := q.db.QueryContext(ctx, listNotificationsPage,
+		arg.Recipient,
+		arg.BeforeID,
+		arg.BeforeCreatedAt,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -152,13 +333,101 @@ func (q *Queries) ListNotificationsPage(ctx context.Context, arg ListNotificatio
 			&i.ID,
 			&i.SessionID,
 			&i.ProjectID,
+			&i.WorkflowRunID,
 			&i.PRURL,
+			&i.DedupeKey,
 			&i.Type,
 			&i.Title,
 			&i.Body,
 			&i.Status,
 			&i.CreatedAt,
 			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNotificationsPageInProjects = `-- name: ListNotificationsPageInProjects :many
+SELECT id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
+FROM notifications
+WHERE recipient = CAST(?1 AS TEXT)
+  AND project_id IN (/*SLICE:project_ids*/?)
+  AND (
+    CAST(?3 AS TEXT) = ''
+    OR created_at < ?4
+    OR (created_at = ?4 AND id < CAST(?3 AS TEXT))
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT ?5
+`
+
+type ListNotificationsPageInProjectsParams struct {
+	Recipient       string
+	ProjectIds      []domain.ProjectID
+	BeforeID        string
+	BeforeCreatedAt time.Time
+	PageLimit       int64
+}
+
+func (q *Queries) ListNotificationsPageInProjects(ctx context.Context, arg ListNotificationsPageInProjectsParams) ([]Notification, error) {
+	query := listNotificationsPageInProjects
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.Recipient)
+	if len(arg.ProjectIds) > 0 {
+		for _, v := range arg.ProjectIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", strings.Repeat(",?", len(arg.ProjectIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", "NULL", 1)
+	}
+	queryParams = append(queryParams, arg.BeforeID)
+	queryParams = append(queryParams, arg.BeforeCreatedAt)
+	queryParams = append(queryParams, arg.PageLimit)
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Notification{}
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.ProjectID,
+			&i.WorkflowRunID,
+			&i.PRURL,
+			&i.DedupeKey,
+			&i.Type,
+			&i.Title,
+			&i.Body,
+			&i.Status,
+			&i.CreatedAt,
+			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
 		); err != nil {
 			return nil, err
 		}
@@ -174,7 +443,7 @@ func (q *Queries) ListNotificationsPage(ctx context.Context, arg ListNotificatio
 }
 
 const listOpenReadyToMergeNotifications = `-- name: ListOpenReadyToMergeNotifications :many
-SELECT id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+SELECT id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 FROM notifications
 WHERE type = 'ready_to_merge'
   AND resolved_at IS NULL
@@ -197,13 +466,22 @@ func (q *Queries) ListOpenReadyToMergeNotifications(ctx context.Context) ([]Noti
 			&i.ID,
 			&i.SessionID,
 			&i.ProjectID,
+			&i.WorkflowRunID,
 			&i.PRURL,
+			&i.DedupeKey,
 			&i.Type,
 			&i.Title,
 			&i.Body,
 			&i.Status,
 			&i.CreatedAt,
 			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
 		); err != nil {
 			return nil, err
 		}
@@ -219,26 +497,33 @@ func (q *Queries) ListOpenReadyToMergeNotifications(ctx context.Context) ([]Noti
 }
 
 const listUnreadNotificationsPage = `-- name: ListUnreadNotificationsPage :many
-SELECT id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+SELECT id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 FROM notifications
 WHERE status = 'unread'
+  AND recipient = CAST(?1 AS TEXT)
   AND (
-    CAST(?1 AS TEXT) = ''
-    OR created_at < ?2
-    OR (created_at = ?2 AND id < CAST(?1 AS TEXT))
+    CAST(?2 AS TEXT) = ''
+    OR created_at < ?3
+    OR (created_at = ?3 AND id < CAST(?2 AS TEXT))
   )
 ORDER BY created_at DESC, id DESC
-LIMIT ?3
+LIMIT ?4
 `
 
 type ListUnreadNotificationsPageParams struct {
+	Recipient       string
 	BeforeID        string
 	BeforeCreatedAt time.Time
 	PageLimit       int64
 }
 
 func (q *Queries) ListUnreadNotificationsPage(ctx context.Context, arg ListUnreadNotificationsPageParams) ([]Notification, error) {
-	rows, err := q.db.QueryContext(ctx, listUnreadNotificationsPage, arg.BeforeID, arg.BeforeCreatedAt, arg.PageLimit)
+	rows, err := q.db.QueryContext(ctx, listUnreadNotificationsPage,
+		arg.Recipient,
+		arg.BeforeID,
+		arg.BeforeCreatedAt,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -250,13 +535,115 @@ func (q *Queries) ListUnreadNotificationsPage(ctx context.Context, arg ListUnrea
 			&i.ID,
 			&i.SessionID,
 			&i.ProjectID,
+			&i.WorkflowRunID,
 			&i.PRURL,
+			&i.DedupeKey,
 			&i.Type,
 			&i.Title,
 			&i.Body,
 			&i.Status,
 			&i.CreatedAt,
 			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnreadNotificationsPageInProjects = `-- name: ListUnreadNotificationsPageInProjects :many
+
+SELECT id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
+FROM notifications
+WHERE status = 'unread'
+  AND recipient = CAST(?1 AS TEXT)
+  AND project_id IN (/*SLICE:project_ids*/?)
+  AND (
+    CAST(?3 AS TEXT) = ''
+    OR created_at < ?4
+    OR (created_at = ?4 AND id < CAST(?3 AS TEXT))
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT ?5
+`
+
+type ListUnreadNotificationsPageInProjectsParams struct {
+	Recipient       string
+	ProjectIds      []domain.ProjectID
+	BeforeID        string
+	BeforeCreatedAt time.Time
+	PageLimit       int64
+}
+
+// P4-C: the organization-scoped halves of the reads above.
+//
+// They are separate queries rather than an optional clause on the originals
+// because sqlc.slice() renders IN () for an empty set, which SQLite rejects --
+// so an "unscoped" caller would have to pass a dummy id and a flag to ignore
+// it, and a mistake in that flag would silently unscope a scoped read. Two
+// queries where the scoped one CANNOT be called without a project set is the
+// version that fails closed.
+//
+// A notification is scoped by its project because that is what it is about:
+// every row carries a NOT NULL project_id, and P4-C decided that a person who
+// may not see a project may not see anything AO says about it either.
+func (q *Queries) ListUnreadNotificationsPageInProjects(ctx context.Context, arg ListUnreadNotificationsPageInProjectsParams) ([]Notification, error) {
+	query := listUnreadNotificationsPageInProjects
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.Recipient)
+	if len(arg.ProjectIds) > 0 {
+		for _, v := range arg.ProjectIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", strings.Repeat(",?", len(arg.ProjectIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", "NULL", 1)
+	}
+	queryParams = append(queryParams, arg.BeforeID)
+	queryParams = append(queryParams, arg.BeforeCreatedAt)
+	queryParams = append(queryParams, arg.PageLimit)
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Notification{}
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.ProjectID,
+			&i.WorkflowRunID,
+			&i.PRURL,
+			&i.DedupeKey,
+			&i.Type,
+			&i.Title,
+			&i.Body,
+			&i.Status,
+			&i.CreatedAt,
+			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
 		); err != nil {
 			return nil, err
 		}
@@ -272,20 +659,22 @@ func (q *Queries) ListUnreadNotificationsPage(ctx context.Context, arg ListUnrea
 }
 
 const listUnresolvedNotificationsPage = `-- name: ListUnresolvedNotificationsPage :many
-SELECT id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+SELECT id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 FROM notifications
 WHERE resolved_at IS NULL
   AND type IN ('needs_input', 'ready_to_merge')
+  AND recipient = CAST(?1 AS TEXT)
   AND (
-    CAST(?1 AS TEXT) = ''
-    OR created_at < ?2
-    OR (created_at = ?2 AND id < CAST(?1 AS TEXT))
+    CAST(?2 AS TEXT) = ''
+    OR created_at < ?3
+    OR (created_at = ?3 AND id < CAST(?2 AS TEXT))
   )
 ORDER BY created_at DESC, id DESC
-LIMIT ?3
+LIMIT ?4
 `
 
 type ListUnresolvedNotificationsPageParams struct {
+	Recipient       string
 	BeforeID        string
 	BeforeCreatedAt time.Time
 	PageLimit       int64
@@ -295,7 +684,12 @@ type ListUnresolvedNotificationsPageParams struct {
 // away yet. Terminal facts (pr_merged, pr_closed_unmerged) describe something
 // that already happened, so they are unseen-only and never listed here.
 func (q *Queries) ListUnresolvedNotificationsPage(ctx context.Context, arg ListUnresolvedNotificationsPageParams) ([]Notification, error) {
-	rows, err := q.db.QueryContext(ctx, listUnresolvedNotificationsPage, arg.BeforeID, arg.BeforeCreatedAt, arg.PageLimit)
+	rows, err := q.db.QueryContext(ctx, listUnresolvedNotificationsPage,
+		arg.Recipient,
+		arg.BeforeID,
+		arg.BeforeCreatedAt,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -307,13 +701,103 @@ func (q *Queries) ListUnresolvedNotificationsPage(ctx context.Context, arg ListU
 			&i.ID,
 			&i.SessionID,
 			&i.ProjectID,
+			&i.WorkflowRunID,
 			&i.PRURL,
+			&i.DedupeKey,
 			&i.Type,
 			&i.Title,
 			&i.Body,
 			&i.Status,
 			&i.CreatedAt,
 			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnresolvedNotificationsPageInProjects = `-- name: ListUnresolvedNotificationsPageInProjects :many
+SELECT id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
+FROM notifications
+WHERE resolved_at IS NULL
+  AND type IN ('needs_input', 'ready_to_merge')
+  AND recipient = CAST(?1 AS TEXT)
+  AND project_id IN (/*SLICE:project_ids*/?)
+  AND (
+    CAST(?3 AS TEXT) = ''
+    OR created_at < ?4
+    OR (created_at = ?4 AND id < CAST(?3 AS TEXT))
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT ?5
+`
+
+type ListUnresolvedNotificationsPageInProjectsParams struct {
+	Recipient       string
+	ProjectIds      []domain.ProjectID
+	BeforeID        string
+	BeforeCreatedAt time.Time
+	PageLimit       int64
+}
+
+func (q *Queries) ListUnresolvedNotificationsPageInProjects(ctx context.Context, arg ListUnresolvedNotificationsPageInProjectsParams) ([]Notification, error) {
+	query := listUnresolvedNotificationsPageInProjects
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.Recipient)
+	if len(arg.ProjectIds) > 0 {
+		for _, v := range arg.ProjectIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", strings.Repeat(",?", len(arg.ProjectIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", "NULL", 1)
+	}
+	queryParams = append(queryParams, arg.BeforeID)
+	queryParams = append(queryParams, arg.BeforeCreatedAt)
+	queryParams = append(queryParams, arg.PageLimit)
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Notification{}
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.ProjectID,
+			&i.WorkflowRunID,
+			&i.PRURL,
+			&i.DedupeKey,
+			&i.Type,
+			&i.Title,
+			&i.Body,
+			&i.Status,
+			&i.CreatedAt,
+			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
 		); err != nil {
 			return nil, err
 		}
@@ -330,12 +814,52 @@ func (q *Queries) ListUnresolvedNotificationsPage(ctx context.Context, arg ListU
 
 const markAllNotificationsRead = `-- name: MarkAllNotificationsRead :execrows
 UPDATE notifications
-SET status = 'read'
+SET status = 'read', read_at = ?1
 WHERE status = 'unread'
+  AND recipient = CAST(?2 AS TEXT)
 `
 
-func (q *Queries) MarkAllNotificationsRead(ctx context.Context) (int64, error) {
-	result, err := q.db.ExecContext(ctx, markAllNotificationsRead)
+type MarkAllNotificationsReadParams struct {
+	ReadAt    sql.NullTime
+	Recipient string
+}
+
+func (q *Queries) MarkAllNotificationsRead(ctx context.Context, arg MarkAllNotificationsReadParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markAllNotificationsRead, arg.ReadAt, arg.Recipient)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const markAllNotificationsReadInProjects = `-- name: MarkAllNotificationsReadInProjects :execrows
+UPDATE notifications
+SET status = 'read', read_at = ?1
+WHERE status = 'unread'
+  AND recipient = CAST(?2 AS TEXT)
+  AND project_id IN (/*SLICE:project_ids*/?)
+`
+
+type MarkAllNotificationsReadInProjectsParams struct {
+	ReadAt     sql.NullTime
+	Recipient  string
+	ProjectIds []domain.ProjectID
+}
+
+func (q *Queries) MarkAllNotificationsReadInProjects(ctx context.Context, arg MarkAllNotificationsReadInProjectsParams) (int64, error) {
+	query := markAllNotificationsReadInProjects
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.ReadAt)
+	queryParams = append(queryParams, arg.Recipient)
+	if len(arg.ProjectIds) > 0 {
+		for _, v := range arg.ProjectIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", strings.Repeat(",?", len(arg.ProjectIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:project_ids*/?", "NULL", 1)
+	}
+	result, err := q.db.ExecContext(ctx, query, queryParams...)
 	if err != nil {
 		return 0, err
 	}
@@ -344,25 +868,43 @@ func (q *Queries) MarkAllNotificationsRead(ctx context.Context) (int64, error) {
 
 const markNotificationRead = `-- name: MarkNotificationRead :one
 UPDATE notifications
-SET status = 'read'
-WHERE id = ? AND status = 'unread'
-RETURNING id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+SET status = 'read', read_at = ?1
+WHERE id = ?2 AND status = 'unread'
+RETURNING id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 `
 
-func (q *Queries) MarkNotificationRead(ctx context.Context, id string) (Notification, error) {
-	row := q.db.QueryRowContext(ctx, markNotificationRead, id)
+type MarkNotificationReadParams struct {
+	ReadAt sql.NullTime
+	ID     string
+}
+
+// status and read_at carry the same fact and are always written together:
+// status = 'read' <=> read_at IS NOT NULL. Both updates are already idempotent
+// through the status = 'unread' guard, so replaying a mark-read is a no-op
+// rather than a second timestamp.
+func (q *Queries) MarkNotificationRead(ctx context.Context, arg MarkNotificationReadParams) (Notification, error) {
+	row := q.db.QueryRowContext(ctx, markNotificationRead, arg.ReadAt, arg.ID)
 	var i Notification
 	err := row.Scan(
 		&i.ID,
 		&i.SessionID,
 		&i.ProjectID,
+		&i.WorkflowRunID,
 		&i.PRURL,
+		&i.DedupeKey,
 		&i.Type,
 		&i.Title,
 		&i.Body,
 		&i.Status,
 		&i.CreatedAt,
 		&i.ResolvedAt,
+		&i.Recipient,
+		&i.TaskID,
+		&i.Severity,
+		&i.ReadAt,
+		&i.DeliveryState,
+		&i.Source,
+		&i.SourceEventID,
 	)
 	return i, err
 }
@@ -373,7 +915,7 @@ SET resolved_at = ?1
 WHERE pr_url = ?2
   AND type = ?3
   AND resolved_at IS NULL
-RETURNING id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+RETURNING id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 `
 
 type ResolvePRNotificationsByTypeParams struct {
@@ -395,13 +937,22 @@ func (q *Queries) ResolvePRNotificationsByType(ctx context.Context, arg ResolveP
 			&i.ID,
 			&i.SessionID,
 			&i.ProjectID,
+			&i.WorkflowRunID,
 			&i.PRURL,
+			&i.DedupeKey,
 			&i.Type,
 			&i.Title,
 			&i.Body,
 			&i.Status,
 			&i.CreatedAt,
 			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
 		); err != nil {
 			return nil, err
 		}
@@ -422,12 +973,12 @@ SET resolved_at = ?1
 WHERE session_id = ?2
   AND type = ?3
   AND resolved_at IS NULL
-RETURNING id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+RETURNING id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 `
 
 type ResolveSessionNotificationsByTypeParams struct {
 	ResolvedAt sql.NullTime
-	SessionID  domain.SessionID
+	SessionID  *domain.SessionID
 	Type       domain.NotificationType
 }
 
@@ -444,13 +995,22 @@ func (q *Queries) ResolveSessionNotificationsByType(ctx context.Context, arg Res
 			&i.ID,
 			&i.SessionID,
 			&i.ProjectID,
+			&i.WorkflowRunID,
 			&i.PRURL,
+			&i.DedupeKey,
 			&i.Type,
 			&i.Title,
 			&i.Body,
 			&i.Status,
 			&i.CreatedAt,
 			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
 		); err != nil {
 			return nil, err
 		}
@@ -475,7 +1035,7 @@ WHERE type = 'needs_input'
     WHERE is_terminated = TRUE
        OR activity_state NOT IN ('waiting_input', 'blocked')
   )
-RETURNING id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at
+RETURNING id, session_id, project_id, workflow_run_id, pr_url, dedupe_key, type, title, body, status, created_at, resolved_at, recipient, task_id, severity, read_at, delivery_state, source, source_event_id
 `
 
 // Restart reconciliation: a resolution transition observed while the daemon was
@@ -494,13 +1054,22 @@ func (q *Queries) ResolveStaleNeedsInputNotifications(ctx context.Context, resol
 			&i.ID,
 			&i.SessionID,
 			&i.ProjectID,
+			&i.WorkflowRunID,
 			&i.PRURL,
+			&i.DedupeKey,
 			&i.Type,
 			&i.Title,
 			&i.Body,
 			&i.Status,
 			&i.CreatedAt,
 			&i.ResolvedAt,
+			&i.Recipient,
+			&i.TaskID,
+			&i.Severity,
+			&i.ReadAt,
+			&i.DeliveryState,
+			&i.Source,
+			&i.SourceEventID,
 		); err != nil {
 			return nil, err
 		}

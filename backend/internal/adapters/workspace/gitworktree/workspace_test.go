@@ -990,10 +990,14 @@ func TestCreateRejectsInvalidBranchName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
+	// A REAL exit status, not a bare error: "git rejected the name" is a
+	// process that ran and exited non-zero, and that is now what distinguishes
+	// a verdict from a probe that merely stopped (see validateBranch).
+	rejected := exitStatusOne(t)
 	ws.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "check-ref-format") {
-			return nil, errors.New("fatal: 'bad branch!!' is not a valid branch name")
+			return nil, commandError{args: args, output: "fatal: 'bad branch!!' is not a valid branch name", err: rejected}
 		}
 		t.Fatalf("no git beyond check-ref-format should run for an invalid branch: %v", args)
 		return nil, nil

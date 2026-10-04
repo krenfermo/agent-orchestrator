@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { SessionsArchiveView, SessionsBoardGridView } from "@aoagents/product-ui";
-import { AlertTriangle, LayoutDashboard, Plus, RotateCw } from "lucide-react";
+import { AlertTriangle, LayoutDashboard, Plus, RotateCw, Workflow } from "lucide-react";
 import {
 	type WorkspaceSession,
 	hasConfiguredOrchestratorAgent,
@@ -31,10 +31,11 @@ import { OrchestratorActivityIndicator } from "./OrchestratorActivityIndicator";
 import { TopbarButton, TopbarKillError, topbarProjectLabelClass } from "./TopbarButton";
 import { isChatPreflightError, spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
-import { usesPreviewWorkspaceData } from "../lib/preview-mode";
+import { usesDemoWorkspaceData } from "../lib/preview-mode";
 import { isLinuxPlatform, isMacPlatform, usesBoardActionsInPanel } from "../lib/platform";
 import { cn } from "../lib/utils";
 import { useUiStore } from "../stores/ui-store";
+import { ProjectWorkflowLane } from "./ProjectWorkflowLane";
 import { RestoreUnavailableDialog } from "./RestoreUnavailableDialog";
 import { DaemonStartupLoader } from "./DaemonStartupLoader";
 import { useShellMaybe } from "../lib/shell-context";
@@ -128,7 +129,11 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 	// query has resolved, so the welcome never flashes over real data): the
 	// global board teaches the app before any project exists, and a fresh
 	// project board invites the first task instead of showing four zeros.
-	const isDaemonReady = usesPreviewWorkspaceData || (shell ? shell.daemonStatus.state === "ready" : true);
+	// Demo mode may pretend the daemon is ready; the browser build on its own
+	// may not. Reporting "ready" because Electron is absent is how a real
+	// outage renders as a working board.
+	const isDaemonReady =
+		usesDemoWorkspaceData() || (shell ? shell.daemonStatus.state === "ready" : true);
 	const daemonHasFailed = Boolean(shell?.daemonStatus.code);
 	const workspaceStartupState = shell?.workspaceStartupState ?? "ready";
 	const isLoaded = isDaemonReady && workspaceStartupState === "ready" && workspaceQuery.isSuccess;
@@ -258,17 +263,42 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 						<TopbarButton
 							aria-label={t("shell.newTask")}
 							className="topbar-control--labeled"
-							data-priority="primary"
+							data-priority="secondary"
 							disabled={isProjectRestarting}
 							onClick={() => projectId && requestNewTask(projectId)}
 							variant="accent"
 						>
 							<Plus className="size-icon-md" aria-hidden="true" />
-							<span data-compact-label>{t("newTask.task")}</span>
+							<span data-compact-label>{t("shell.newSessionCompact")}</span>
 						</TopbarButton>
 					</span>
 				</TooltipTrigger>
 				<TooltipContent side="bottom">{t("shell.newTask")}</TooltipContent>
+			</Tooltip>
+			{/* The board's only always-visible way to reach a real workflow run.
+			    ProjectWorkflowLane renders nothing until a run exists, so a project
+			    that has never had one offered no entry point at all -- and the
+			    button beside this one delegates a worker session, which is a
+			    different thing with a confusingly similar name. This navigates to
+			    the existing /workflows form with the project preselected; it does
+			    not duplicate that form, and creates nothing by itself. */}
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<span className="inline-flex">
+						<TopbarButton
+							aria-label={t("shell.newWorkflowRun")}
+							className="topbar-control--labeled"
+							data-priority="primary"
+							disabled={isProjectRestarting}
+							onClick={() => projectId && void navigate({ to: "/workflows", search: { projectId } })}
+							variant="primary"
+						>
+							<Workflow className="size-icon-md" aria-hidden="true" />
+							<span data-compact-label>{t("shell.newWorkflowRunCompact")}</span>
+						</TopbarButton>
+					</span>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">{t("shell.newWorkflowRun")}</TooltipContent>
 			</Tooltip>
 			<Tooltip>
 				<TooltipTrigger asChild>
@@ -342,7 +372,12 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 				</div>
 			) : null}
 
-			<div className="min-h-0 flex-1 overflow-hidden">
+			{/* Checkpoint 8P-E.12: overflow-y-auto, not overflow-hidden. The board
+			    now stacks a workflow lane above the session grid, so its content can
+			    exceed the viewport; min-h-0 is what lets this flex child actually
+			    shrink and scroll instead of overflowing its parent silently. */}
+			<div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+				{projectId ? <ProjectWorkflowLane projectId={projectId} /> : null}
 				{projectId && health.state !== "ok" ? (
 					<div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
 						<AlertTriangle className="size-icon-base shrink-0 text-warning" aria-hidden="true" />
@@ -367,6 +402,9 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 						isSpawning={isSpawning}
 						isProjectRestarting={isProjectRestarting}
 						onNewTask={() => projectId && requestNewTask(projectId)}
+						onNewWorkflowRun={
+							projectId ? () => void navigate({ to: "/workflows", search: { projectId } }) : undefined
+						}
 						onOpenOrchestrator={() => void openOrchestrator()}
 						onOpenOrchestratorAsTui={canCreateAsTui ? () => void openOrchestrator("tui") : undefined}
 						spawnError={visibleSpawnError}

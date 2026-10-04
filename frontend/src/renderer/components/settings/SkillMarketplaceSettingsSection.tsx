@@ -1,0 +1,700 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CircleAlert, Loader2, Search } from "lucide-react";
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { components } from "../../../api/schema";
+import { apiClient, apiErrorMessage } from "../../lib/api-client";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { SettingsSection } from "./SettingsSection";
+
+type Release = components["schemas"]["SkillReleaseView"];
+type SearchResponse = components["schemas"]["SkillMarketplaceSearchResponse"];
+type ReleaseDetail = components["schemas"]["SkillReleaseDetailResponse"];
+
+/**
+ * Settings → Skills → Marketplace. Search configured registries, read what a
+ * release asks for, and install one exact version.
+ *
+ * Four things here are deliberate.
+ *
+ * **There is no Run button, and there is no route that would give it one.**
+ * Installing moves a package exactly one step, from available to installed.
+ * Reaching a project is a separate act under a different permission, and
+ * reaching a container needs an approved image on top of that. The screen says
+ * so before the install and again after it, using the daemon's own sentences.
+ *
+ * **The trust state comes from the daemon, with its explanation.** A search
+ * fetched nothing, so every result reads "unverified" — and this component
+ * cannot decide otherwise, because it has no rule for it. Nothing here ever
+ * renders the word "trusted": AO verifies no publisher signature, and the
+ * highest state it can reach is "verified", meaning the bytes matched the
+ * digests the release named. The sentence that says exactly that is served, not
+ * written here, so this screen cannot describe the trust model more
+ * optimistically than the thing enforcing it.
+ *
+ * **A registry AO could not read is shown, not swallowed.** An empty result
+ * list and an unreadable registry are different answers, and only one means
+ * somebody should go and look.
+ *
+ * **A revoked release stays on screen, greyed and uninstallable.** Hiding it
+ * would answer "where did that version go" with silence.
+ *
+ * **An external row says where it came from and what that is worth.** A
+ * release from a git forge carries the repository, the tag it was found under
+ * and -- the part that matters -- the immutable COMMIT it resolved to, short
+ * for recognition and full for comparison. Before installing one, the daemon's
+ * own sentence says that hosting on GitHub is not a statement about the
+ * publisher; this screen renders it and cannot soften it. A tag that has moved
+ * since AO recorded it is marked permanently, and installing through it takes
+ * an explicit decision that this screen asks for in words.
+ *
+ * **Freshness is read, never inferred.** The daemon says, per registry and per
+ * row, whether what is on screen came from the registry just now or from AO's
+ * cache because the registry could not be reached — and this component renders
+ * that field. It does not deduce "everything is current" from an empty note
+ * list, which is exactly the deduction that let cached results pass for live
+ * ones. Freshness is also kept apart from trust: a cached row is not less
+ * trusted, it is less current, and the two badges never merge.
+ */
+export function SkillMarketplaceSettingsSection() {
+	const { t } = useTranslation();
+	const queryClient = useQueryClient();
+	const [query, setQuery] = useState("");
+	// The text actually searched, committed on submit. Typing must not fire a
+	// request per keystroke at a registry.
+	const [submitted, setSubmitted] = useState("");
+	const [includeRevoked, setIncludeRevoked] = useState(false);
+	// Filters. They narrow what is SHOWN and never what was asked for: the
+	// daemon already decided which registries this caller may see, and a
+	// filter that changed that would be an access rule written in React.
+	const [sourceRegistry, setSourceRegistry] = useState("");
+	const [capability, setCapability] = useState("");
+	const [onlyInstalled, setOnlyInstalled] = useState(false);
+	const [onlyVerified, setOnlyVerified] = useState(false);
+	const [onlyCompatible, setOnlyCompatible] = useState(false);
+	const [openRelease, setOpenRelease] = useState<{ registryId: string; skillId: string } | null>(null);
+	// Which moved tags this person has explicitly decided to take, keyed by
+	// registry/skill/version. It is per session and deliberately not persisted:
+	// acknowledging a move is a decision about ONE install, and a remembered
+	// one would quietly cover the next move too.
+	const [acknowledged, setAcknowledged] = useState<Record<string, boolean>>({});
+	const [error, setError] = useState<string | null>(null);
+	const [installed, setInstalled] = useState<string | null>(null);
+
+	// Registries are read so the source filter can name them, and so a registry
+	// that answered nothing can still be offered as a choice.
+	const registries = useQuery({
+		queryKey: ["skills", "registries"],
+		queryFn: async () => {
+			const { data, error: apiError } = await apiClient.GET("/api/v1/skills/registries", {
+				credentials: "include",
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+	});
+
+	const searchKey = [
+		"skills",
+		"marketplace",
+		submitted,
+		includeRevoked,
+		sourceRegistry,
+		capability,
+	] as const;
+	const search = useQuery<SearchResponse>({
+		queryKey: searchKey,
+		queryFn: async () => {
+			const { data, error: apiError } = await apiClient.GET("/api/v1/skills/marketplace", {
+				credentials: "include",
+				params: {
+					query: {
+						...(submitted ? { q: submitted } : {}),
+						...(includeRevoked ? { includeRevoked: true } : {}),
+						// Source and capability narrow the QUERY, because the
+						// daemon can answer them without sending everything
+						// first. The rest are display filters below.
+						...(sourceRegistry ? { registryId: sourceRegistry } : {}),
+						...(capability ? { capability } : {}),
+					},
+				},
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+	});
+
+	const detail = useQuery<ReleaseDetail>({
+		queryKey: ["skills", "marketplace", "release", openRelease?.registryId, openRelease?.skillId],
+		enabled: openRelease !== null,
+		queryFn: async () => {
+			if (!openRelease) throw new Error("no release selected");
+			const { data, error: apiError } = await apiClient.GET(
+				"/api/v1/skills/marketplace/{registryId}/{skillId}",
+				{
+					credentials: "include",
+					params: { path: { registryId: openRelease.registryId, skillId: openRelease.skillId } },
+				},
+			);
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+	});
+
+	const install = useMutation({
+		mutationFn: async (release: Release) => {
+			const { data, error: apiError } = await apiClient.POST("/api/v1/skills/marketplace/install", {
+				credentials: "include",
+				// The exact version, always. There is no "latest" install target,
+				// and this component never picks one.
+				body: {
+					registryId: release.registryId,
+					skillId: release.skillId,
+					version: release.version,
+					asUpdate: release.updateAvailable,
+					// The move is acknowledged only when this person ticked the
+					// box for THIS release. It acknowledges the move and skips
+					// no check: the digests, the manifest, the capabilities,
+					// the signature and the revocations all still run against
+					// the new commit.
+					...(acknowledged[releaseKey(release)] ? { acknowledgeMovedTag: true } : {}),
+					// Offline installs are a separate, explicit act with their
+					// own button; the ordinary install never quietly falls back
+					// to cached bytes when a registry cannot be reached.
+					allowOfflineFromCache: false,
+				},
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		onSuccess: (data) => {
+			setError(null);
+			// The daemon's own sentence, not one written here. Where the bytes
+			// came from is appended, because "verified" says nothing about
+			// whether AO went to the network for them.
+			setInstalled(
+				data.fromCache
+					? `${data.nextStep} ${t("settings.skillMarketplace.fromCache")}`
+					: data.nextStep,
+			);
+			void queryClient.invalidateQueries({ queryKey: ["skills"] });
+		},
+		onError: (err: Error) => {
+			setInstalled(null);
+			setError(err.message);
+		},
+	});
+
+	const allReleases = search.data?.releases ?? [];
+	const notes = search.data?.notes ?? [];
+	// The freshness of every registry the daemon consulted, and its own verdict
+	// on whether any of them was unreachable. Both are fields; neither is
+	// worked out here.
+	const sources = search.data?.sources ?? [];
+	const offline = search.data?.offline ?? false;
+	const offlineSources = sources.filter((source) => source.offline);
+	const registryRows = registries.data?.registries ?? [];
+	// Every capability any result asks for, so the filter offers the ones that
+	// exist here rather than AO's whole table.
+	const capabilities = Array.from(
+		new Set(allReleases.flatMap((release) => release.requestedCapabilities)),
+	).sort();
+	// Display filters. An unverified release is never HIDDEN by default —
+	// hiding it would answer "what else is out there" with a curated lie — but
+	// somebody narrowing deliberately is a different thing.
+	const releases = allReleases.filter((release) => {
+		if (onlyInstalled && !release.installed) return false;
+		if (onlyVerified && release.trust !== "verified") return false;
+		if (onlyCompatible && release.compatibility !== "compatible") return false;
+		return true;
+	});
+
+	return (
+		<SettingsSection title={t("settings.skillMarketplace.title")} data-testid="skill-marketplace-settings">
+			<p className="text-caption text-settings-muted">{t("settings.skillMarketplace.intro")}</p>
+
+			<form
+				className="flex items-center gap-2"
+				onSubmit={(e) => {
+					e.preventDefault();
+					setSubmitted(query.trim());
+				}}
+			>
+				<Input
+					value={query}
+					placeholder={t("settings.skillMarketplace.searchPlaceholder")}
+					aria-label={t("settings.skillMarketplace.searchLabel")}
+					onChange={(e) => setQuery(e.target.value)}
+				/>
+				<Button type="submit" variant="secondary" size="sm" disabled={search.isFetching}>
+					{search.isFetching ? (
+						<Loader2 className="size-3 animate-spin" aria-hidden="true" />
+					) : (
+						<Search className="size-3" aria-hidden="true" />
+					)}
+					{t("settings.skillMarketplace.searchAction")}
+				</Button>
+			</form>
+			<div className="flex flex-wrap items-center gap-3" data-testid="skill-marketplace-filters">
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					{t("settings.skillMarketplace.sourceFilter")}
+					<select
+						className="rounded-(--radius-settings-dialog-sm) border border-[var(--color-border-settings-input)] bg-transparent px-2 py-1"
+						value={sourceRegistry}
+						aria-label={t("settings.skillMarketplace.sourceFilter")}
+						onChange={(e) => setSourceRegistry(e.target.value)}
+					>
+						<option value="">{t("settings.skillMarketplace.sourceAll")}</option>
+						{registryRows.map((reg) => (
+							<option key={reg.id} value={reg.id}>
+								{reg.displayName}
+							</option>
+						))}
+					</select>
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					{t("settings.skillMarketplace.capabilityFilter")}
+					<select
+						className="rounded-(--radius-settings-dialog-sm) border border-[var(--color-border-settings-input)] bg-transparent px-2 py-1"
+						value={capability}
+						aria-label={t("settings.skillMarketplace.capabilityFilter")}
+						onChange={(e) => setCapability(e.target.value)}
+					>
+						<option value="">{t("settings.skillMarketplace.capabilityAny")}</option>
+						{capabilities.map((name) => (
+							<option key={name} value={name}>
+								{name}
+							</option>
+						))}
+					</select>
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					<input
+						type="checkbox"
+						checked={includeRevoked}
+						onChange={(e) => setIncludeRevoked(e.target.checked)}
+					/>
+					{t("settings.skillMarketplace.includeRevoked")}
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					<input
+						type="checkbox"
+						checked={onlyInstalled}
+						onChange={(e) => setOnlyInstalled(e.target.checked)}
+					/>
+					{t("settings.skillMarketplace.filterInstalled")}
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					<input
+						type="checkbox"
+						checked={onlyVerified}
+						onChange={(e) => setOnlyVerified(e.target.checked)}
+					/>
+					{t("settings.skillMarketplace.filterVerified")}
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					<input
+						type="checkbox"
+						checked={onlyCompatible}
+						onChange={(e) => setOnlyCompatible(e.target.checked)}
+					/>
+					{t("settings.skillMarketplace.filterCompatible")}
+				</label>
+			</div>
+
+			{error ? (
+				<p className="flex items-start gap-2 text-caption text-error" role="alert">
+					<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+					{error}
+				</p>
+			) : null}
+			{installed ? (
+				<p className="text-caption text-settings-muted" data-testid="skill-marketplace-installed">
+					{installed}
+				</p>
+			) : null}
+
+			{search.isError ? (
+				<p className="text-caption text-error">{(search.error as Error).message}</p>
+			) : null}
+
+			{/* Cached metadata is never presented as current. The banner is driven
+			    by the daemon's own `offline` field and its own sentence, so this
+			    screen cannot describe the state more comfortably than the thing
+			    that measured it. */}
+			{offline ? (
+				<div
+					className="flex flex-col gap-1 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+					data-testid="skill-marketplace-offline"
+					role="status"
+				>
+					<p className="text-caption font-medium text-warning">
+						{t("settings.skillMarketplace.offlineTitle")}
+					</p>
+					{offlineSources.map((source) => (
+						<p className="text-caption text-warning" key={source.registryId}>
+							{t("settings.skillMarketplace.offlineBody", {
+								registry: source.registryName || source.registryId,
+							})}
+							{source.fetchedAt
+								? ` ${t("settings.skillMarketplace.metadataAsOf", {
+										time: formatAsOf(source.fetchedAt),
+									})}`
+								: null}
+						</p>
+					))}
+					{/* The daemon's sentence, including the part that says the
+					    install path is unaffected. */}
+					{search.data?.freshnessNotice ? (
+						<p className="text-caption text-settings-muted">{search.data.freshnessNotice}</p>
+					) : null}
+				</div>
+			) : null}
+
+			{/* An unreadable registry is NAMED. "This registry has nothing" is a
+			    materially more comfortable fact than the truth.
+
+			    Whether it was UNREACHABLE is the daemon's field, not a guess
+			    from the wording of the reason: a registry whose configuration
+			    could not be opened and one the network could not carry a request
+			    to want different fixes. The offline banner above covers the
+			    second; this names both. */}
+			{notes.map((note) => (
+				<div key={note.registryId} data-testid="skill-registry-note">
+					{note.metadataOffline ? (
+						<p className="text-caption font-medium text-warning">
+							{t("settings.skillMarketplace.offlineTitle")}
+						</p>
+					) : null}
+					<p className="text-caption text-warning">
+						{t("settings.skillMarketplace.registryUnreadable", {
+							registry: note.registryId,
+							reason: note.reason,
+						})}
+					</p>
+				</div>
+			))}
+
+			{!search.isLoading && releases.length === 0 ? (
+				<p className="text-caption text-settings-muted">
+					{t("settings.skillMarketplace.empty")}
+				</p>
+			) : null}
+
+			<ul className="flex flex-col gap-2" data-testid="skill-marketplace-results">
+				{releases.map((release) => (
+					<li
+						className="flex flex-col gap-1 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+						key={`${release.registryId}/${release.skillId}/${release.version}`}
+					>
+						<div className="flex flex-wrap items-center gap-2">
+							<span className="text-caption font-medium">{release.name}</span>
+							<span className="text-caption text-settings-muted">
+								{release.skillId}@{release.version}
+							</span>
+							{/* Installed / Not installed, always stated. */}
+							<Badge variant={release.installed ? "success" : "outline"}>
+								{release.installed
+									? t("settings.skillMarketplace.installed")
+									: t("settings.skillMarketplace.notInstalled")}
+							</Badge>
+							{release.updateAvailable ? (
+								<Badge variant="accent">
+									{t("settings.skillMarketplace.updateAvailable", {
+										version: release.installedVersion,
+									})}
+								</Badge>
+							) : null}
+							{release.revoked ? (
+								<Badge variant="error">{t("settings.skillMarketplace.revoked")}</Badge>
+							) : null}
+							{release.deprecated ? (
+								<Badge variant="warning">{t("settings.skillMarketplace.deprecated")}</Badge>
+							) : null}
+						</div>
+						<p className="text-caption text-settings-muted">{release.description}</p>
+						<p className="text-caption text-settings-muted">
+							{t("settings.skillMarketplace.origin", {
+								publisher: release.publisher,
+								registry: release.registryName || release.registryId,
+							})}
+						</p>
+						{/* The source registry, always named. With more than one
+						    configured, "where did this come from" is the first
+						    question a reader has. */}
+						<p className="text-caption text-settings-muted" data-testid="skill-release-source">
+							{t("settings.skillMarketplace.registrySource", {
+								registry: release.registryName || release.registryId,
+							})}
+						</p>
+						<p className="text-caption text-settings-muted">
+							{t("settings.skillMarketplace.capabilities", {
+								list: release.requestedCapabilities.join(", "),
+							})}
+						</p>
+						<div className="flex flex-wrap items-center gap-2 text-caption text-settings-muted">
+							<Badge variant="outline">
+								{t(`settings.skillMarketplace.trust.${release.trust}`)}
+							</Badge>
+							<Badge variant={release.compatibility === "compatible" ? "outline" : "warning"}>
+								{t(`settings.skillMarketplace.compatibility.${release.compatibility}`)}
+							</Badge>
+							{/* A row AO could not confirm carries its own badge, beside
+							    trust and never inside it. */}
+							{release.metadataOffline ? (
+								<Badge variant="warning" data-testid="skill-release-freshness">
+									{t(`settings.skillMarketplace.freshness.${release.metadataFreshness}`)}
+								</Badge>
+							) : null}
+							<span>{t(`settings.project.skills.risk.${release.riskLevel}`)}</span>
+						</div>
+						{/* "As of" is the only honest way to show something that may
+						    have changed since AO last looked. */}
+						{release.metadataOffline && release.metadataAsOf ? (
+							<p className="text-caption text-warning" data-testid="skill-release-as-of">
+								{t("settings.skillMarketplace.metadataAsOf", {
+									time: formatAsOf(release.metadataAsOf),
+								})}
+							</p>
+						) : null}
+						{/* Where the bytes actually are, when they are on a forge.
+						    The repository and the tag are how a person recognises a
+						    release; the commit is what AO installs, and both spellings
+						    are shown because recognising and comparing are different
+						    jobs. */}
+						{release.sourceProvider ? (
+							<div
+								className="flex flex-col gap-0.5"
+								data-testid={`skill-release-source-${release.skillId}`}
+							>
+								<p className="break-all text-caption text-settings-muted">
+									{t("settings.skillMarketplace.sourceRepository", {
+										provider: release.sourceProvider,
+										repository: `${release.sourceOwner}/${release.sourceRepository}`,
+										visibility: t(
+											release.sourceVisibility === "private"
+												? "settings.skillMarketplace.sourcePrivate"
+												: "settings.skillMarketplace.sourcePublic",
+										),
+									})}
+								</p>
+								{release.sourceTag ? (
+									<p className="break-all text-caption text-settings-muted">
+										{t("settings.skillMarketplace.sourceTag", { tag: release.sourceTag })}
+									</p>
+								) : null}
+								<p className="break-all font-mono text-caption text-settings-muted">
+									{t("settings.skillMarketplace.sourceCommit", {
+										short: release.sourceShortCommit ?? "",
+										full: release.sourceCommit ?? "",
+									})}
+								</p>
+								{release.sourcePath ? (
+									<p className="break-all text-caption text-settings-muted">
+										{t("settings.skillMarketplace.sourcePath", { path: release.sourcePath })}
+									</p>
+								) : null}
+							</div>
+						) : null}
+						{/* A tag that moved is stated in full, with both commits. It
+						    is never merged into the trust badge: a moved tag does not
+						    make a release less verified, it makes the name it was
+						    found under mean something else. */}
+						{release.tagMoved ? (
+							<p className="break-all text-caption text-error" data-testid="skill-release-tag-moved">
+								{release.tagMovedExplanation}
+							</p>
+						) : null}
+						{release.externalRevoked ? (
+							<p
+								className="text-caption text-error"
+								data-testid="skill-release-external-revoked"
+							>
+								{release.externalRevokedReason}
+							</p>
+						) : null}
+						{/* Served by the daemon, so this screen cannot describe the
+						    trust model more optimistically than the thing enforcing it. */}
+						<p className="text-caption text-settings-muted">{release.trustExplanation}</p>
+						{/* A listing has checked NO signature, exactly as it has hashed
+						    no bytes. So this says the material is there and which key
+						    claims it -- never that it verifies. Verification happens at
+						    install and is shown on the installed row. */}
+						{release.signed ? (
+							<p className="text-caption text-settings-muted" data-testid="skill-release-signed">
+								{t("settings.skillMarketplace.signedBy", {
+									keyId: release.signatureKeyId || "-",
+									scheme: release.signatureScheme || "-",
+								})}
+							</p>
+						) : null}
+						{release.revoked ? (
+							<p className="text-caption text-error">
+								{t("settings.skillMarketplace.revokedReason", {
+									reason: release.revocationReason,
+								})}
+							</p>
+						) : null}
+
+						{/* The explicit decision, asked for in words. It is offered
+						    only when there is actually a move to acknowledge, so it is
+						    never a checkbox somebody learns to tick by habit. */}
+						{release.tagMoved && !release.installed ? (
+							<label
+								className="flex items-start gap-2 text-caption text-warning"
+								data-testid="skill-release-acknowledge-moved"
+							>
+								<input
+									type="checkbox"
+									checked={acknowledged[releaseKey(release)] ?? false}
+									onChange={(e) =>
+										setAcknowledged((current) => ({
+											...current,
+											[releaseKey(release)]: e.target.checked,
+										}))
+									}
+								/>
+								{t("settings.skillMarketplace.acknowledgeMovedTag")}
+							</label>
+						) : null}
+
+						<div className="flex flex-wrap items-center gap-2">
+							<Button
+								variant="secondary"
+								size="sm"
+								onClick={() =>
+									setOpenRelease(
+										openRelease?.skillId === release.skillId &&
+											openRelease?.registryId === release.registryId
+											? null
+											: { registryId: release.registryId, skillId: release.skillId },
+									)
+								}
+							>
+								{t("settings.skillMarketplace.viewVersions")}
+							</Button>
+							<Button
+								variant="primary"
+								size="sm"
+								// A revoked release can never be installed, and the
+								// daemon refuses it too; disabling here is convenience,
+								// not the control.
+								disabled={
+									release.revoked ||
+									release.installed ||
+									release.externalRevoked ||
+									// A moved tag is installable only after somebody says
+									// so. The daemon refuses it too; this is convenience,
+									// not the control.
+									(release.tagMoved && !acknowledged[releaseKey(release)]) ||
+									install.isPending
+								}
+								onClick={() => install.mutate(release)}
+							>
+								{install.isPending
+									? t("settings.skillMarketplace.installing")
+									: release.updateAvailable
+										? t("settings.skillMarketplace.updateAction", { version: release.version })
+										: t("settings.skillMarketplace.installAction", { version: release.version })}
+							</Button>
+						</div>
+						{/* Shown BEFORE the install, every time. */}
+						{!release.installed && !release.revoked ? (
+							<p className="text-caption text-settings-muted" data-testid="skill-install-notice">
+								{search.data?.installNotice}
+							</p>
+						) : null}
+						{/* And, for a forge, the sentence that must never be left
+						    implicit. It is the daemon's, because the comfortable
+						    rewrite -- "from GitHub" -- reads as an endorsement to
+						    almost everybody. */}
+						{release.sourceProvider && !release.installed ? (
+							<p className="text-caption text-warning" data-testid="skill-external-notice">
+								{search.data?.externalNotice}
+							</p>
+						) : null}
+
+						{openRelease?.skillId === release.skillId &&
+						openRelease?.registryId === release.registryId ? (
+							<div className="flex flex-col gap-1 border-t border-[var(--color-border-settings-input)] pt-2">
+								{detail.isLoading ? (
+									<p className="text-caption text-settings-muted">
+										{t("settings.skillMarketplace.loadingVersions")}
+									</p>
+								) : null}
+								{detail.isError ? (
+									<p className="text-caption text-error">{(detail.error as Error).message}</p>
+								) : null}
+								<p className="break-all text-caption text-settings-muted">
+									{t("settings.skillMarketplace.digests", {
+										manifest: release.manifestDigest,
+										artifact: release.artifactDigest,
+									})}
+								</p>
+								{/* A declared signature is a CLAIM. A line reading
+								    "signature: cosign" alone would look like a check. */}
+								{release.signatureFormat ? (
+									<p className="text-caption text-warning">
+										{t("settings.skillMarketplace.signatureClaimed", {
+											format: release.signatureFormat,
+										})}
+									</p>
+								) : null}
+								{release.executionModes.map((mode) => (
+									<p className="text-caption text-settings-muted" key={mode.id}>
+										{t("settings.skillMarketplace.mode", {
+											id: mode.id,
+											risk: mode.riskLevel,
+											list: mode.capabilities.join(", "),
+										})}
+									</p>
+								))}
+								<ul className="flex flex-col gap-1" data-testid="skill-release-versions">
+									{(detail.data?.versions ?? []).map((version) => (
+										<li className="flex items-center gap-2 text-caption" key={version.version}>
+											<span>{version.version}</span>
+											{version.installed ? (
+												<Badge variant="success">
+													{t("settings.skillMarketplace.installed")}
+												</Badge>
+											) : null}
+											{/* A withdrawn version stays listed: the version
+											    list is where somebody finds out it is gone. */}
+											{version.revoked ? (
+												<Badge variant="error">
+													{t("settings.skillMarketplace.revoked")}
+												</Badge>
+											) : null}
+											{version.deprecated ? (
+												<Badge variant="warning">
+													{t("settings.skillMarketplace.deprecated")}
+												</Badge>
+											) : null}
+										</li>
+									))}
+								</ul>
+							</div>
+						) : null}
+					</li>
+				))}
+			</ul>
+		</SettingsSection>
+	);
+}
+
+/**
+ * formatAsOf renders the moment the registry last answered, in the viewer's
+ * locale. A raw RFC 3339 string is a timestamp somebody has to decode; the
+ * point of the line is that a reader sees at a glance how old this is.
+ */
+function releaseKey(release: Release): string {
+	return `${release.registryId}/${release.skillId}/${release.version}`;
+}
+
+function formatAsOf(iso: string): string {
+	const at = new Date(iso);
+	if (Number.isNaN(at.getTime())) return iso;
+	return at.toLocaleString();
+}

@@ -26,7 +26,7 @@ import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import { useWorkspaceQuery, workspaceQueryKey, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
 import { apiClient, apiErrorCode, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { refreshDaemonStatus } from "../lib/daemon-status";
-import { usesPreviewWorkspaceData } from "../lib/preview-mode";
+import { usesDemoWorkspaceData } from "../lib/preview-mode";
 import { addRendererExceptionStep, captureRendererEvent, captureRendererException } from "../lib/telemetry";
 import { ShellProvider } from "../lib/shell-context";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
@@ -43,6 +43,8 @@ import {
 	hidesShellTopbar,
 } from "../lib/platform";
 import { useUiStore } from "../stores/ui-store";
+import { authPermitsProtectedData, useAuthStore } from "../stores/auth-store";
+import { ShellAuthGate } from "../components/ShellAuthGate";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
 import { sessionIsActive, toProjectKind, type WorkspaceSummary } from "../types/workspace";
 import type { components } from "../../api/schema";
@@ -54,11 +56,29 @@ export const Route = createFileRoute("/_shell")({
 	// nav target is warm before the click.
 	loader: async ({ context }) => {
 		await refreshDaemonStatus().catch(() => undefined);
-		if (!usesPreviewWorkspaceData && !hasTrustedApiBaseUrl()) return;
+		if (usesDemoWorkspaceData()) return context.queryClient.ensureQueryData(workspaceQueryOptions);
+		if (!hasTrustedApiBaseUrl()) return;
+		// Awaited, not fired and forgotten. Prefetching the workspace list is a
+		// protected request, and issuing it before the daemon has said who is
+		// asking is how a signed-out renderer came to be polling /projects and
+		// /sessions for 401s. The gate below renders on the same answer, so this
+		// costs one round trip that the shell needs regardless.
+		await useAuthStore.getState().refreshForDaemonReady();
+		if (!authPermitsProtectedData(useAuthStore.getState().status)) return;
 		return context.queryClient.ensureQueryData(workspaceQueryOptions);
 	},
-	component: ShellLayout,
+	component: ShellRoute,
 });
+
+// The gate owns the decision; ShellLayout below is only ever mounted for an
+// identity that may load the application's data.
+function ShellRoute() {
+	return (
+		<ShellAuthGate>
+			<ShellLayout />
+		</ShellAuthGate>
+	);
+}
 
 function errorMessage(error: unknown) {
 	return error instanceof Error ? error.message : "Could not load projects";
@@ -97,6 +117,15 @@ function ShellLayout() {
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = workspaceQuery.data ?? [];
 	const daemonStatus = useDaemonStatus(queryClient);
+	// The gate resolved an identity to get here. This re-resolves it on every
+	// not-ready -> ready transition after that, keyed on the port so a daemon
+	// restart (possibly on a new port, possibly having lost the session) re-runs
+	// it too. No polling — the status hook already owns that.
+	const readyDaemonPort = daemonStatus.state === "ready" ? daemonStatus.port : undefined;
+	useEffect(() => {
+		if (!readyDaemonPort) return;
+		void useAuthStore.getState().refreshForDaemonReady();
+	}, [readyDaemonPort]);
 	const [workspaceStartupState, setWorkspaceStartupState] = useState<"loading" | "ready" | "error">("loading");
 	const workspaceStartupBaselineRef = useRef(0);
 	const agentCatalogPortRef = useRef<number | undefined>(undefined);
@@ -199,7 +228,7 @@ function ShellLayout() {
 	const setOrchestratorStartupError = useUiStore((state) => state.setOrchestratorStartupError);
 	const replacementErrorProjectId = Object.keys(orchestratorReplacementErrors)[0] ?? null;
 	const isStartupLoading =
-		!usesPreviewWorkspaceData &&
+		!usesDemoWorkspaceData() &&
 		!daemonStatus.code &&
 		(daemonStatus.state !== "ready" || workspaceStartupState === "loading");
 	const cancelSidebarPeekClose = useCallback(() => {
@@ -425,7 +454,10 @@ function ShellLayout() {
 	// between projects and the first-run import flow.
 	useEffect(() => {
 		let active = true;
-		if (usesPreviewWorkspaceData) {
+		// Demo mode may declare the shell ready without a daemon. The browser
+		// build on its own may not: skipping the readiness machinery because
+		// Electron is absent is how a real outage renders as a working board.
+		if (usesDemoWorkspaceData()) {
 			workspaceStartupBaselineRef.current = 0;
 			setWorkspaceStartupState("ready");
 			return () => {
@@ -463,7 +495,7 @@ function ShellLayout() {
 	// shell without requiring a daemon restart or port change.
 	useEffect(() => {
 		if (
-			usesPreviewWorkspaceData ||
+			usesDemoWorkspaceData() ||
 			daemonStatus.state !== "ready" ||
 			workspaceStartupState === "ready" ||
 			!workspaceQuery.isSuccess ||

@@ -3,11 +3,14 @@
 package httpd
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,9 +18,12 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/authz"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
 )
@@ -54,12 +60,29 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.Use(requestLogger(log, deps.Telemetry))
 	r.Use(recoverTelemetry(log, deps.Telemetry))
 	r.Use(corsMiddleware(cfg.AllowedOrigins))
+	// Checkpoint 8P-B.2: identity resolves BEFORE the preview-origin check
+	// (order matters -- swapped from an earlier pre-identity placement) so
+	// PreviewOrigin can enforce session ownership instead of running as a
+	// structurally pre-auth bypass. identity.Middleware only reads/attaches
+	// identity to the request context; it never rejects or redirects, so
+	// this reorder has no effect on any other route.
+	r.Use(identity.Middleware(deps.Auth, deps.AgentAuth, cfg.TrustedLocalMode, bootstrapAdminResolver(deps.Auth)))
+	// P4-B: one authorization resolution per request. Without this every
+	// permission check re-reads the caller's role, teams and grants; with it a
+	// handler that asks five questions pays for one lookup. It attaches an
+	// empty cache and nothing else -- it never resolves, never rejects, and
+	// never touches a request that asks no authorization question at all.
+	r.Use(authzCacheMiddleware)
 	r.Use(previewOriginMiddleware(api.sessions))
 
 	// JSON envelopes for unmatched routes / methods — chi's defaults are
 	// text/plain, which would break consumers that parse every response as
 	// the locked APIError shape.
-	r.NotFound(notFoundJSON)
+	if cfg.WebRoot == "" {
+		r.NotFound(notFoundJSON)
+	} else {
+		r.NotFound(spaFallback(cfg.WebRoot))
+	}
 	r.MethodNotAllowed(methodNotAllowedJSON)
 
 	mountHealth(r, cfg)
@@ -71,6 +94,30 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	api.Register(r)
 
 	return r
+}
+
+// bootstrapAdminResolver adapts authsvc.Manager.BootstrapAdmin to the plain
+// func the identity middleware and AuthController.me both use to synthesize
+// trusted-local mode's identity. A nil mgr (Auth never wired) always reports
+// no user, matching every other optional-surface convention.
+func bootstrapAdminResolver(mgr authIdentitySource) func(ctx context.Context) (domain.User, bool) {
+	return func(ctx context.Context) (domain.User, bool) {
+		if mgr == nil {
+			return domain.User{}, false
+		}
+		u, ok, err := mgr.BootstrapAdmin(ctx)
+		if err != nil {
+			return domain.User{}, false
+		}
+		return u, ok
+	}
+}
+
+// authIdentitySource is the subset of authsvc.Manager bootstrapAdminResolver
+// needs, kept narrow so this file doesn't have to import the service package
+// just for one method.
+type authIdentitySource interface {
+	BootstrapAdmin(ctx context.Context) (domain.User, bool, error)
 }
 
 func previewOriginMiddleware(sessions *controllers.SessionsController) func(http.Handler) http.Handler {
@@ -93,6 +140,38 @@ func mountHealth(r chi.Router, cfg config.Config) {
 	r.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		envelope.WriteJSON(w, http.StatusOK, daemonProbePayload("ready", cfg))
 	})
+}
+
+// spaFallback serves compiled renderer files and falls back to index.html for
+// extensionless browser routes. It only runs after chi failed to match a real
+// daemon route, and explicitly preserves JSON 404s for API/internal surfaces.
+func spaFallback(root string) http.HandlerFunc {
+	root = filepath.Clean(root)
+	files := http.FileServer(http.Dir(root))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			methodNotAllowedJSON(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/internal/") || r.URL.Path == "/mux" {
+			notFoundJSON(w, r)
+			return
+		}
+
+		rel := strings.TrimPrefix(filepath.Clean("/"+r.URL.Path), string(filepath.Separator))
+		candidate := filepath.Join(root, rel)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			files.ServeHTTP(w, r)
+			return
+		}
+		// Missing assets are genuine 404s; only application routes receive the
+		// SPA document. This avoids returning HTML for a mistyped JS/CSS URL.
+		if filepath.Ext(rel) != "" {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(root, "index.html"))
+	}
 }
 
 // mountControl registers the loopback daemon-control endpoints. /shutdown is
@@ -319,9 +398,10 @@ func localControlRequest(r *http.Request) bool {
 // daemon is ready to answer requests.
 func daemonProbePayload(status string, cfg config.Config) map[string]any {
 	payload := map[string]any{
-		"status":  status,
-		"service": daemonmeta.ServiceName,
-		"pid":     os.Getpid(),
+		"status":            status,
+		"service":           daemonmeta.ServiceName,
+		"pid":               os.Getpid(),
+		"frontendAvailable": webFrontendAvailable(cfg.WebRoot),
 	}
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		payload["executablePath"] = exe
@@ -332,6 +412,18 @@ func daemonProbePayload(status string, cfg config.Config) map[string]any {
 	if cfg.StartupWorkingDirectory != "" {
 		payload["startupWorkingDirectory"] = cfg.StartupWorkingDirectory
 	}
+	// P9: identity, so a caller can prove the daemon answering is the one a
+	// run-file names and that it serves the data dir the caller means. Identities
+	// and a path only -- no token, no environment.
+	if cfg.DaemonInstanceID != "" {
+		payload["instanceId"] = cfg.DaemonInstanceID
+	}
+	if cfg.InstallationID != "" {
+		payload["installationId"] = cfg.InstallationID
+	}
+	if cfg.DataDir != "" {
+		payload["dataDir"] = cfg.DataDir
+	}
 	// AO_APPIMAGE is set by the Electron app at spawn time when it runs from an
 	// AppImage. The value is the stable outer .AppImage file path, which the
 	// app's daemon identity check compares instead of the transient
@@ -340,4 +432,20 @@ func daemonProbePayload(status string, cfg config.Config) map[string]any {
 		payload["appImagePath"] = appImage
 	}
 	return payload
+}
+
+func webFrontendAvailable(root string) bool {
+	if root == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(root, "index.html"))
+	return err == nil && !info.IsDir()
+}
+
+// authzCacheMiddleware installs the per-request authorization memo (see
+// service/authz.WithCache).
+func authzCacheMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(authz.WithCache(r.Context())))
+	})
 }

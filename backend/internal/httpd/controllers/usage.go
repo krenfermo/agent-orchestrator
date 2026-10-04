@@ -9,17 +9,31 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 )
 
 // UsageSummaryService is the controller-facing compact usage read contract.
 type UsageSummaryService interface {
-	ListCompact(context.Context, domain.ProjectID) ([]domain.CompactSessionUsage, error)
+	ListCompact(context.Context, domain.ProjectID, *domain.UserID) ([]domain.CompactSessionUsage, error)
 	Get(context.Context, domain.SessionID) (domain.SessionUsageSummary, error)
 }
 
 // UsageController owns compact dashboard usage routes.
 type UsageController struct {
 	Svc UsageSummaryService
+	// Ownership and TrustedLocal back Checkpoint 8P-B.2's session
+	// ownership scoping for the per-session usage read below, and
+	// Checkpoint 8P-C's scoping of listSessions to the caller's own
+	// sessions (never another user's usage/session summaries).
+	Ownership    SessionOwnershipStore
+	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it replaces the 8P-A/8P-B
+	// owner-equality checks with the canonical permission evaluator; a zero
+	// Guard preserves the pre-P4-B behavior exactly.
+	Guard Guard
+	// AgentAuthority is P5-A phase 2C's central fence; see
+	// AgentAuthorityChecker. Nil leaves behaviour unchanged.
+	AgentAuthority AgentAuthorityChecker
 }
 
 // Register mounts usage routes on the supplied router.
@@ -33,7 +47,13 @@ func (c *UsageController) listSessions(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/usage/sessions")
 		return
 	}
-	items, err := c.Svc.ListCompact(r.Context(), domain.ProjectID(r.URL.Query().Get("projectId")))
+	var ownerUserID *domain.UserID
+	if !c.TrustedLocal && c.Ownership != nil {
+		if user, ok := identity.FromContext(r.Context()); ok {
+			ownerUserID = &user.ID
+		}
+	}
+	items, err := c.Svc.ListCompact(r.Context(), domain.ProjectID(r.URL.Query().Get("projectId")), ownerUserID)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
@@ -50,6 +70,9 @@ func (c *UsageController) listSessions(w http.ResponseWriter, r *http.Request) {
 func (c *UsageController) getSession(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/usage/sessions/{sessionId}")
+		return
+	}
+	if !AuthorizeSessionAccess(w, r, SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard, AgentAuthority: c.AgentAuthority}, sessionID(r)) {
 		return
 	}
 	summary, err := c.Svc.Get(r.Context(), domain.SessionID(chi.URLParam(r, "sessionId")))

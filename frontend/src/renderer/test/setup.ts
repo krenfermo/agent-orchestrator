@@ -96,6 +96,7 @@ if (typeof window !== "undefined") {
 			readText: async () => "",
 		},
 		daemon: {
+			getEnvInfo: async () => ({ isDevSandbox: false, dataDir: null, runFile: null }),
 			getStatus: async () => ({ state: "stopped" }),
 			start: async () => ({ state: "starting" }),
 			stop: async () => ({ state: "stopped" }),
@@ -224,6 +225,9 @@ if (typeof window !== "undefined") {
 		featureBuilds: {
 			list: async () => [],
 			getActive: async () => null,
+		},
+		auth: {
+			ssoSignIn: async () => ({ status: "cancelled" }) as const,
 		},
 		cloud: {
 			getSession: async () => null,

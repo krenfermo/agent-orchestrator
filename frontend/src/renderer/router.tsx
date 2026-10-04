@@ -1,12 +1,14 @@
-import { createHashHistory, createRouter } from "@tanstack/react-router";
+import { createBrowserHistory, createHashHistory, createRouter } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
 import { routeTree } from "./routeTree.gen";
+import { isDesktopMode } from "./lib/platform-adapter";
 
-// Hash history is required for Electron's file:// renderer origin — browser
-// history would break on hard reload since there is no server to serve paths.
+// Electron keeps hash history because its app:// protocol owns renderer file
+// resolution. Headless web uses browser history so copy/paste and hard refresh
+// work at ordinary paths; the Go server provides the corresponding SPA fallback.
 export function createAppRouter(queryClient: QueryClient) {
 	return createRouter({
-		history: createHashHistory(),
+		history: isDesktopMode() ? createHashHistory() : createBrowserHistory(),
 		routeTree,
 		context: { queryClient },
 		defaultPreload: "intent",

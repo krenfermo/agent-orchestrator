@@ -307,8 +307,17 @@ func TestFullLifecycleSpawnToTermination(t *testing.T) {
 		t.Fatalf("timeline script failed: %v\n%s", err, out)
 	}
 	elapsed := time.Since(start)
-	if elapsed > 5*time.Second {
-		t.Fatalf("sped-up run took %v, want well under a second (speedup not applied?)", elapsed)
+	// The question this asks is "were the sleeps compressed", so the bound is
+	// derived from what the timeline sleeps UNSPEEDED rather than from a flat
+	// wall-clock budget. The rest of the elapsed time is seven process spawns
+	// for the hook shim, which is the machine's business: on a host busy enough
+	// to make fork+exec take seconds, a fixed one-second budget fails a test
+	// about the speedup for a reason that has nothing to do with it. An ignored
+	// speedup still cannot hide -- it sleeps the full unspeeded timeline, and
+	// spawn overhead only pushes it further over.
+	unspeeded := time.Duration(timelinePhases * basePhaseSeconds * float64(time.Second))
+	if elapsed >= unspeeded {
+		t.Fatalf("sped-up run took %v, want less than the unspeeded %v (speedup not applied?)", elapsed, unspeeded)
 	}
 
 	raw, err := os.ReadFile(hookLog) //nolint:gosec // path is under the test's own TempDir

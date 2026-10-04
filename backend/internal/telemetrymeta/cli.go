@@ -59,6 +59,22 @@ func CLIActorType(actorType, commandPath string) string {
 	if normalized == "ao hooks" {
 		return "agent"
 	}
+	// P5-A phase 2B: `ao work report` is issued BY the worker agent AO
+	// launched, never by a person at a shell — the same shape as `ao hooks`,
+	// and the reason it is classified here rather than added to a
+	// legacyActorless* map. Those maps exist for commands that predate the
+	// actor-type mechanism; a command added today should say what it is.
+	if normalized == "ao work" || normalized == "ao work report" {
+		return "agent"
+	}
+	// The skill catalog is administration: a person installs a package,
+	// activates it on a project, or asks what a run would need. No agent
+	// issues these -- an agent credential holds neither settings.manage nor
+	// project.manage -- so classifying them as anything but "user" would
+	// mislabel every row.
+	if normalized == "ao skills" || strings.HasPrefix(normalized, "ao skills ") {
+		return "user"
+	}
 	return "system"
 }
 
@@ -67,14 +83,21 @@ var legacyActorlessSystemCLICommands = map[string]struct{}{
 	"ao agent-process supervise": {},
 	"ao completion":              {},
 	"ao daemon":                  {},
+	"ao server":                  {},
 	"ao help":                    {},
 	"ao pty-host":                {},
 	"ao start":                   {},
 }
 
 var legacyActorlessUserCLICommands = map[string]struct{}{
+	"ao admin":                  {},
+	"ao admin reset-password":   {},
 	"ao agent":                  {},
 	"ao agent ls":               {},
+	"ao auth":                   {},
+	"ao auth login":             {},
+	"ao auth logout":            {},
+	"ao auth status":            {},
 	"ao browser":                {},
 	"ao browser check":          {},
 	"ao browser click":          {},
@@ -118,40 +141,132 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	"ao browser uncheck":        {},
 	"ao browser unhighlight":    {},
 	"ao browser wait":           {},
+	"ao decision":               {},
+	"ao decision resolve":       {},
 	"ao dev":                    {},
 	"ao dev import-projects":    {},
 	"ao doctor":                 {},
 	"ao import":                 {},
-	"ao launch":                 {},
-	"ao orchestrator":           {},
-	"ao orchestrator done":      {},
-	"ao pr":                     {},
-	"ao pr merge":               {},
-	"ao pr resolve-comments":    {},
-	"ao preview":                {},
-	"ao preview clear":          {},
-	"ao preview start":          {},
-	"ao preview status":         {},
-	"ao preview stop":           {},
-	"ao project":                {},
-	"ao project add":            {},
-	"ao project rm":             {},
-	"ao project set-config":     {},
-	"ao review":                 {},
-	"ao review cancel":          {},
-	"ao review ls":              {},
-	"ao review submit":          {},
-	"ao review trigger":         {},
-	"ao send":                   {},
-	"ao session":                {},
-	"ao session claim-pr":       {},
-	"ao session cleanup":        {},
-	"ao session kill":           {},
-	"ao session rename":         {},
-	"ao session restore":        {},
-	"ao spawn":                  {},
-	"ao stop":                   {},
-	"ao version":                {},
+	// Backup and restore are operator activity by the same definition (P10):
+	// run by a person, a restore only with the daemon stopped, never automatic.
+	"ao backup":         {},
+	"ao backup create":  {},
+	"ao backup list":    {},
+	"ao backup prune":   {},
+	"ao backup recover": {},
+	"ao backup restore": {},
+	"ao backup verify":  {},
+	"ao restore":        {},
+	// The cache-lifetime backfill is operator activity by the same definition
+	// `ao import` is: it runs with the daemon stopped, rewrites the ledger, and
+	// exists precisely because nothing automatic is allowed to take it.
+	"ao usage":                    {},
+	"ao usage backfill-cache-ttl": {},
+	// Reading the shadow economic cohort back is operator activity too, for a
+	// milder version of the same reason: it opens the database directly (read
+	// only, no migration, no writable connection) because the question "what
+	// would the gate have recommended" is usually asked after the run, when
+	// there is no daemon left to ask.
+	"ao usage compaction-verdicts": {},
+	// And the evidence inventory beside it: same read-only shape, same reason.
+	"ao usage compaction-observations": {},
+	"ao incident":                      {},
+	"ao incident diagnose":             {},
+	"ao incident submit":               {},
+	// The P0-B operator recoveries. They are user activity by definition: each
+	// one exists precisely because nothing automatic is allowed to take it.
+	"ao workflow":                           {},
+	"ao workflow recover":                   {},
+	"ao workflow recover plan":              {},
+	"ao workflow recover review-provenance": {},
+	// P1-B's recovery surface. Same argument: every one of these is a person
+	// deciding what happens to a stopped run.
+	"ao workflow recover status": {},
+	// P9: reading why AO adopted, refused or relaunched a worker is a person asking.
+	"ao workflow recover ownership": {},
+	"ao workflow resume":            {},
+	"ao workflow repair":            {},
+	"ao workflow plan":              {},
+	"ao workflow plan reuse":        {},
+	"ao workflow plan regenerate":   {},
+	// P1-C's operator commands. Inspecting capacity and sweeping runtimes are
+	// both things a person does deliberately.
+	"ao capacity":        {},
+	"ao capacity status": {},
+	// P2-A project memory: operator commands, so a person is the actor.
+	"ao memory":              {},
+	"ao memory status":       {},
+	"ao memory inspect":      {},
+	"ao memory rebuild":      {},
+	"ao memory invalidate":   {},
+	"ao memory validate":     {},
+	"ao memory provenance":   {},
+	"ao memory prune":        {},
+	"ao memory report":       {},
+	"ao memory knowledge":    {},
+	"ao memory decisions":    {},
+	"ao memory risks":        {},
+	"ao memory task":         {},
+	"ao memory context":      {},
+	"ao memory graph":        {},
+	"ao memory graph status": {},
+	"ao memory graph sync":   {},
+	"ao memory graph query":  {},
+	"ao runtime":             {},
+	"ao runtime gc":          {},
+	// P1-D: the placement surface. Same sweep, same proofs, named for the
+	// checkouts an operator is thinking about.
+	"ao worktree":      {},
+	"ao worktree list": {},
+	"ao worktree gc":   {},
+	// P1-D's read-only diagnosis commands. A person asking "where is this run's
+	// work happening and why has it not started" is user activity: neither
+	// command runs on a timer and neither is invoked by AO itself.
+	"ao workflow placement": {},
+	// P1-E's placement WRITE commands. A person choosing a placement, or
+	// authorizing one generation to replace another, is the clearest case of
+	// user activity there is: neither runs on a timer and AO never invokes
+	// either itself.
+	"ao workflow placement override":   {},
+	"ao workflow placement transition": {},
+	// P3-E's cost questions. "What did this run spend" and "what has this
+	// project spent this week" are asked by a person looking at a bill, never
+	// by AO on a timer -- nothing in the daemon invokes either.
+	"ao workflow usage":       {},
+	"ao workflow exploration": {},
+	"ao project usage":        {},
+	"ao provider":             {},
+	"ao provider attempts":    {},
+	"ao launch":               {},
+	"ao orchestrator":         {},
+	"ao orchestrator done":    {},
+	"ao pr":                   {},
+	"ao pr merge":             {},
+	"ao pr resolve-comments":  {},
+	"ao preview":              {},
+	"ao preview clear":        {},
+	"ao preview start":        {},
+	"ao preview status":       {},
+	"ao preview stop":         {},
+	"ao project":              {},
+	"ao project add":          {},
+	"ao project rm":           {},
+	"ao project set-config":   {},
+	"ao review":               {},
+	"ao review cancel":        {},
+	"ao review ls":            {},
+	"ao review submit":        {},
+	"ao review trigger":       {},
+	"ao send":                 {},
+	"ao session":              {},
+	"ao session claim-pr":     {},
+	"ao session cleanup":      {},
+	"ao session kill":         {},
+	"ao session rename":       {},
+	"ao session restore":      {},
+	"ao spawn":                {},
+	"ao stop":                 {},
+	"ao version":              {},
 
 	// Legacy commands observed in PostHog's current billing-period data.
 	"ao handoff":                   {},

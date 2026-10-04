@@ -1,9 +1,12 @@
 -- name: UpsertUsageBinding :one
+-- Keyed on the SUBJECT, so a reviewer pane, a resolver pane and a planner
+-- invocation each bind independently -- and a re-discovered one binds to the row
+-- it already had rather than minting a second.
 INSERT INTO usage_bindings (
-    session_id, harness, native_root_id, initial_model_id, state,
-    last_error_code, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (session_id, harness, native_root_id) DO UPDATE SET
+    subject_kind, subject_id, session_id, harness, native_root_id,
+    initial_model_id, state, last_error_code, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (subject_kind, subject_id, harness, native_root_id) DO UPDATE SET
     initial_model_id = CASE
         WHEN excluded.initial_model_id <> '' THEN excluded.initial_model_id
         ELSE usage_bindings.initial_model_id
@@ -25,10 +28,36 @@ ON CONFLICT (session_id, harness, native_root_id) DO UPDATE SET
     updated_at = excluded.updated_at
 RETURNING *;
 
--- name: GetUsageBindingBySessionHarnessRoot :one
+-- name: GetUsageBindingBySubjectHarnessRoot :one
 SELECT *
 FROM usage_bindings
-WHERE session_id = ? AND harness = ? AND native_root_id = ?;
+WHERE subject_kind = ? AND subject_id = ? AND harness = ? AND native_root_id = ?;
+
+-- name: ListUsageBindingsForSubject :many
+SELECT *
+FROM usage_bindings
+WHERE subject_kind = ? AND subject_id = ?
+ORDER BY updated_at, id;
+
+-- name: FinalizeUsageBindingsForSubject :execrows
+-- Finalizes ONLY this subject's bindings.
+--
+-- The session-scoped finalizer below must never be reachable from a pane's own
+-- lifecycle: a reviewer's `session-end` used to be able to finalize the WORKER's
+-- bindings, because the only finalizer keyed on the session the pane happened to
+-- be associated with. Panes finalize themselves through this statement and
+-- touch nothing else.
+UPDATE usage_bindings
+SET state = 'finalizing',
+    last_error_code = CASE
+        WHEN usage_bindings.last_error_code = 'codex_source_budget_exceeded'
+        THEN usage_bindings.last_error_code
+        ELSE ''
+    END,
+    updated_at = sqlc.arg(finalized_at)
+WHERE subject_kind = sqlc.arg(subject_kind)
+  AND subject_id = sqlc.arg(subject_id)
+  AND state NOT IN ('complete', 'partial');
 
 -- name: ListUsageBindingsForSession :many
 SELECT *
@@ -85,8 +114,8 @@ ORDER BY generation, id;
 SELECT us.*
 FROM usage_sources us
 JOIN usage_bindings ub ON ub.id = us.binding_id
-JOIN sessions s ON s.id = ub.session_id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+LEFT JOIN sessions s ON s.id = ub.session_id
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND NOT (
       us.state = 'complete'
       AND us.last_error_code = 'artifact_replaced'
@@ -105,8 +134,8 @@ ORDER BY us.artifact_path, us.generation, us.id;
 SELECT CAST(EXISTS (
     SELECT 1
     FROM usage_bindings ub
-    JOIN sessions s ON s.id = ub.session_id
-    WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+    LEFT JOIN sessions s ON s.id = ub.session_id
+    WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
       AND ub.harness IN ('claude-code', 'codex')
       AND (
           ub.state = 'discovering'
@@ -137,7 +166,7 @@ SELECT CAST(EXISTS (
 -- name: ListLatestRetiredCodexReplacementClaimsByPath :many
 SELECT us.*
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
+LEFT JOIN sessions s ON s.id = ub.session_id
 JOIN usage_sources us ON us.id = (
     SELECT latest.id
     FROM usage_sources latest
@@ -149,14 +178,14 @@ JOIN usage_sources us ON us.id = (
 WHERE us.kind = 'codex_rollout'
   AND us.state = 'complete'
   AND us.last_error_code = 'artifact_replaced'
-  AND (s.is_terminated = 0 OR ub.state = 'finalizing')
+  AND (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
 ORDER BY us.binding_id, us.generation, us.id;
 
 -- name: ListUsageDiscoveryBindings :many
 SELECT ub.*
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+LEFT JOIN sessions s ON s.id = ub.session_id
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND ub.harness IN ('claude-code', 'codex')
   AND (
       ub.state IN ('discovering', 'active', 'finalizing')
@@ -194,9 +223,9 @@ LIMIT ?;
 -- name: ListUsageBindingsForCodexParent :many
 SELECT DISTINCT ub.*
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
+LEFT JOIN sessions s ON s.id = ub.session_id
 JOIN usage_sources parent ON parent.binding_id = ub.id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND ub.harness = 'codex'
   AND (
       ub.state IN ('discovering', 'active', 'finalizing')
@@ -233,6 +262,8 @@ SELECT
     us.next_retry_at,
     us.last_error_code AS source_last_error_code,
     us.updated_at AS source_updated_at,
+    ub.subject_kind,
+    ub.subject_id,
     ub.session_id,
     ub.harness,
     ub.native_root_id,
@@ -336,7 +367,8 @@ WHERE id = sqlc.arg(usage_binding_id)
 -- name: GetModelUsageEventByKey :one
 SELECT
     model_id, input_tokens, uncached_input_tokens,
-    cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens
+    cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
+    turn_class, cache_write_5m_tokens, cache_write_1h_tokens
 FROM model_usage_events
 WHERE binding_id = ? AND source_event_key = ?;
 
@@ -344,8 +376,31 @@ WHERE binding_id = ? AND source_event_key = ?;
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    source_event_key
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    source_event_key, turn_class, observed_at, recorded_at,
+    -- NULL when the transcript reported no lifetime for this call's cache
+    -- creation. Never 0: zero would assert the writes were short-lived.
+    cache_write_5m_tokens, cache_write_1h_tokens
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- name: RefineModelUsageEventTurnClass :exec
+-- Raise an already-stored event's turn class as later records of the SAME
+-- billed message arrive.
+--
+-- One assistant message routinely spans several transcript records, and the
+-- tool call is often not in the first of them. The event is inserted on the
+-- first record (that is what keeps exactly-once anchored to the message id and
+-- not to a record offset), so its class starts as whatever that record could
+-- imply and is raised here when a later record of the same message shows the
+-- turn did more.
+--
+-- This is a CLASS-ONLY write. No token column appears in it, so a refinement
+-- can never move a number; and it is guarded on turn_class <> the new value so
+-- a re-read of an unchanged transcript writes nothing at all.
+UPDATE model_usage_events
+SET turn_class = sqlc.arg(turn_class)
+WHERE binding_id = sqlc.arg(binding_id)
+  AND source_event_key = sqlc.arg(source_event_key)
+  AND turn_class <> sqlc.arg(turn_class);
 
 -- name: TouchUsageBinding :exec
 UPDATE usage_bindings SET updated_at = ? WHERE id = ?;
@@ -358,6 +413,25 @@ SELECT
     CAST(SUM(mue.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(mue.cache_read_tokens) AS INTEGER) AS cache_read_tokens,
     CAST(SUM(mue.cache_write_tokens) AS INTEGER) AS cache_write_tokens,
+    -- The three terms below PARTITION cache_write_tokens: every token is in
+    -- exactly one of them, whatever shape the row is in. Both columns must be
+    -- present for either lifetime to be believed -- a half-written pair is
+    -- unreachable through the write path today and is exactly what a future
+    -- backfill could produce, and counting its one known column would both
+    -- overstate that lifetime and double count the row against the unknown
+    -- bucket.
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NOT NULL
+                            AND mue.cache_write_1h_tokens IS NOT NULL
+                           THEN mue.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NOT NULL
+                            AND mue.cache_write_1h_tokens IS NOT NULL
+                           THEN mue.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NULL
+                             OR mue.cache_write_1h_tokens IS NULL
+                           THEN mue.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_unknown_ttl_tokens,
     CAST(SUM(mue.output_tokens) AS INTEGER) AS output_tokens,
     CAST(COALESCE(SUM(mue.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
     COUNT(mue.reasoning_tokens) AS reasoning_event_count
@@ -367,12 +441,45 @@ WHERE ub.session_id = ?
 GROUP BY ub.harness, mue.model_id
 ORDER BY SUM(mue.input_tokens + mue.output_tokens) DESC, ub.harness, mue.model_id;
 
+-- name: ListCompactedSessionsForSummaryPrior :many
+-- The sessions that have ever replaced their own conversation, newest state last.
+--
+-- This is the candidate list for the cross-session summary-cost prior, and the
+-- filter is what keeps it affordable: a prior about compaction is only ever about
+-- sessions that compacted, and those are a handful even on a corpus of hundreds.
+-- Everything else -- what the harness charged itself, what AO attributed, how the
+-- residual divides -- is already folded per session by CompactionReader, so this
+-- read deliberately returns ONE COLUMN and leaves the arithmetic where it lives.
+--
+-- compaction_count is the counter the parser keeps beside the bounded boundary
+-- list, so a session whose detail list overflowed still qualifies.
+--
+-- Sources with no session, invalid state, or no harness rollup are excluded here
+-- rather than in Go: a session with no rollup cannot contribute a summary cost at
+-- all, and fetching it only to discard it is a row this read does not need to
+-- carry. The LIMIT is a ceiling, not a page: a cohort large enough to hit it has
+-- long since earned a folded aggregate of its own.
+SELECT DISTINCT ub.session_id AS session_id
+FROM usage_sources us
+JOIN usage_bindings ub ON ub.id = us.binding_id
+WHERE ub.session_id IS NOT NULL
+  AND json_valid(us.parser_state_json)
+  AND COALESCE(CAST(json_extract(us.parser_state_json, '$.claude.compaction_count') AS INTEGER), 0) > 0
+  AND json_extract(us.parser_state_json, '$.claude.harness_totals') IS NOT NULL
+ORDER BY ub.session_id
+LIMIT ?;
+
 -- name: GetUsageSessionIncomplete :one
 SELECT CAST(COALESCE((
     SELECT incomplete FROM usage_session_integrity WHERE session_id = ?
 ), 0) AS INTEGER);
 
 -- name: ListCompactSessionUsage :many
+-- owner_user_id (Checkpoint 8P-C): NULL means "no ownership scoping"
+-- (trusted-local / pre-8P-B session); a non-NULL value restricts results to
+-- exactly that owner's own sessions, via the same sessions.owner_user_id
+-- column session/project/workflow ownership already scope by -- so User A's
+-- usage query structurally cannot return User B's rows.
 SELECT
     ub.session_id,
     CAST(SUM(mue.input_tokens + mue.output_tokens) AS INTEGER) AS total_tokens,
@@ -382,5 +489,51 @@ JOIN usage_bindings ub ON ub.id = mue.binding_id
 JOIN sessions s ON s.id = ub.session_id
 LEFT JOIN usage_session_integrity integrity ON integrity.session_id = ub.session_id
 WHERE (sqlc.arg(project_id) = '' OR s.project_id = sqlc.arg(project_id))
+  AND (sqlc.narg(owner_user_id) IS NULL OR s.owner_user_id = sqlc.narg(owner_user_id))
 GROUP BY ub.session_id
 ORDER BY s.project_id, s.num;
+
+-- name: ListUsageSourceIDsForCacheTTLBackfill :many
+-- Every transcript source that could still carry a cache lifetime for a row
+-- that does not have one.
+--
+-- Scoped by BINDING and not by the source that happens to own the events. A
+-- ledger row is identified by (binding, source_event_key), so a source can
+-- describe rows another source owns -- which is exactly what a REPLACED
+-- artifact leaves behind: the old source keeps the rows and loses its file,
+-- the new one has the file. Selecting on us.id = mue.usage_source_id would
+-- skip the source that can still read them.
+--
+-- Ordered by id so two runs visit them in the same order and a partial run
+-- resumes deterministically.
+SELECT DISTINCT us.id AS source_id
+FROM usage_sources us
+JOIN model_usage_events mue ON mue.binding_id = us.binding_id
+WHERE mue.cache_write_5m_tokens IS NULL
+   OR mue.cache_write_1h_tokens IS NULL
+ORDER BY us.id;
+
+-- name: BackfillModelUsageEventCacheTTL :execrows
+-- Move ONE event from lifetime-unknown to lifetime-observed.
+--
+-- The WHERE clause is the whole safety of this operation and it is deliberately
+-- over-specified. The two IS NULL predicates make the update monotonic: a row
+-- can only ever go from unobserved to observed, never from one observation to
+-- another, so re-running the backfill is a no-op and a half-written pair is
+-- left alone rather than completed from one side. The token vector is repeated
+-- in the predicate so a row that changed between the read and the write -- an
+-- ingest that landed in between, a transcript that no longer describes this
+-- event -- updates nothing instead of writing a lifetime onto a different call.
+UPDATE model_usage_events
+SET cache_write_5m_tokens = ?,
+    cache_write_1h_tokens = ?
+WHERE binding_id = ?
+  AND source_event_key = ?
+  AND cache_write_5m_tokens IS NULL
+  AND cache_write_1h_tokens IS NULL
+  AND model_id = ?
+  AND input_tokens = ?
+  AND uncached_input_tokens = ?
+  AND cache_read_tokens = ?
+  AND cache_write_tokens = ?
+  AND output_tokens = ?;

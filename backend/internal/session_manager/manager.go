@@ -142,6 +142,16 @@ const (
 	EnvSupervisedProcess = "AO_SUPERVISED_PROCESS"
 	// EnvDataDir tells a spawned agent's AO hook commands where the store lives.
 	EnvDataDir = "AO_DATA_DIR"
+	// EnvRunFile tells a spawned agent's `ao hooks`/`ao review` callbacks
+	// where running.json lives. Checkpoint 8P-D.2: resolveRunFilePath and
+	// resolveDataDir are independent env lookups (AO_RUN_FILE vs
+	// AO_DATA_DIR) — a daemon started with an explicit AO_RUN_FILE override
+	// that doesn't sit under AO_DATA_DIR left every hook callback unable to
+	// find the daemon (falling back to the default ~/.ao/running.json,
+	// which the running daemon never wrote), silently stalling activity
+	// tracking for the whole session. Exporting the daemon's own resolved
+	// run-file path removes the guesswork.
+	EnvRunFile = "AO_RUN_FILE"
 	// EnvBrowserCapability proves ownership of the session's browser target.
 	EnvBrowserCapability = "AO_BROWSER_CAPABILITY"
 	// EnvBrowserRuntimeToken must never be inherited by a worker. It authenticates
@@ -152,10 +162,13 @@ const (
 	EnvBrowserRuntimeTokenStdin = "AO_BROWSER_RUNTIME_TOKEN_STDIN" //nolint:gosec // Environment variable name, not a credential.
 )
 
-// hookBinaryName is the executable name the workspace hook commands invoke:
-// every agent adapter installs a bare `ao hooks <agent> <event>`. The session
-// PATH pin (hookPATH) only works when the daemon's own executable carries this
-// name, since prepending its directory must change what `ao` resolves to.
+// hookBinaryName is the executable name a bare `ao` must resolve to inside a
+// session: the adapters whose hooks are shell scripts, and the reviewer prompts,
+// still invoke `ao ...` by name. (Adapters on the shared hooks-file installer
+// record an absolute AO launcher path instead and no longer depend on PATH —
+// see hookutil.EnsureLauncher.) The session PATH pin (HookPATH) only works when
+// the daemon's own executable carries this name, since prepending its directory
+// must change what `ao` resolves to.
 const hookBinaryName = "ao"
 
 type lifecycleRecorder interface {
@@ -271,15 +284,28 @@ type Store interface {
 	// Kill and successful RestoreAll must remove these rows to prevent
 	// resurrecting sessions the user intentionally terminated.
 	DeleteSessionWorktrees(ctx context.Context, id domain.SessionID) error
+	// SetSessionOwner stamps a spawned session's owner (Checkpoint 8P-B.1),
+	// best-effort -- see Spawn's call site. Returns false if the session id
+	// doesn't exist (never expected right after CreateSession, but treated
+	// as non-fatal regardless).
+	SetSessionOwner(ctx context.Context, id domain.SessionID, owner domain.UserID) (bool, error)
+	// GetSessionOwner resolves a session's persisted owner (Checkpoint
+	// 8P-B.2) so relaunch/restore paths can re-derive the same isolated
+	// runtime env a fresh Spawn would have used, without depending on the
+	// workflow run that originally created it (which may no longer be the
+	// authoritative source, or may not exist for a manually spawned
+	// session). Nil return means unowned -- see runtime_home.go.
+	GetSessionOwner(ctx context.Context, id domain.SessionID) (*domain.UserID, error)
 }
 
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
 // the outbound ports. User-facing read-model assembly lives in the service package.
 type Manager struct {
-	runtime   runtimeController
-	agents    ports.AgentResolver
-	workspace ports.Workspace
-	store     Store
+	installationID string
+	runtime        runtimeController
+	agents         ports.AgentResolver
+	workspace      ports.Workspace
+	store          Store
 	// messenger is a sessionguard.Guard wrapping the raw messenger, so every
 	// pane write is guarded (re-read state, refuse a blocked session) without
 	// each call site re-deriving the check. Send/confirmActive use Deliver for
@@ -299,7 +325,16 @@ type Manager struct {
 	browser             BrowserLifecycle
 	browserCapabilities BrowserCapabilityIssuer
 	dataDir             string
-	clock               func() time.Time
+	// runFilePath is exported to spawned agents as AO_RUN_FILE so their
+	// `ao hooks`/`ao review` callbacks resolve the same daemon regardless of
+	// whether the daemon's own AO_RUN_FILE was overridden independently of
+	// AO_DATA_DIR. Empty means the spawned agent falls back to the default
+	// resolution (~/.ao/running.json), matching pre-8P-D.2 behavior.
+	runFilePath string
+	clock       func() time.Time
+	// runtimeIsolation backs Checkpoint 8P-B.2's relaunch isolation.
+	// Optional.
+	runtimeIsolation RelaunchRuntimeIsolation
 	// openTranscriptFile is os.Open in production. The narrow seam lets tests
 	// deterministically prove that a post-stop transcript read failure falls
 	// back without advertising the provider path.
@@ -369,6 +404,11 @@ type Manager struct {
 
 	reviewersMu sync.Mutex
 	reviewers   ReviewerTerminator
+
+	// branchLocks is the direct-branch execution lock manager, late-bound for
+	// the same reason shellTerminals is (see SetBranchLocks in branch_lock.go).
+	branchLocksMu sync.Mutex
+	branchLocks   BranchLocks
 }
 
 // latestUserPromptRecorder narrows the post-delivery write to the single fact
@@ -543,7 +583,12 @@ type Deps struct {
 	// DataDir is exported to spawned agents as AO_DATA_DIR so their hook
 	// commands can open the same store.
 	DataDir string
-	Clock   func() time.Time
+	// RunFilePath is exported to spawned agents as AO_RUN_FILE so their
+	// `ao hooks`/`ao review` callbacks can find this daemon's running.json
+	// even when it was started with an AO_RUN_FILE override. Optional: empty
+	// leaves the spawned agent's own default resolution unchanged.
+	RunFilePath string
+	Clock       func() time.Time
 	// LookPath overrides exec.LookPath for the pre-launch agent-binary check.
 	// Production wiring leaves this nil and the manager defaults to
 	// exec.LookPath; tests inject a stub so they need not seed real binaries.
@@ -557,12 +602,33 @@ type Deps struct {
 	// Logger receives spawn-time diagnostics (e.g. when the session PATH
 	// cannot be pinned to the daemon binary). Nil defaults to slog.Default().
 	Logger *slog.Logger
+	// RuntimeIsolation backs Checkpoint 8P-B.2's relaunch isolation: given
+	// a session's persisted owner (from Store.GetSessionOwner) and its
+	// harness, it re-derives the same isolated provider runtime env a
+	// fresh Spawn would have used, or blocks with
+	// ports.ErrProviderProfileRequired if the owner's profile for that
+	// harness is now missing/disabled. Optional: nil preserves pre-8P-B.2
+	// behavior exactly (relaunch/restore never touches env at all).
+	RuntimeIsolation RelaunchRuntimeIsolation
+	// InstallationID (P9) is this AO installation's identity. It is what a
+	// runtime's installation stamp is compared against when a worker's
+	// ownership is proven after a restart. Empty disables that one check.
+	InstallationID string
+}
+
+// RelaunchRuntimeIsolation is session_manager's narrow view of
+// providerruntime.Resolver.ResolveForOwner -- defined here (the consumer),
+// not in the providerruntime package, so this package doesn't need to
+// import it just for one method signature.
+type RelaunchRuntimeIsolation interface {
+	ResolveForOwner(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, domain.ProviderProfileID, error)
 }
 
 // New builds a Session Manager from its dependencies, defaulting the clock to
 // time.Now when Deps.Clock is nil.
 func New(d Deps) *Manager {
 	m := &Manager{
+		installationID:               d.InstallationID,
 		runtime:                      d.Runtime,
 		agents:                       d.Agents,
 		workspace:                    d.Workspace,
@@ -574,7 +640,9 @@ func New(d Deps) *Manager {
 		browser:                      d.Browser,
 		browserCapabilities:          d.BrowserCapabilities,
 		dataDir:                      d.DataDir,
+		runFilePath:                  d.RunFilePath,
 		clock:                        d.Clock,
+		runtimeIsolation:             d.RuntimeIsolation,
 		openTranscriptFile:           os.Open,
 		lookPath:                     d.LookPath,
 		executable:                   d.Executable,
@@ -694,6 +762,15 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: create: %w", err)
 	}
 	id := rec.ID
+	// Checkpoint 8P-B.1: best-effort ownership stamp. Never fails spawn --
+	// the session already exists; a stamping failure just leaves it
+	// unowned (same "unowned is a valid state" convention as projects/
+	// workflow_runs, see 0111's migration doc comment).
+	if cfg.Owner != "" {
+		if _, serr := m.store.SetSessionOwner(ctx, id, cfg.Owner); serr != nil && m.logger != nil {
+			m.logger.Warn("could not stamp session owner", "session", id, "owner", cfg.Owner, "error", serr)
+		}
+	}
 	systemPromptFile, err := m.prepareSystemPromptFile(id, cfg.Harness, systemPrompt)
 	if err != nil {
 		m.rollbackSpawnSeedRow(ctx, id)
@@ -702,7 +779,14 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 
 	branch := cfg.Branch
 	if branch == "" {
-		branch = DefaultSpawnBranch(id, cfg.Kind, sessionPrefix(project), projectKind, m.dataDir)
+		branch = SpawnBranchForPlacement(project, id, cfg.Kind, m.dataDir, cfg.Placement)
+	}
+	// Checkpoint 8P-E.14: take the direct-branch execution lock before the
+	// workspace adapter checks the branch out in the user's own repository. A
+	// no-op for isolated-worktree projects and for workflow-owned spawns.
+	if err := m.acquireSessionBranchLocks(ctx, cfg, id); err != nil {
+		m.rollbackSpawnSeedRow(ctx, id)
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: %w", id, err)
 	}
 	ws, workspaceProject, err := m.createSessionWorkspace(ctx, project, cfg, id, branch)
 	if err != nil {
@@ -770,6 +854,13 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true)
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: browser capability: %w", id, err)
 	}
+	// Checkpoint 8P-B.1: applied last, after every other env source, so a
+	// resolved workflow owner's isolated runtime-home always wins. A no-op
+	// when cfg.RuntimeEnv is nil (unresolved owner, or caller predates this
+	// checkpoint) -- preserves prior behavior exactly.
+	for k, v := range cfg.RuntimeEnv {
+		env[k] = v
+	}
 	rec, err = m.persistBrowserCapabilityVerifier(ctx, rec, browserCapabilityVerifier)
 	if err != nil {
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true)
@@ -824,11 +915,24 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: prepare launch: %w", id, err)
 	}
 	defer m.lcm.CancelLaunch(id, launchID)
+	// P1-D §C: the ownership marker is attached ATOMICALLY with creation, the
+	// way reviewer panes already do it. It binds the runtime to this session
+	// AND to this launch generation, so a token read back off a live runtime
+	// proves "AO made this, for this session's launch N" -- which is what lets
+	// Runtime GC reclaim a finished worker without ever having to guess from a
+	// session name, and what stops a stale handle adopting a replacement.
+	//
+	// It is passed to Create rather than written afterwards for the reason
+	// ports.RuntimeConfig.Owner documents: a marker written after Create
+	// returns leaves a window in which a live runtime exists that AO cannot
+	// identify -- unadoptable, unterminatable, and therefore permanent.
+	ownerToken := domain.SessionRuntimeOwnerToken(id, launchID)
 	handle, err := m.runtime.Create(ctx, ports.RuntimeConfig{
 		SessionID:     id,
 		WorkspacePath: ws.Path,
 		Argv:          argv,
 		Env:           env,
+		Owner:         ownerToken,
 	})
 	if err != nil {
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true)
@@ -836,13 +940,24 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	}
 
 	metadata := domain.SessionMetadata{
-		Branch:                    ws.Branch,
-		WorkspacePath:             ws.Path,
-		WorkspaceRepoPath:         ws.RepoPath,
-		RuntimeHandleID:           handle.ID,
-		RuntimeLaunchID:           launchID,
-		Prompt:                    prompt,
-		LatestUserPrompt:          prompt,
+		Branch:            ws.Branch,
+		WorkspacePath:     ws.Path,
+		WorkspaceRepoPath: ws.RepoPath,
+		RuntimeHandleID:   handle.ID,
+		RuntimeInstanceID: handle.InstanceID,
+		RuntimeOwnerToken: ownerToken,
+		RuntimeLaunchID:   launchID,
+		// Prompt is the durable, complete task specification and is stored
+		// whole -- it is the record of what this session was asked to do.
+		Prompt: prompt,
+		// LatestUserPrompt is the bounded recognition/handoff fact, not the
+		// specification. It goes through the field's own definition of the
+		// bytes it holds, the same one the send path and workflow's delivery
+		// recovery use: a spawn prompt may now be a 128 KiB specification, and
+		// storing it raw here would both blow past the field's documented
+		// 16 KiB bound and make promptReceiptDigest unable to recognise the
+		// prompt it wrote.
+		LatestUserPrompt:          domain.BoundLatestUserPrompt(prompt),
 		BrowserCapabilityVerifier: browserCapabilityVerifier,
 	}
 	if projectKind == domain.ProjectKindSingleRepo {
@@ -896,6 +1011,20 @@ func (m *Manager) createSessionWorkspace(ctx context.Context, project domain.Pro
 		if projectKind == domain.ProjectKindScratch {
 			baseBranch = ""
 		}
+		// BaseRef (Checkpoint 8M.1) overrides the project default so a master
+		// workflow task's worktree can be based on the accumulated
+		// integration state of its dependencies instead. Only single-repo
+		// (non-workspace-kind) projects are supported for 8M.1; the
+		// workspace-kind branch below deliberately never applies it.
+		//
+		// Checkpoint 8P-E.11: in direct-branch mode there is no per-task
+		// worktree to base on anything — every task already shares the one
+		// configured branch, so applying a BaseRef here would silently move
+		// the user's checkout off it. The configured branch stays
+		// authoritative.
+		if cfg.BaseRef != "" && domain.ResolveExecutionMode(project.Kind, project.Config) != domain.ExecutionDirectBranch {
+			baseBranch = cfg.BaseRef
+		}
 		ws, err := m.workspace.Create(ctx, ports.WorkspaceConfig{
 			ProjectID:     cfg.ProjectID,
 			SessionID:     id,
@@ -903,6 +1032,11 @@ func (m *Manager) createSessionWorkspace(ctx context.Context, project domain.Pro
 			SessionPrefix: sessionPrefix(project),
 			Branch:        branch,
 			BaseBranch:    baseBranch,
+			// P3-A §7: a workflow spawn carries its run's frozen placement, and
+			// the router honours it over the project's current execution mode.
+			// Empty for an ordinary session, which keeps the project-config
+			// routing it has always had.
+			Placement: cfg.Placement,
 		})
 		return ws, nil, err
 	}
@@ -1160,6 +1294,10 @@ func (m *Manager) markSpawnFailedTerminatedWithoutWorkspace(ctx context.Context,
 // rows still in seed state; if the row has progressed or the delete itself
 // fails, fall back to parking it terminated so a phantom row never looks live.
 func (m *Manager) rollbackSpawnSeedRow(ctx context.Context, id domain.SessionID) {
+	// Release before the row goes away: once the session is deleted, only boot
+	// reconciliation would ever notice the lock is orphaned, and until then the
+	// branch would stay occupied by a task that no longer exists (8P-E.14).
+	m.releaseSessionBranchLocks(ctx, id, "spawn rolled back")
 	if deleted, err := m.store.DeleteSession(ctx, id); err == nil && deleted {
 		m.cleanupSystemPromptDir(id)
 		return
@@ -1602,7 +1740,9 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 	if mode == domain.SessionModeChat {
 		return m.relaunchSession(ctx, "resume agent", rec, project, ws, nil)
 	}
-	handle := ports.RuntimeHandle{ID: meta.RuntimeHandleID}
+	// P9: the recorded incarnation travels with the name, so the runtime restamps
+	// and verifies THAT incarnation -- never whatever answers under the name.
+	handle := ports.RuntimeHandle{ID: meta.RuntimeHandleID, InstanceID: meta.RuntimeInstanceID}
 	return m.relaunchSession(ctx, "resume agent", rec, project, ws, &handle)
 }
 
@@ -1662,6 +1802,28 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: persist browser capability: %w", operation, rec.ID, err)
 	}
+	// Checkpoint 8P-B.2: re-derive the same isolated runtime env a fresh
+	// Spawn would have used, from the session's own persisted owner --
+	// never the workflow run (which may no longer exist or apply), never
+	// a daemon-global fallback. Applied last, after every other env
+	// source, so it always wins; a no-op when runtimeIsolation/store isn't
+	// wired or the session predates ownership (nil owner).
+	if m.runtimeIsolation != nil {
+		owner, ownerErr := m.store.GetSessionOwner(ctx, rec.ID)
+		if ownerErr != nil {
+			return RestoreResult{}, fmt.Errorf("%s %s: resolve session owner: %w", operation, rec.ID, ownerErr)
+		}
+		if owner != nil {
+			relaunchEnv, _, envErr := m.runtimeIsolation.ResolveForOwner(ctx, *owner, rec.Harness)
+			if envErr != nil {
+				m.cleanupSystemPromptDir(rec.ID)
+				return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, envErr)
+			}
+			for k, v := range relaunchEnv {
+				env[k] = v
+			}
+		}
+	}
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, rec.ID, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
@@ -1695,17 +1857,33 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 		return RestoreResult{}, fmt.Errorf("%s %s: prepare launch: %w", operation, rec.ID, err)
 	}
 	defer m.lcm.CancelLaunch(rec.ID, launchID)
+	// P1-D §C: a restore is a NEW launch of the same session, so it gets a new
+	// launch id and therefore a new ownership token. That is the point: the
+	// runtime a restore creates must not be confusable with the one the
+	// previous launch created, even though the session id is the same.
+	restoreOwnerToken := domain.SessionRuntimeOwnerToken(rec.ID, launchID)
 	runtimeCfg := ports.RuntimeConfig{
 		SessionID:     rec.ID,
 		WorkspacePath: ws.Path,
 		Argv:          argv,
 		Env:           env,
+		Owner:         restoreOwnerToken,
 	}
 	var handle ports.RuntimeHandle
 	if restartHandle == nil {
 		handle, err = m.runtime.Create(ctx, runtimeCfg)
 	} else {
 		handle, err = m.restartRuntime(ctx, *restartHandle, runtimeCfg)
+		// P9: a respawn of a live pane keeps its tmux incarnation, but the
+		// handle built from the row carries only the name, so Restart hands back
+		// no instance id -- and writing that empty value would erase the `$N`
+		// every later ownership proof needs, failing a legitimately restored
+		// worker closed forever. The recorded incarnation is carried over when
+		// the runtime returned the same session without naming one; a runtime
+		// that created a new incarnation names it and wins.
+		if err == nil && handle.InstanceID == "" && handle.ID == rec.Metadata.RuntimeHandleID {
+			handle.InstanceID = rec.Metadata.RuntimeInstanceID
+		}
 	}
 	if err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
@@ -1716,6 +1894,8 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 		WorkspacePath:             ws.Path,
 		WorkspaceRepoPath:         ws.RepoPath,
 		RuntimeHandleID:           handle.ID,
+		RuntimeInstanceID:         handle.InstanceID,
+		RuntimeOwnerToken:         restoreOwnerToken,
 		RuntimeLaunchID:           launchID,
 		AgentSessionID:            rec.Metadata.AgentSessionID,
 		Prompt:                    rec.Metadata.Prompt,
@@ -1755,12 +1935,13 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 func (m *Manager) restartRuntime(ctx context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
-		if !errors.Is(err, ports.ErrRuntimeUnavailable) {
+		if !errors.Is(err, ports.ErrRuntimeServerAbsent) {
 			return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
 		}
-		// The runtime infrastructure itself is gone (e.g. the tmux server was
-		// killed). Restore/restart is exactly the recovery path for that
-		// outage, so proceed as "no existing runtime" and create a fresh one.
+		// P9: the runtime server provably does not exist (its socket is gone,
+		// e.g. after a reboot). Only that is "no existing runtime"; a server
+		// that merely could not be reached may still hold a live session, and
+		// creating over it would put a second process on one session.
 		alive = false
 	}
 	if alive {
@@ -1925,9 +2106,12 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 			alive, err := m.runtime.IsAlive(ctx, handle)
 			switch {
 			case err == nil:
-			case errors.Is(err, ports.ErrRuntimeUnavailable):
-				// Normal after a machine reboot: the runtime is conclusively gone,
-				// so preserve work and create the restore marker below.
+			case errors.Is(err, ports.ErrRuntimeServerAbsent):
+				// Normal after a machine reboot: the runtime server's socket is
+				// gone, so the runtime is conclusively gone -- preserve work and
+				// create the restore marker below. P9: a server that merely could
+				// not be REACHED is not this case; it falls to the default and the
+				// live session (and its worktree) is left exactly as it is.
 				alive = false
 			default:
 				// A failed probe is not proof of death: leave the session as-is.
@@ -2104,6 +2288,12 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 				SessionPrefix: sessionPrefix(project),
 				Branch:        rec.Metadata.Branch,
 				Path:          rec.Metadata.WorkspacePath,
+				// A restart must not re-place a session. See
+				// restore_placement.go: without this the router asks the
+				// PROJECT, and a project switched to direct-branch since the
+				// spawn re-attaches an isolated session to the operator's own
+				// checkout, orphaning the worktree that holds the work.
+				Placement: PlacementFromSessionFacts(rec.Metadata, project.Path),
 			})
 			if restoreErr != nil {
 				m.logger.Error("restore-all: workspace restore failed", "sessionID", rec.ID, "error", restoreErr)
@@ -2210,6 +2400,9 @@ func (m *Manager) restoreSessionWorkspace(ctx context.Context, project domain.Pr
 			SessionPrefix: sessionPrefix(project),
 			Branch:        rec.Metadata.Branch,
 			Path:          rec.Metadata.WorkspacePath,
+			// Same reason as restore-all above: where this session was created
+			// is a durable fact, and it outranks what the project says now.
+			Placement: PlacementFromSessionFacts(rec.Metadata, project.Path),
 		})
 	}
 	rows, err := m.workspaceProjectRestoreRows(ctx, project, rec)
@@ -2651,9 +2844,11 @@ const (
 //
 // Decision safety: a session observed in ActivityBlocked stops confirmation
 // immediately with no nudge — an Enter into a pending permission dialog would
-// answer it for the user. Sticky ActivityWaitingInput does NOT stop the loop:
-// an idle-prompt session with an unsubmitted pasted draft is exactly the case
-// the nudge exists for.
+// answer it for the user. ActivityWaitingInput stops it for the same reason
+// (F4): Claude Code reports an open AskUserQuestion that way, and an Enter
+// there selects the highlighted option rather than resubmitting a draft. The
+// case the nudge actually exists for -- an idle composer holding an
+// unsubmitted pasted draft -- is ActivityIdle, which still nudges.
 func (m *Manager) confirmActive(ctx context.Context, guard *sessionguard.Guard, id domain.SessionID) {
 	m.confirmActiveWithNudge(ctx, id, nil, func(nudgeCtx context.Context) (sessionguard.Outcome, error) {
 		return guard.Deliver(nudgeCtx, id, "")
@@ -2751,7 +2946,28 @@ func (m *Manager) waitForActive(ctx context.Context, id domain.SessionID) (waitO
 		switch rec.Activity.State {
 		case domain.ActivityActive:
 			return waitActive, nil
-		case domain.ActivityBlocked:
+		case domain.ActivityBlocked, domain.ActivityWaitingInput:
+			// F4: waiting_input stops the loop for the same reason blocked
+			// does. Claude Code reports an open AskUserQuestion as
+			// Notification(agent_needs_input) -> ActivityWaitingInput (see
+			// adapters/agent/claudecode/activity.go), and an Enter into that
+			// pane does not resubmit a draft -- it SELECTS THE HIGHLIGHTED
+			// OPTION, which is always the first one.
+			//
+			// That is exactly what happened in the gate: a worker asked "which
+			// helper convention should the new helper follow?", AO's own
+			// confirmation nudge pressed Enter, option 1 was chosen, and the
+			// worker continued -- while AO's durable workflow_questions row
+			// stayed unresolved with delivered=0 and no resolution. AO was
+			// answering its own questions, invisibly, always picking the first
+			// option, and its structured-delivery path never decided anything.
+			//
+			// The asymmetry decides this: a nudge withheld from a session that
+			// is genuinely waiting on a person costs one delayed resend, and
+			// the next real send delivers it. A nudge sent into an open
+			// question answers it irreversibly and silently. The nudge's own
+			// purpose -- flushing an unsubmitted draft at an idle composer --
+			// is an ActivityIdle condition, which is untouched here.
 			return waitBlocked, nil
 		}
 		if !m.clock().Before(deadlineAt) {
@@ -2907,6 +3123,54 @@ func defaultSessionBranch(id domain.SessionID, kind domain.SessionKind, prefix, 
 	return aoBranch(branchNamespace, string(id), "root")
 }
 
+// SpawnBranchForPlacement is ProjectSpawnBranch with the run's FROZEN execution
+// placement taking precedence over the project's current execution mode.
+//
+// Routing the workspace ADAPTER by placement is necessary and not sufficient: a
+// spawn also has to name the branch that adapter will check out. Deriving the
+// branch from project configuration while the adapter came from the placement
+// produced exactly one shape, and it is the shape the P3-A smoke caught -- a
+// direct-branch placement handed the generated `ao/<project>/<session>` name,
+// which does not exist in the user's repository, so every launch failed with
+// "branch is not fetched" and retried forever.
+//
+// An unknown placement falls through to the project, which is the pre-P3-A
+// behaviour. It is never coerced to a default: guessing the branch is guessing
+// where somebody's code gets written.
+func SpawnBranchForPlacement(project domain.ProjectRecord, id domain.SessionID, kind domain.SessionKind, dataDir string, placement domain.ExecutionPlacementType) string {
+	switch placement {
+	case domain.PlacementDirectBranch:
+		return project.Config.WithDefaults().DefaultBranch
+	case domain.PlacementIsolatedWorktree:
+		return DefaultSpawnBranch(id, kind, sessionPrefix(project), project.Kind.WithDefault(), dataDir)
+	}
+	return ProjectSpawnBranch(project, id, kind, dataDir)
+}
+
+// ProjectSpawnBranch resolves the branch a spawn works on for a project,
+// honoring its execution mode (Checkpoint 8P-E.11).
+//
+// In direct-branch mode the project's configured base branch IS the work
+// branch: AO must never generate an ao/* branch, and the session prefix — which
+// only ever existed to name generated branches and sessions — contributes
+// nothing to git here. In isolated-worktree mode this is exactly the
+// pre-checkpoint DefaultSpawnBranch behavior, unchanged.
+func ProjectSpawnBranch(project domain.ProjectRecord, id domain.SessionID, kind domain.SessionKind, dataDir string) string {
+	if domain.ResolveExecutionMode(project.Kind, project.Config) == domain.ExecutionDirectBranch {
+		return project.Config.WithDefaults().DefaultBranch
+	}
+	return DefaultSpawnBranch(id, kind, sessionPrefix(project), project.Kind.WithDefault(), dataDir)
+}
+
+// ProjectOrchestratorBranch is ProjectSpawnBranch for the canonical project
+// orchestrator session, used by replacement verification.
+func ProjectOrchestratorBranch(project domain.ProjectRecord, dataDir string) string {
+	if domain.ResolveExecutionMode(project.Kind, project.Config) == domain.ExecutionDirectBranch {
+		return project.Config.WithDefaults().DefaultBranch
+	}
+	return DefaultOrchestratorBranch(sessionPrefix(project), dataDir)
+}
+
 // DefaultSpawnBranch returns AO's generated work branch for a spawn. Explicit
 // user-provided branches bypass this helper.
 func DefaultSpawnBranch(id domain.SessionID, kind domain.SessionKind, prefix string, projectKind domain.ProjectKind, dataDir string) string {
@@ -2996,6 +3260,7 @@ func promptProjectContext(projectID domain.ProjectID, project domain.ProjectReco
 		Repo:          project.RepoOriginURL,
 		DefaultBranch: cfg.DefaultBranch,
 		Path:          project.Path,
+		DirectBranch:  domain.ResolveExecutionMode(project.Kind, project.Config) == domain.ExecutionDirectBranch,
 	}
 }
 
@@ -3261,8 +3526,14 @@ func workspaceRepoList(repos []domain.WorkspaceRepoRecord) string {
 // spawnEnv builds the runtime environment: the per-project env vars first, then
 // the AO-internal vars last so they always win (a project cannot override
 // AO_SESSION_ID and friends).
-func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, dataDir string, projectEnv map[string]string) map[string]string {
-	env := make(map[string]string, len(projectEnv)+4)
+func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, dataDir, runFilePath string, projectEnv map[string]string) map[string]string {
+	env := make(map[string]string, len(projectEnv)+6)
+	// Checkpoint 8M.1: skip Python's .pyc bytecode cache for every worker
+	// session. A no-op for non-Python projects/languages; for Python it stops
+	// __pycache__ from ever being generated in the first place, which is
+	// strictly safer than filtering it out after the fact. projectEnv can
+	// still override this per-project below.
+	env["PYTHONDONTWRITEBYTECODE"] = "1"
 	for k, v := range projectEnv {
 		env[k] = v
 	}
@@ -3270,6 +3541,9 @@ func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueI
 	env[EnvProjectID] = string(project)
 	env[EnvIssueID] = string(issue)
 	env[EnvDataDir] = dataDir
+	if runFilePath != "" {
+		env[EnvRunFile] = runFilePath
+	}
 	return env
 }
 
@@ -3281,17 +3555,34 @@ func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueI
 // When the pin cannot be applied the inherited PATH is kept and a warning is
 // logged so the degradation isn't silent.
 func (m *Manager) runtimeEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, projectEnv map[string]string) map[string]string {
-	env := spawnEnv(id, project, issue, m.dataDir, projectEnv)
+	env := spawnEnv(id, project, issue, m.dataDir, m.runFilePath, projectEnv)
 	env[EnvBrowserCapability] = ""
 	env[EnvBrowserRuntimeToken] = ""
 	env[EnvBrowserRuntimeTokenStdin] = ""
-	path, err := HookPATH(m.executable, os.Getenv, projectEnv)
+	path, pinned, err := HookPATH(m.executable, os.Getenv, projectEnv)
 	if err != nil {
 		m.logger.Warn("session PATH not pinned to the daemon binary; `ao hooks` callbacks may resolve to a different ao and activity tracking will stall",
 			"session", id, "error", err)
 		return env
 	}
 	env["PATH"] = path
+	if !pinned {
+		// Checkpoint 8M §16: mirror the exact fallback the reviewer/
+		// decision-resolver launchers already use (workflow_reviewer_launcher.go,
+		// decision_resolver_launcher.go) instead of leaving worker sessions
+		// degraded — a renamed daemon binary previously left `ao` (and thus
+		// every hook callback, including `ao review submit`/activity
+		// tracking) unresolvable inside a worker's own shell. EnsureAOShim
+		// installs a tiny shim script that execs the resolved daemon binary
+		// under the expected name; prepended on top of the already-good PATH
+		// above, never replacing it.
+		if shimDir, shimErr := EnsureAOShim(m.dataDir, m.executable); shimErr == nil {
+			env["PATH"] = PrependPathDir(shimDir, env["PATH"])
+		} else {
+			m.logger.Warn("session PATH pin not applied and AO shim could not be created: daemon executable is not named the expected hook binary name; `ao hooks` callbacks may resolve to a different ao and activity tracking will stall (PATH still includes required system and inherited directories)",
+				"session", id, "hookBinaryName", hookBinaryName, "shimError", shimErr)
+		}
+	}
 	return env
 }
 
@@ -3327,34 +3618,69 @@ func (m *Manager) persistBrowserCapabilityVerifier(ctx context.Context, rec doma
 	return rec, nil
 }
 
-// HookPATH builds the PATH value pinned into a spawned session: the daemon
-// executable's directory prepended to the base PATH (the project's PATH
-// override when set, else the daemon's inherited PATH — matching what the
-// runtime would have exported anyway). An error means the pin cannot be
-// applied: the executable is unresolvable, or is not named "ao", in which case
-// prepending its directory would not change what `ao` resolves to. Exported so
-// the reviewer launcher can pin its pane's PATH the same way.
-func HookPATH(executable func() (string, error), getenv func(string) string, projectEnv map[string]string) (string, error) {
+// RequiredSystemPathDirs are directories a spawned session or reviewer
+// process's PATH must always keep reachable, regardless of how its base PATH
+// was assembled: shells, coreutils, and OS credential-helper binaries live
+// here (e.g. macOS's `security`, which Claude Code's own login check shells
+// out to). A PATH that loses these doesn't fail loudly — the agent CLI
+// degrades into misleading states like a false "Not logged in" even though
+// the real credentials are fine (Checkpoint 8I.1). Deliberately just the two
+// directories every supported OS actually needs, not a broad list.
+var RequiredSystemPathDirs = []string{"/usr/bin", "/bin"}
+
+// EnsureSystemPathDirs appends any of RequiredSystemPathDirs missing from
+// path, preserving path's existing directories and their order/precedence.
+// Safe to call on an already-complete PATH (no-op) or an empty one (returns
+// just the required dirs, so a caller building PATH from scratch never ends
+// up with only a single narrow, project- or binary-specific directory).
+func EnsureSystemPathDirs(path string) string {
+	var parts []string
+	if path != "" {
+		parts = strings.Split(path, string(os.PathListSeparator))
+	}
+	for _, dir := range RequiredSystemPathDirs {
+		if !containsPathDir(parts, dir) {
+			parts = append(parts, dir)
+		}
+	}
+	return strings.Join(parts, string(os.PathListSeparator))
+}
+
+// HookPATH builds the PATH value for a spawned session or reviewer pane: the
+// daemon executable's own directory prepended to the base PATH (the
+// project's PATH override when set, else the caller's inherited PATH —
+// matching what the runtime would have exported anyway), with
+// RequiredSystemPathDirs guaranteed present. The returned pinned flag is true
+// only when the resolved executable is actually named hookBinaryName ("ao"):
+// only then does prepending its directory make the bare `ao` used by
+// workspace hook commands resolve back to this daemon. When pinned is false,
+// the PATH is still fully usable (base PATH plus system dirs) — it just does
+// not fix `ao hooks` resolution, which callers should surface as a
+// diagnostic warning rather than degrade the whole PATH over (that
+// degradation, not the naming mismatch itself, is what caused Checkpoint
+// 8I.1's reviewer processes to fail with a false "Not logged in"). err is
+// reserved for genuine failures: the daemon's own executable path could not
+// be resolved at all.
+func HookPATH(executable func() (string, error), getenv func(string) string, projectEnv map[string]string) (path string, pinned bool, err error) {
 	exe, err := executable()
 	if err != nil {
-		return "", fmt.Errorf("resolve daemon executable: %w", err)
+		return "", false, fmt.Errorf("resolve daemon executable: %w", err)
 	}
 	name := filepath.Base(exe)
 	if runtime.GOOS == "windows" {
 		name = strings.TrimSuffix(strings.ToLower(name), ".exe")
 	}
-	if name != hookBinaryName {
-		return "", fmt.Errorf("daemon executable %s is not named %q", exe, hookBinaryName)
-	}
+	pinned = name == hookBinaryName
 	base := projectEnv["PATH"]
 	if base == "" {
 		base = getenv("PATH")
 	}
 	dir := filepath.Dir(exe)
-	if base == "" {
-		return dir, nil
+	path = dir
+	if base != "" {
+		path = dir + string(os.PathListSeparator) + base
 	}
-	return dir + string(os.PathListSeparator) + base, nil
+	return EnsureSystemPathDirs(path), pinned, nil
 }
 
 // provisionWorkspace applies the project's per-workspace setup after the
@@ -3485,7 +3811,7 @@ func (m *Manager) prepareWorkspace(ctx context.Context, agent ports.Agent, id do
 		return fmt.Errorf("install hooks: %w", err)
 	}
 	if pl, ok := agent.(preLauncher); ok {
-		if err := pl.PreLaunch(ctx, ports.LaunchConfig{DataDir: m.dataDir, SessionID: string(id), WorkspacePath: workspacePath}); err != nil {
+		if err := pl.PreLaunch(ctx, ports.LaunchConfig{DataDir: m.dataDir, SessionID: string(id), WorkspacePath: workspacePath, Env: env}); err != nil {
 			m.cleanupPreparedAgentWorkspace(ctx, agent, id, workspacePath, env)
 			return fmt.Errorf("pre-launch: %w", err)
 		}
@@ -3525,7 +3851,7 @@ func (m *Manager) cleanupAgentWorkspace(ctx context.Context, rec domain.SessionR
 	if !cleansWorkspace {
 		return
 	}
-	env := spawnEnv(rec.ID, rec.ProjectID, rec.IssueID, m.dataDir, nil)
+	env := spawnEnv(rec.ID, rec.ProjectID, rec.IssueID, m.dataDir, m.runFilePath, nil)
 	if project, err := m.loadProject(ctx, rec.ProjectID); err == nil {
 		env = m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
 	} else {
@@ -4056,4 +4382,40 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// SessionRuntimeAlive probes whether a session's runtime — its tmux session,
+// its process — still exists RIGHT NOW.
+//
+// It is the workflow package's independent liveness fact, and it exists because
+// AO once concluded a worker had died from the silence of the hook pipeline
+// alone (see workflow/worker_signal_reconcile.go). The session row cannot
+// settle that question: a row nobody has updated looks identical to a live
+// worker, and a row the reaper has not reached yet looks identical to a dead
+// one. The runtime can.
+//
+// It answers in three values on purpose. known=false means AO could not tell —
+// no handle recorded, a session it cannot read, a probe that errored — and the
+// caller must treat that as unknown, never as death. That is the same rule
+// AGENTS.md already states for runtime probes, applied at a new call site: "do
+// not treat failed/unknown runtime probes as proof a session is dead".
+func (m *Manager) SessionRuntimeAlive(ctx context.Context, id domain.SessionID) (alive, known bool, err error) {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil || !ok {
+		return false, false, err
+	}
+	if rec.IsTerminated {
+		// A durably terminated session is the one case the row alone settles:
+		// AO itself recorded the teardown.
+		return false, true, nil
+	}
+	handle := runtimeHandle(rec.Metadata)
+	if handle.ID == "" || m.runtime == nil {
+		return false, false, nil
+	}
+	live, probeErr := m.runtime.IsAlive(ctx, handle)
+	if probeErr != nil {
+		return false, false, probeErr
+	}
+	return live, true, nil
 }

@@ -1,0 +1,1358 @@
+{
+ "source": "wf-1c2cb9bd-6380-4491-918c-37e34b5f229c",
+ "note": "Numbers only. Derived from the worker session's provider transcript; no prompt, command, path or message body is reproduced here.",
+ "strategy": "task",
+ "calls": [
+  {
+   "contextTokens": 54404,
+   "outputTokens": 182,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:10:22.243Z"
+  },
+  {
+   "contextTokens": 55997,
+   "outputTokens": 142,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:10:35.695Z"
+  },
+  {
+   "contextTokens": 56156,
+   "outputTokens": 133,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:10:38.371Z"
+  },
+  {
+   "contextTokens": 56498,
+   "outputTokens": 131,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:10:40.880Z"
+  },
+  {
+   "contextTokens": 67507,
+   "outputTokens": 211,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:10:44.372Z"
+  },
+  {
+   "contextTokens": 67932,
+   "outputTokens": 115,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:10:51.918Z"
+  },
+  {
+   "contextTokens": 68665,
+   "outputTokens": 97,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:10:53.766Z"
+  },
+  {
+   "contextTokens": 70709,
+   "outputTokens": 775,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:03.022Z"
+  },
+  {
+   "contextTokens": 72520,
+   "outputTokens": 138,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:07.594Z"
+  },
+  {
+   "contextTokens": 72800,
+   "outputTokens": 187,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:12.762Z"
+  },
+  {
+   "contextTokens": 73213,
+   "outputTokens": 131,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:15.778Z"
+  },
+  {
+   "contextTokens": 73366,
+   "outputTokens": 98,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:18.525Z"
+  },
+  {
+   "contextTokens": 76115,
+   "outputTokens": 279,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:21.955Z"
+  },
+  {
+   "contextTokens": 76577,
+   "outputTokens": 125,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:25.086Z"
+  },
+  {
+   "contextTokens": 79358,
+   "outputTokens": 261,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:28.056Z"
+  },
+  {
+   "contextTokens": 80046,
+   "outputTokens": 103,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:31.364Z"
+  },
+  {
+   "contextTokens": 80680,
+   "outputTokens": 362,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:35.038Z"
+  },
+  {
+   "contextTokens": 84035,
+   "outputTokens": 139,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:11:39.059Z"
+  },
+  {
+   "contextTokens": 85771,
+   "outputTokens": 2529,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:12:13.399Z"
+  },
+  {
+   "contextTokens": 88731,
+   "outputTokens": 185,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:12:18.725Z"
+  },
+  {
+   "contextTokens": 88999,
+   "outputTokens": 186,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:12:22.105Z"
+  },
+  {
+   "contextTokens": 89231,
+   "outputTokens": 175,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:12:29.949Z"
+  },
+  {
+   "contextTokens": 90670,
+   "outputTokens": 692,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:12:33.325Z"
+  },
+  {
+   "contextTokens": 91499,
+   "outputTokens": 222,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:12:42.042Z"
+  },
+  {
+   "contextTokens": 92860,
+   "outputTokens": 661,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:12:52.300Z"
+  },
+  {
+   "contextTokens": 93593,
+   "outputTokens": 393,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:12:58.406Z"
+  },
+  {
+   "contextTokens": 94717,
+   "outputTokens": 707,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:13:10.877Z"
+  },
+  {
+   "contextTokens": 95534,
+   "outputTokens": 1030,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:13:15.907Z"
+  },
+  {
+   "contextTokens": 96792,
+   "outputTokens": 1336,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:13:34.868Z"
+  },
+  {
+   "contextTokens": 98336,
+   "outputTokens": 415,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:13:47.711Z"
+  },
+  {
+   "contextTokens": 103346,
+   "outputTokens": 113,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:13:51.437Z"
+  },
+  {
+   "contextTokens": 105003,
+   "outputTokens": 2532,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:14:24.041Z"
+  },
+  {
+   "contextTokens": 108881,
+   "outputTokens": 160,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:14:34.425Z"
+  },
+  {
+   "contextTokens": 111569,
+   "outputTokens": 174,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:14:36.610Z"
+  },
+  {
+   "contextTokens": 113689,
+   "outputTokens": 107,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:14:39.409Z"
+  },
+  {
+   "contextTokens": 116659,
+   "outputTokens": 209,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:14:43.309Z"
+  },
+  {
+   "contextTokens": 117191,
+   "outputTokens": 82,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:14:45.744Z"
+  },
+  {
+   "contextTokens": 118557,
+   "outputTokens": 2314,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:15:12.061Z"
+  },
+  {
+   "contextTokens": 120956,
+   "outputTokens": 376,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:15:16.528Z"
+  },
+  {
+   "contextTokens": 121667,
+   "outputTokens": 329,
+   "class": "edit",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:15:22.840Z"
+  },
+  {
+   "contextTokens": 122130,
+   "outputTokens": 1210,
+   "class": "edit",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:15:24.616Z"
+  },
+  {
+   "contextTokens": 123474,
+   "outputTokens": 678,
+   "class": "edit",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:15:40.228Z"
+  },
+  {
+   "contextTokens": 124262,
+   "outputTokens": 443,
+   "class": "edit",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:15:51.018Z"
+  },
+  {
+   "contextTokens": 124815,
+   "outputTokens": 543,
+   "class": "edit",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:15:52.656Z"
+  },
+  {
+   "contextTokens": 125468,
+   "outputTokens": 344,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:16:01.781Z"
+  },
+  {
+   "contextTokens": 129581,
+   "outputTokens": 120,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:16:04.074Z"
+  },
+  {
+   "contextTokens": 130077,
+   "outputTokens": 818,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:16:13.352Z"
+  },
+  {
+   "contextTokens": 130926,
+   "outputTokens": 139,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:16:16.368Z"
+  },
+  {
+   "contextTokens": 131734,
+   "outputTokens": 463,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:16:17.894Z"
+  },
+  {
+   "contextTokens": 132310,
+   "outputTokens": 1003,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:16:34.140Z"
+  },
+  {
+   "contextTokens": 136248,
+   "outputTokens": 3186,
+   "class": "edit",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:16:35.876Z"
+  },
+  {
+   "contextTokens": 139540,
+   "outputTokens": 141,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:17:11.946Z"
+  },
+  {
+   "contextTokens": 139802,
+   "outputTokens": 504,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:17:14.544Z"
+  },
+  {
+   "contextTokens": 140647,
+   "outputTokens": 254,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:17:19.694Z"
+  },
+  {
+   "contextTokens": 140934,
+   "outputTokens": 146,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:17:23.032Z"
+  },
+  {
+   "contextTokens": 143013,
+   "outputTokens": 1872,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:17:42.766Z"
+  },
+  {
+   "contextTokens": 144978,
+   "outputTokens": 1092,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:17:46.620Z"
+  },
+  {
+   "contextTokens": 147298,
+   "outputTokens": 2211,
+   "class": "edit",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:17:59.798Z"
+  },
+  {
+   "contextTokens": 149621,
+   "outputTokens": 142,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:18:23.788Z"
+  },
+  {
+   "contextTokens": 149853,
+   "outputTokens": 831,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:18:31.037Z"
+  },
+  {
+   "contextTokens": 151420,
+   "outputTokens": 337,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:18:43.221Z"
+  },
+  {
+   "contextTokens": 151855,
+   "outputTokens": 129,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:18:52.360Z"
+  },
+  {
+   "contextTokens": 152105,
+   "outputTokens": 2178,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:19:01.777Z"
+  },
+  {
+   "contextTokens": 155380,
+   "outputTokens": 375,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:19:26.013Z"
+  },
+  {
+   "contextTokens": 156698,
+   "outputTokens": 441,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:19:36.749Z"
+  },
+  {
+   "contextTokens": 158003,
+   "outputTokens": 161,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:19:41.217Z"
+  },
+  {
+   "contextTokens": 159160,
+   "outputTokens": 315,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:19:46.203Z"
+  },
+  {
+   "contextTokens": 159649,
+   "outputTokens": 332,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:19:52.377Z"
+  },
+  {
+   "contextTokens": 160038,
+   "outputTokens": 373,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:19:56.677Z"
+  },
+  {
+   "contextTokens": 160724,
+   "outputTokens": 189,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:20:00.758Z"
+  },
+  {
+   "contextTokens": 161088,
+   "outputTokens": 1046,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:20:08.513Z"
+  },
+  {
+   "contextTokens": 162490,
+   "outputTokens": 155,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:20:17.033Z"
+  },
+  {
+   "contextTokens": 162980,
+   "outputTokens": 110,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:22:05.599Z"
+  },
+  {
+   "contextTokens": 163258,
+   "outputTokens": 165,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:24:07.484Z"
+  },
+  {
+   "contextTokens": 163586,
+   "outputTokens": 431,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:24:26.966Z"
+  },
+  {
+   "contextTokens": 164114,
+   "outputTokens": 114,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:24:42.052Z"
+  },
+  {
+   "contextTokens": 164738,
+   "outputTokens": 445,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:24:52.085Z"
+  },
+  {
+   "contextTokens": 165222,
+   "outputTokens": 200,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:24:58.265Z"
+  },
+  {
+   "contextTokens": 165543,
+   "outputTokens": 155,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:00.679Z"
+  },
+  {
+   "contextTokens": 165917,
+   "outputTokens": 126,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:02.848Z"
+  },
+  {
+   "contextTokens": 166943,
+   "outputTokens": 262,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:17.881Z"
+  },
+  {
+   "contextTokens": 167861,
+   "outputTokens": 357,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:22.303Z"
+  },
+  {
+   "contextTokens": 168261,
+   "outputTokens": 154,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:26.346Z"
+  },
+  {
+   "contextTokens": 169122,
+   "outputTokens": 392,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:29.903Z"
+  },
+  {
+   "contextTokens": 169733,
+   "outputTokens": 272,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:36.034Z"
+  },
+  {
+   "contextTokens": 170038,
+   "outputTokens": 154,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:38.788Z"
+  },
+  {
+   "contextTokens": 170477,
+   "outputTokens": 416,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:41.522Z"
+  },
+  {
+   "contextTokens": 171723,
+   "outputTokens": 216,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:47.493Z"
+  },
+  {
+   "contextTokens": 172278,
+   "outputTokens": 510,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:25:53.649Z"
+  },
+  {
+   "contextTokens": 172981,
+   "outputTokens": 593,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:02.350Z"
+  },
+  {
+   "contextTokens": 173783,
+   "outputTokens": 484,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:08.689Z"
+  },
+  {
+   "contextTokens": 174393,
+   "outputTokens": 373,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:15.481Z"
+  },
+  {
+   "contextTokens": 174984,
+   "outputTokens": 210,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:18.354Z"
+  },
+  {
+   "contextTokens": 175233,
+   "outputTokens": 189,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:21.481Z"
+  },
+  {
+   "contextTokens": 175678,
+   "outputTokens": 312,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:24.551Z"
+  },
+  {
+   "contextTokens": 176029,
+   "outputTokens": 204,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:28.842Z"
+  },
+  {
+   "contextTokens": 176370,
+   "outputTokens": 270,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:31.909Z"
+  },
+  {
+   "contextTokens": 177252,
+   "outputTokens": 357,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:37.204Z"
+  },
+  {
+   "contextTokens": 177689,
+   "outputTokens": 107,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:40.175Z"
+  },
+  {
+   "contextTokens": 181520,
+   "outputTokens": 371,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:42.737Z"
+  },
+  {
+   "contextTokens": 182180,
+   "outputTokens": 582,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:26:52.928Z"
+  },
+  {
+   "contextTokens": 183293,
+   "outputTokens": 717,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:27:44.002Z"
+  },
+  {
+   "contextTokens": 184282,
+   "outputTokens": 322,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:27:53.432Z"
+  },
+  {
+   "contextTokens": 184638,
+   "outputTokens": 194,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:27:58.272Z"
+  },
+  {
+   "contextTokens": 185094,
+   "outputTokens": 493,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:28:03.016Z"
+  },
+  {
+   "contextTokens": 186106,
+   "outputTokens": 175,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:29:55.639Z"
+  },
+  {
+   "contextTokens": 186320,
+   "outputTokens": 206,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:29:59.009Z"
+  },
+  {
+   "contextTokens": 186820,
+   "outputTokens": 193,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:30:02.326Z"
+  },
+  {
+   "contextTokens": 188076,
+   "outputTokens": 408,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:30:07.425Z"
+  },
+  {
+   "contextTokens": 188543,
+   "outputTokens": 305,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:30:11.435Z"
+  },
+  {
+   "contextTokens": 188888,
+   "outputTokens": 468,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:30:19.912Z"
+  },
+  {
+   "contextTokens": 189528,
+   "outputTokens": 463,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:30:26.777Z"
+  },
+  {
+   "contextTokens": 190021,
+   "outputTokens": 168,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:30:31.257Z"
+  },
+  {
+   "contextTokens": 190534,
+   "outputTokens": 613,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:30:38.344Z"
+  },
+  {
+   "contextTokens": 191735,
+   "outputTokens": 398,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:30:46.327Z"
+  },
+  {
+   "contextTokens": 192735,
+   "outputTokens": 3608,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:30:52.869Z"
+  },
+  {
+   "contextTokens": 196385,
+   "outputTokens": 393,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:31:38.448Z"
+  },
+  {
+   "contextTokens": 196853,
+   "outputTokens": 3039,
+   "class": "message",
+   "segment": "work",
+   "observedAt": "2026-09-09T17:32:18.658Z"
+  },
+  {
+   "contextTokens": 204146,
+   "outputTokens": 2185,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:37:26.252Z"
+  },
+  {
+   "contextTokens": 206572,
+   "outputTokens": 334,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:37:33.800Z"
+  },
+  {
+   "contextTokens": 207258,
+   "outputTokens": 137,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:37:38.021Z"
+  },
+  {
+   "contextTokens": 207803,
+   "outputTokens": 95,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:37:39.794Z"
+  },
+  {
+   "contextTokens": 208244,
+   "outputTokens": 280,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:37:43.422Z"
+  },
+  {
+   "contextTokens": 210211,
+   "outputTokens": 283,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:37:46.902Z"
+  },
+  {
+   "contextTokens": 210891,
+   "outputTokens": 178,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:37:51.324Z"
+  },
+  {
+   "contextTokens": 212192,
+   "outputTokens": 1907,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:38:14.241Z"
+  },
+  {
+   "contextTokens": 215084,
+   "outputTokens": 2631,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:38:50.494Z"
+  },
+  {
+   "contextTokens": 217959,
+   "outputTokens": 503,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:38:59.211Z"
+  },
+  {
+   "contextTokens": 218493,
+   "outputTokens": 2279,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:39:01.162Z"
+  },
+  {
+   "contextTokens": 220803,
+   "outputTokens": 1837,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:39:24.621Z"
+  },
+  {
+   "contextTokens": 222671,
+   "outputTokens": 1137,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:39:45.444Z"
+  },
+  {
+   "contextTokens": 224016,
+   "outputTokens": 203,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:39:58.250Z"
+  },
+  {
+   "contextTokens": 225081,
+   "outputTokens": 342,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:40:03.993Z"
+  },
+  {
+   "contextTokens": 225454,
+   "outputTokens": 413,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:40:09.153Z"
+  },
+  {
+   "contextTokens": 225980,
+   "outputTokens": 1306,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:40:28.280Z"
+  },
+  {
+   "contextTokens": 227317,
+   "outputTokens": 4055,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:40:36.364Z"
+  },
+  {
+   "contextTokens": 235536,
+   "outputTokens": 325,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:41:22.021Z"
+  },
+  {
+   "contextTokens": 235914,
+   "outputTokens": 546,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:41:33.099Z"
+  },
+  {
+   "contextTokens": 236502,
+   "outputTokens": 1425,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:41:35.780Z"
+  },
+  {
+   "contextTokens": 238102,
+   "outputTokens": 1459,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:42:02.762Z"
+  },
+  {
+   "contextTokens": 242536,
+   "outputTokens": 795,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:42:08.554Z"
+  },
+  {
+   "contextTokens": 243413,
+   "outputTokens": 621,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:42:23.333Z"
+  },
+  {
+   "contextTokens": 244262,
+   "outputTokens": 1434,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:42:25.299Z"
+  },
+  {
+   "contextTokens": 246409,
+   "outputTokens": 2591,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:42:54.120Z"
+  },
+  {
+   "contextTokens": 249031,
+   "outputTokens": 217,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:43:15.515Z"
+  },
+  {
+   "contextTokens": 249404,
+   "outputTokens": 298,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:43:19.873Z"
+  },
+  {
+   "contextTokens": 249959,
+   "outputTokens": 112,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:43:23.893Z"
+  },
+  {
+   "contextTokens": 250429,
+   "outputTokens": 719,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:43:34.508Z"
+  },
+  {
+   "contextTokens": 251279,
+   "outputTokens": 112,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:43:38.716Z"
+  },
+  {
+   "contextTokens": 252350,
+   "outputTokens": 354,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-09T17:43:42.449Z"
+  },
+  {
+   "contextTokens": 257032,
+   "outputTokens": 1674,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:44:05.311Z"
+  },
+  {
+   "contextTokens": 259107,
+   "outputTokens": 273,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:44:13.452Z"
+  },
+  {
+   "contextTokens": 259647,
+   "outputTokens": 114,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:44:18.929Z"
+  },
+  {
+   "contextTokens": 261619,
+   "outputTokens": 923,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:44:33.511Z"
+  },
+  {
+   "contextTokens": 262654,
+   "outputTokens": 258,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:44:37.961Z"
+  },
+  {
+   "contextTokens": 264217,
+   "outputTokens": 1498,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:44:59.942Z"
+  },
+  {
+   "contextTokens": 266365,
+   "outputTokens": 209,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:45:06.301Z"
+  },
+  {
+   "contextTokens": 266975,
+   "outputTokens": 747,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:45:13.244Z"
+  },
+  {
+   "contextTokens": 267755,
+   "outputTokens": 418,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:45:30.771Z"
+  },
+  {
+   "contextTokens": 268281,
+   "outputTokens": 711,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:45:40.334Z"
+  },
+  {
+   "contextTokens": 269053,
+   "outputTokens": 396,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:45:45.063Z"
+  },
+  {
+   "contextTokens": 269532,
+   "outputTokens": 260,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:45:50.407Z"
+  },
+  {
+   "contextTokens": 270948,
+   "outputTokens": 88,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:45:53.615Z"
+  },
+  {
+   "contextTokens": 271581,
+   "outputTokens": 1750,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:46:14.402Z"
+  },
+  {
+   "contextTokens": 274831,
+   "outputTokens": 764,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:46:26.118Z"
+  },
+  {
+   "contextTokens": 275846,
+   "outputTokens": 449,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:46:34.413Z"
+  },
+  {
+   "contextTokens": 276710,
+   "outputTokens": 2729,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:47:14.669Z"
+  },
+  {
+   "contextTokens": 281373,
+   "outputTokens": 190,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:47:18.909Z"
+  },
+  {
+   "contextTokens": 282879,
+   "outputTokens": 260,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:47:21.315Z"
+  },
+  {
+   "contextTokens": 283245,
+   "outputTokens": 287,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:47:28.890Z"
+  },
+  {
+   "contextTokens": 283690,
+   "outputTokens": 8652,
+   "class": "edit",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:47:31.133Z"
+  },
+  {
+   "contextTokens": 292482,
+   "outputTokens": 185,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:48:54.238Z"
+  },
+  {
+   "contextTokens": 293062,
+   "outputTokens": 162,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:48:57.317Z"
+  },
+  {
+   "contextTokens": 294234,
+   "outputTokens": 476,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-09T17:49:03.323Z"
+  },
+  {
+   "contextTokens": 299413,
+   "outputTokens": 2912,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:49:39.655Z"
+  },
+  {
+   "contextTokens": 302729,
+   "outputTokens": 897,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:49:47.321Z"
+  },
+  {
+   "contextTokens": 303735,
+   "outputTokens": 2006,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:50:16.164Z"
+  },
+  {
+   "contextTokens": 305778,
+   "outputTokens": 713,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:50:29.736Z"
+  },
+  {
+   "contextTokens": 306528,
+   "outputTokens": 3135,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:50:46.340Z"
+  },
+  {
+   "contextTokens": 309710,
+   "outputTokens": 865,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:51:19.509Z"
+  },
+  {
+   "contextTokens": 310699,
+   "outputTokens": 1296,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:51:30.732Z"
+  },
+  {
+   "contextTokens": 312048,
+   "outputTokens": 267,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:51:47.623Z"
+  },
+  {
+   "contextTokens": 312390,
+   "outputTokens": 476,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:51:52.828Z"
+  },
+  {
+   "contextTokens": 313010,
+   "outputTokens": 439,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:52:11.155Z"
+  },
+  {
+   "contextTokens": 313669,
+   "outputTokens": 228,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:52:14.390Z"
+  },
+  {
+   "contextTokens": 314204,
+   "outputTokens": 223,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:52:37.787Z"
+  },
+  {
+   "contextTokens": 314955,
+   "outputTokens": 153,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:54:40.751Z"
+  },
+  {
+   "contextTokens": 315275,
+   "outputTokens": 1091,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:54:55.913Z"
+  },
+  {
+   "contextTokens": 316841,
+   "outputTokens": 384,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:56:02.018Z"
+  },
+  {
+   "contextTokens": 317906,
+   "outputTokens": 4758,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:57:02.753Z"
+  },
+  {
+   "contextTokens": 322768,
+   "outputTokens": 184,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:57:06.317Z"
+  },
+  {
+   "contextTokens": 323114,
+   "outputTokens": 438,
+   "class": "command",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:57:11.063Z"
+  },
+  {
+   "contextTokens": 323738,
+   "outputTokens": 2551,
+   "class": "message",
+   "segment": "fix/3",
+   "observedAt": "2026-09-09T17:57:46.885Z"
+  }
+ ]
+}

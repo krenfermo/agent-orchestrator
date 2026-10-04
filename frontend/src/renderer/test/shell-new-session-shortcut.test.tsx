@@ -3,6 +3,7 @@ import { CancelledError } from "@tanstack/react-query";
 import { Suspense, type ComponentType, type PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeybindingOverrides } from "../../shared/shortcuts";
+import { useAuthStore } from "../stores/auth-store";
 import { useUiStore } from "../stores/ui-store";
 import type { WorkspaceSummary } from "../types/workspace";
 
@@ -260,6 +261,10 @@ function emitShortcut() {
 }
 
 beforeEach(() => {
+	// The shell is behind the auth gate now, and mounts only for an identity the
+	// daemon has already resolved. These cases are about what it does once it
+	// has one; "trusted-local" is the desktop default that gets it there.
+	useAuthStore.setState({ status: "trusted-local", setupRequired: false, providersStatus: "loaded" });
 	shellMocks.navigate.mockReset();
 	shellMocks.onNewSessionShortcut.mockClear();
 	shellMocks.onKeyboardShortcutsHelp.mockClear();

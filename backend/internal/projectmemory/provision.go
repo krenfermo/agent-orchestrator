@@ -1,0 +1,687 @@
+package projectmemory
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	baseline "github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
+)
+
+// provision.go — the one call a dispatch boundary makes (P2-B).
+//
+// Everything P2-B adds converges here: the lifecycle sync trigger, the pack,
+// the role budget, dedupe against legacy context, the cache, the token
+// estimate, and the observability record. A boundary calls Provision and gets
+// back what to send; it does not decide any of the policy itself.
+//
+// That concentration is the design, not an accident. Planner, Worker, Reviewer
+// and Repair each reach memory at a different moment with different evidence,
+// and if each assembled its own context there would be four opinions about
+// when a sync is worth it, four budget interpretations, and four places for the
+// fail-closed rule to be forgotten. There is one.
+//
+// The invariant every path here preserves: **Provision never fails.** It
+// returns a Provisioned whose Pack may be empty and whose FallbackReason says
+// why, and the caller sends its legacy context exactly as it would have before
+// P2-B. There is no failure of project memory that should stop a dispatch —
+// not a missing index, not a sync timeout, not an unreadable database, not a
+// corrupted item.
+
+// ProvisionRequest is one boundary's ask.
+type ProvisionRequest struct {
+	ProjectID domain.ProjectID
+	// RepoPath is the CANONICAL REPOSITORY ROOT this dispatch is about -- the
+	// path the project record names, never the workspace the agent happens to
+	// be running in. A Planner may leave it empty to span every repository of
+	// the project.
+	//
+	// The distinction is load-bearing and was the P2-D production gate's
+	// blocker (P2-E). Canonical memory is derived from a repository; an
+	// isolated worktree is one task's unintegrated checkout of that same
+	// repository, and indexing it mints a second repo_id whose facts are
+	// canonical-looking but describe a branch nothing has merged. Callers pass
+	// the root here and the workspace in ExecutionWorkspace below; the syncer
+	// refuses a linked worktree outright as a last line of defence.
+	RepoPath string
+	// ExecutionWorkspace is where the agent is actually working, when that is
+	// not the repository root -- a task's isolated worktree. It is RECORDED
+	// and never indexed: it exists so a diagnostic can say which checkout a
+	// pack was assembled for, and so a future change has an honest place to
+	// put workspace-scoped evidence instead of reaching for RepoPath.
+	//
+	// Empty means the agent is working in the repository root, which is the
+	// direct-branch case.
+	ExecutionWorkspace string
+	// TaskChangedPaths are repo-relative paths this execution's own task has
+	// already modified in its workspace but has not integrated (P2-E A4).
+	//
+	// They are an EXCLUSION, not a relevance hint. A canonical file summary
+	// describes the file as the repository has it; once a task has rewritten
+	// that file in its own worktree, serving the canonical summary to the
+	// reviewer of that change would describe a version nobody is looking at.
+	// Facts whose evidence lies entirely inside this set are therefore
+	// withheld, and the role reads the working tree instead -- which is the
+	// authority anyway (see ContextPack.Render's own preamble).
+	//
+	// Empty is the common case and changes nothing.
+	TaskChangedPaths []string
+	// Role decides the section order, the budget and the dedupe allowance.
+	Role PackRole
+	// ChangedPaths, Modules and Keywords are the relevance evidence, strongest
+	// first. A boundary supplies what it actually knows and nothing more —
+	// inventing a changed path would misrank the pack.
+	ChangedPaths []string
+	Modules      []string
+	Keywords     []string
+	// TaskRef admits that task's own unintegrated memory, and only that
+	// task's.
+	TaskRef string
+	// WorkflowRunID and UpstreamTaskRefs are the shared-knowledge authority
+	// (P2-C §14, §15). The run scopes workflow-local facts, and the upstream
+	// refs are the tasks this one explicitly depends on and may therefore read
+	// the verified, not-yet-integrated knowledge of.
+	//
+	// A boundary that does not know them supplies neither, and the pack falls
+	// back to canonical knowledge alone — which is the safe direction: the
+	// failure mode of an unsupplied dependency list is a task that learns less
+	// than it could, never one that reads a sibling's unmerged work.
+	WorkflowRunID    string
+	UpstreamTaskRefs []string
+	// Legacy is the context the dispatch was going to send anyway. It is used
+	// for dedupe and for the honest before/after byte counts; it is never
+	// modified in place.
+	Legacy []LegacyDocument
+	// TaskBytes is the size of the task/objective text, which memory never
+	// replaces. It is carried only so the metrics can report the whole
+	// AO-assembled context rather than the part memory touched.
+	TaskBytes int
+	// SkipSync asks for the pack without a freshness check. It is how a
+	// boundary that has already synced this exact state — a Worker launched
+	// moments after the Planner that planned it — avoids asking again.
+	SkipSync bool
+	// HeadSHA is the commit this role is reasoning about, when the boundary
+	// knows it (P2-D section 17). For a reviewer it is the reviewed SHA.
+	//
+	// It is recorded on the context manifest and used for nothing else: memory
+	// selection is not narrowed by it, because a pack assembled differently
+	// for a reviewer than for the worker whose work is being reviewed would
+	// make the two harder to compare rather than easier. What it buys is that
+	// "the pack was built for SHA A and the reviewer judged SHA B" becomes a
+	// diagnosable fact instead of an unexplained disagreement.
+	//
+	// Empty is honest and common: a planner is not reasoning about one commit.
+	HeadSHA string
+	// IssueRef is the tracker issue this dispatch is against, when the
+	// boundary knows it. Memory itself does not use it — it is forwarded to
+	// the external context provider (P4-F), which can turn it into the issue's
+	// labels, milestone, linked pull requests and latest comments.
+	IssueRef string
+}
+
+// Provisioned is what a boundary should send.
+type Provisioned struct {
+	// Mode is the rollout stage that produced this.
+	Mode MemoryMode
+	// Pack is the memory to attach. Empty means attach nothing.
+	Pack ContextPack
+	// Legacy is the documents that survived dedupe, in the caller's order.
+	// In ModeAssisted it is always the full input.
+	Legacy []LegacyDocument
+	// Dedupe is what was decided about each legacy document.
+	Dedupe DedupeResult
+	// Freshness is what the sync check did.
+	Freshness Freshness
+	// External is P4-F's bounded external context — live GitHub state, read at
+	// dispatch time. It is kept apart from Pack because it is a different kind
+	// of claim with a different lifetime: see external.go.
+	External ExternalEvidence
+	// Metrics is the observability record for this dispatch.
+	Metrics baseline.MemoryMetrics
+}
+
+// Attached reports whether this provisioning contributed anything to send.
+//
+// External evidence counts. A project whose durable memory is empty but whose
+// branch has a pull request with two failing checks has something worth
+// sending, and treating that as "nothing attached" would drop it.
+func (p Provisioned) Attached() bool { return !p.Pack.Empty() || !p.External.Empty() }
+
+// Render returns the text to attach, or the empty string when there is
+// nothing to attach. External context follows the memory pack and is labelled
+// as external, so a reader never mistakes live state for a durable fact.
+func (p Provisioned) Render() string {
+	memory := ""
+	if !p.Pack.Empty() {
+		memory = p.FreshnessNotice() + p.Pack.Render()
+	}
+	external := p.External.Render()
+	switch {
+	case external == "":
+		return memory
+	case memory == "":
+		return external
+	default:
+		return strings.TrimRight(memory, "\n") + "\n\n" + external
+	}
+}
+
+// Provisioner assembles memory for dispatch boundaries.
+type Provisioner struct {
+	svc      *Service
+	syncer   *Syncer
+	cache    *PackCache
+	cfg      Config
+	external ExternalContextProvider
+	now      func() time.Time
+	// scope, when set, proves every request's repository belongs to the
+	// project it names before anything is synced or served (Frente 3 / 3B).
+	scope ProjectRepos
+}
+
+// WithExternal installs P4-F's external context provider. Nil leaves the
+// provisioner exactly as it was: external context is additive, and a daemon
+// without it produces byte-for-byte the dispatches it produced before.
+func (p *Provisioner) WithExternal(provider ExternalContextProvider) *Provisioner {
+	p.external = provider
+	return p
+}
+
+// NewProvisioner builds the boundary-facing provisioner.
+func NewProvisioner(svc *Service, cfg Config) *Provisioner {
+	return &Provisioner{
+		svc:    svc,
+		syncer: NewSyncer(svc, cfg),
+		cache:  NewPackCache(cfg.CacheEnabled),
+		cfg:    cfg,
+		now:    func() time.Time { return time.Now().UTC() },
+	}
+}
+
+// Config returns the policy in force, for operator surfaces.
+func (p *Provisioner) Config() Config { return p.cfg }
+
+// Syncer exposes the lifecycle syncer, so a workflow boundary that needs to
+// invalidate on a mutation can reach it without a second construction.
+func (p *Provisioner) Syncer() *Syncer { return p.syncer }
+
+// CacheStats reports the pack cache's counters.
+func (p *Provisioner) CacheStats() CacheStats { return p.cache.Stats() }
+
+// Provision performs the freshness check and assembles the role's memory.
+func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provisioned {
+	role := req.Role
+	if !role.Valid() {
+		role = RoleWorker
+	}
+	budget := p.cfg.Budgets.For(role)
+	out := Provisioned{
+		Mode:   p.cfg.Mode,
+		Legacy: req.Legacy,
+		Metrics: baseline.MemoryMetrics{
+			Mode: string(p.cfg.Mode), Role: string(role),
+			LegacyBytes: legacyBytes(req.Legacy), TaskBytes: req.TaskBytes,
+		},
+	}
+	out.Metrics.ContextBytes = out.Metrics.LegacyBytes + out.Metrics.TaskBytes
+
+	if !p.cfg.Mode.Enabled() {
+		out.Metrics.FallbackReason = "project memory is switched off"
+		out.Metrics.FallbackBytes = out.Metrics.LegacyBytes
+		return out
+	}
+	if len(p.cfg.Roles) > 0 && !p.cfg.Roles[role] {
+		out.Metrics.FallbackReason = "project memory is not enabled for role " + string(role)
+		out.Metrics.FallbackBytes = out.Metrics.LegacyBytes
+		return out
+	}
+	// 0. Scope. Memory is keyed by (project, repository), and a request that
+	//    pairs a project with a checkout that is not one of its repositories
+	//    would index one codebase's facts under another's id and serve them.
+	//    Fail closed: nothing is synced and nothing is attached.
+	if reason := p.outOfScope(ctx, req); reason != "" {
+		out.Metrics.FallbackReason = reason
+		out.Metrics.FallbackBytes = out.Metrics.LegacyBytes
+		return out
+	}
+
+	// 1. Freshness. A boundary that already knows the state is current skips
+	//    it; everyone else coalesces onto at most one real sync.
+	if !req.SkipSync && req.RepoPath != "" {
+		out.Freshness = p.syncer.EnsureFresh(ctx, req.ProjectID, req.RepoPath)
+	} else if req.RepoPath != "" {
+		out.Freshness = Freshness{Kind: SyncSkipped, Reason: "the caller had already synced this state"}
+	}
+	out.Metrics.SyncKind = string(out.Freshness.Kind)
+	out.Metrics.SyncPerformed = out.Freshness.Kind == SyncIncremental || out.Freshness.Kind == SyncFull
+	out.Metrics.SyncFilesRead = out.Freshness.FilesRead
+	out.Metrics.SyncMillis = out.Freshness.Duration.Milliseconds()
+	out.Metrics.Generation = out.Freshness.Generation
+	out.Metrics.IndexedCommit = out.Freshness.IndexedCommit
+	if graph := out.Freshness.Graph; graph.Attempted {
+		out.Metrics.GraphSyncKind = string(graph.Kind)
+		out.Metrics.GraphFilesParsed = graph.FilesParsed
+		out.Metrics.GraphFilesReused = graph.FilesReused
+		out.Metrics.GraphSyncMillis = graph.Duration.Milliseconds()
+		out.Metrics.GraphSymbols = graph.Symbols
+		out.Metrics.GraphEdges = graph.Edges
+		out.Metrics.GraphGeneration = graph.Generation
+		out.Metrics.GraphIndexedCommit = graph.IndexedCommit
+	}
+
+	// 2. The pack. In a mode that may replace, the documents this dispatch is
+	//    carrying are handed to selection so the facts that can pay for
+	//    themselves rank first.
+	var coverablePaths []string
+	if p.cfg.Mode.MayReplace() && budget.MaxDocuments > 0 {
+		coverablePaths = make([]string, 0, len(req.Legacy))
+		for _, doc := range req.Legacy {
+			if doc.SHA256 != "" {
+				coverablePaths = append(coverablePaths, doc.Path)
+			}
+		}
+	}
+
+	//    It is cached only against an authority strong enough to prove a hit is
+	//    the same answer — and the coverable set is part of that authority,
+	//    because it changes what selection returns.
+	key := CacheKey{
+		ProjectID: req.ProjectID, RepoID: out.Freshness.RepoID,
+		IndexedCommit: out.Freshness.IndexedCommit, Generation: out.Freshness.Generation,
+		// P2-D: the epoch that moves on every out-of-band demotion. Without it
+		// a pack cached before an invalidation or an authority pass stays
+		// reachable and keeps serving a fact AO has just withheld -- see
+		// CacheKey's doc comment.
+		ChangeMark: p.changeMark(ctx, req.ProjectID, out.Freshness.RepoID),
+		// The code graph is versioned separately from project memory, so its
+		// generation joins the key in its own right.
+		GraphGeneration: out.Freshness.Graph.Generation,
+		Role:            role, PolicyVersion: PackPolicyVersion, Budget: budget,
+		// The sharing authority is part of the cache key. Two dispatches that
+		// differ only in which upstream tasks they may read are entitled to
+		// different packs, and a cache that ignored that would serve one
+		// task's authorized knowledge to a sibling that has none.
+		// TaskChangedPaths joins the scope digest because it CHANGES WHAT IS
+		// SELECTED: two dispatches identical but for the set of files the task
+		// has rewritten are entitled to different packs, and a cache that
+		// ignored it would hand the second one the first one's answer.
+		Scope: ScopeDigest(req.ChangedPaths, req.Modules,
+			append(append([]string(nil), req.Keywords...), coverablePaths...),
+			req.TaskRef+"|"+req.WorkflowRunID+"|"+strings.Join(req.UpstreamTaskRefs, ",")+
+				"|excl:"+strings.Join(domain.NormalizeMemorySourcePaths(req.TaskChangedPaths), ",")),
+	}
+	out.Metrics.CacheKey = key.String()
+
+	pack, hit := p.cache.Get(key)
+	if hit {
+		out.Metrics.CacheHit = true
+	} else {
+		pack = p.svc.Context(ctx, PackRequest{
+			ProjectID: req.ProjectID, RepoPath: req.RepoPath, Role: role,
+			ChangedPaths: req.ChangedPaths, Modules: req.Modules,
+			Keywords: req.Keywords, TaskRef: req.TaskRef,
+			WorkflowRunID: req.WorkflowRunID, UpstreamTaskRefs: req.UpstreamTaskRefs,
+			CoverablePaths:   coverablePaths,
+			TaskChangedPaths: req.TaskChangedPaths,
+			Budget:           budget.packBudget(),
+		})
+		p.cache.Put(key, pack)
+	}
+	out.Pack = pack
+
+	out.Metrics.PackItems = pack.Stats.SelectedItems
+	out.Metrics.PackBytes = pack.Stats.SelectedBytes
+	out.Metrics.PackCandidates = pack.Stats.CandidateItems
+	out.Metrics.PackRejectedByBudget = pack.Stats.DroppedItems
+	out.Metrics.PackReducedToSummary = pack.Stats.DroppedToSummary
+	out.Metrics.PackStaleExcluded = pack.Stats.StaleExcluded
+	out.Metrics.EstimatedPackTokens = pack.Stats.SelectedTokens
+	out.Metrics.PackDigest = pack.Digest
+	out.Metrics.SharedCandidates = pack.Stats.SharedCandidates
+	out.Metrics.SharedSelected = pack.Stats.SharedSelected
+	out.Metrics.SharedIrrelevantExcluded = pack.Stats.SharedIrrelevantExcluded
+	out.Metrics.SharedUnauthorizedExcluded = pack.Stats.SharedUnauthorizedExcluded
+	out.Metrics.SupersededExcluded = pack.Stats.SupersededExcluded
+	out.Metrics.ConflictingExcluded = pack.Stats.ConflictingExcluded
+	out.Metrics.DecisionsSelected = pack.Stats.DecisionsSelected
+	out.Metrics.RisksSelected = pack.Stats.RisksSelected
+	out.Metrics.TaskLocalItems = pack.Stats.TaskLocalSelected
+	out.Metrics.WorkflowLocalItems = pack.Stats.WorkflowLocalSelected
+	out.Metrics.CanonicalItems = pack.Stats.CanonicalSelected
+	out.Metrics.KnowledgeBytes = pack.Stats.KnowledgeBytes
+	// The graph's contribution, reported apart from the durable facts' so the
+	// two source categories stay separable (section 15). GraphBytes is a
+	// subset of PackBytes: the pack's own byte count already includes the
+	// rendered graph section.
+	out.Metrics.GraphSymbolsConsidered = pack.Graph.ConsideredSymbols
+	out.Metrics.GraphSymbolsSelected = pack.Graph.SelectedSymbols
+	out.Metrics.GraphEdgesConsidered = pack.Graph.ConsideredEdges
+	out.Metrics.GraphEdgesSelected = pack.Graph.SelectedEdges
+	out.Metrics.GraphBytes = pack.Graph.Bytes
+	out.Metrics.EstimatedGraphTokens = pack.Graph.EstimatedTokens
+	out.Metrics.GraphFallbackReason = pack.Graph.Reason
+	if pack.Graph.Backend != "" {
+		out.Metrics.GraphBackend = pack.Graph.Backend
+		out.Metrics.GraphGeneration = pack.Graph.Generation
+		out.Metrics.GraphIndexedCommit = pack.Graph.IndexedCommit
+	}
+	if pack.Stats.IndexedCommit != "" {
+		out.Metrics.IndexedCommit = pack.Stats.IndexedCommit
+		out.Metrics.Generation = pack.Stats.Generation
+	}
+
+	// 2b. External context (P4-F). Assembled AFTER the pack cache on purpose:
+	//     it describes live state that moves independently of the indexed
+	//     commit the cache is keyed on, so a cached pack must never carry it.
+	//     Its own provider is responsible for its bounds and its timeout; the
+	//     ceiling below is AO's, enforced here rather than trusted to it.
+	if p.external != nil {
+		out.External = clampExternal(p.external.ExternalContext(ctx, ExternalContextRequest{
+			ProjectID: req.ProjectID, RepoPath: req.RepoPath,
+			Workspace: req.ExecutionWorkspace, Role: role, HeadSHA: req.HeadSHA,
+			IssueRef: req.IssueRef,
+		}))
+		out.Metrics.ExternalSource = out.External.Source
+		out.Metrics.ExternalBytes = out.External.Bytes
+		out.Metrics.EstimatedExternalTokens = out.External.EstimatedTokens
+		out.Metrics.ExternalDegraded = out.External.Degraded
+		out.Metrics.ExternalReason = out.External.Reason
+	}
+
+	// 3. Dedupe. In assisted mode this only reports what preferred mode would
+	//    save; in preferred mode it drops what it can prove is redundant.
+	out.Dedupe = NewDeduper(p.cfg.Mode, budget).Apply(req.Legacy, pack)
+	out.Legacy = out.Dedupe.Kept
+	out.Metrics.DedupeSavedBytes = out.Dedupe.SavedBytes
+
+	// 4. The honest totals. ContextBytes is what AO will actually send:
+	//    surviving legacy plus the pack plus the task text.
+	survivingLegacy := legacyBytes(out.Legacy)
+	out.Metrics.ContextBytes = survivingLegacy + out.Metrics.PackBytes + out.Metrics.GraphBytes +
+		out.Metrics.ExternalBytes + out.Metrics.TaskBytes
+	out.Metrics.EstimatedInputTokens = EstimateTokens(out.Metrics.ContextBytes)
+	if pack.Empty() {
+		out.Metrics.FallbackBytes = survivingLegacy
+	}
+
+	// 5. Why memory contributed less than it might have. A reason from the
+	//    pack itself wins, because it is the more specific of the two.
+	switch {
+	case pack.Stats.FallbackReason != "":
+		out.Metrics.FallbackReason = pack.Stats.FallbackReason
+	case out.Freshness.Kind == SyncSkipped && out.Freshness.Reason != "":
+		out.Metrics.FallbackReason = out.Freshness.Reason
+	}
+
+	// 6. The manifest. What this execution was told, by identity, so a
+	//    Reviewer can be shown what the Worker knew and a restart can be
+	//    checked against what the previous attempt knew.
+	p.freeze(ctx, req, role, pack)
+	return out
+}
+
+// freeze records what one execution received (P2-C §16).
+//
+// It writes only for a dispatch that names an execution — a task ref or a run
+// — because a manifest with neither identifies nothing and would be a row
+// nobody can ever look up. It is best-effort in the strongest sense: a
+// manifest that cannot be written is a lost observation, and Provision's
+// contract is that nothing about memory may affect the dispatch.
+func (p *Provisioner) freeze(ctx context.Context, req ProvisionRequest, role PackRole, pack ContextPack) {
+	if p.svc == nil || pack.Empty() {
+		return
+	}
+	if strings.TrimSpace(req.TaskRef) == "" && strings.TrimSpace(req.WorkflowRunID) == "" {
+		return
+	}
+	ids := make([]string, 0, pack.Stats.SelectedItems)
+	// P2-D section 18: the VERSION of each fact as well as its identity.
+	//
+	// The ids alone answer "which facts was this execution told" and cannot
+	// answer "which version of them", and the reviewer incident P2-D section
+	// 17 describes is a version question. The content hash is the right
+	// version marker here rather than the generation: task knowledge is
+	// written at generation 0 and never re-indexed, so a generation would be
+	// the same number for two genuinely different revisions of a decision.
+	versions := make([]string, 0, pack.Stats.SelectedItems)
+	for _, section := range pack.Sections {
+		for _, sel := range section.Items {
+			ids = append(ids, sel.Item.ID)
+			versions = append(versions, sel.Item.ContentHash)
+		}
+	}
+	if len(ids) > domain.MaxManifestItems {
+		ids = ids[:domain.MaxManifestItems]
+		versions = versions[:domain.MaxManifestItems]
+	}
+	p.svc.RecordContextManifest(ctx, domain.MemoryContextManifest{
+		ProjectID:     req.ProjectID,
+		RepoID:        pack.RepoID,
+		WorkflowRunID: req.WorkflowRunID,
+		TaskRef:       req.TaskRef,
+		Role:          string(role),
+		PackDigest:    pack.Digest,
+		PolicyVersion: PackPolicyVersion,
+		Generation:    pack.Stats.Generation,
+		IndexedCommit: pack.Stats.IndexedCommit,
+		ItemIDs:       ids,
+		ItemVersions:  versions,
+		// The head this role was reasoning about, when the caller knew it. For
+		// a reviewer it is the reviewed SHA, which is what makes "the pack was
+		// built for SHA A and the reviewer judged SHA B" a diagnosable fact
+		// rather than an unexplained disagreement.
+		RoleHeadSHA:     req.HeadSHA,
+		SelectedBytes:   pack.Stats.SelectedBytes,
+		EstimatedTokens: pack.Stats.SelectedTokens,
+	})
+}
+
+// changeMark reads the epoch the cache key is fenced by.
+//
+// A read failure yields zero, which is the SAFE direction only because zero is
+// a value the epoch also legitimately takes for an empty repository: two
+// dispatches that both fail to read it share a cache entry they would have
+// shared anyway, and any successful read afterwards produces a different key.
+// What it must never do is fail the provision -- memory is an optimisation, and
+// an unreadable epoch is a reason to cache less confidently, not to stop.
+func (p *Provisioner) changeMark(ctx context.Context, projectID domain.ProjectID, repoID string) int64 {
+	if p.svc == nil || repoID == "" {
+		return 0
+	}
+	mark, err := p.svc.ChangeMark(ctx, projectID, repoID)
+	if err != nil {
+		return 0
+	}
+	return mark.UnixNano()
+}
+
+// WithMetrics attaches this dispatch's memory record to a context, so the
+// baseline recorder can pick it up without the two wrappers knowing about each
+// other.
+func (p Provisioned) WithMetrics(ctx context.Context) context.Context {
+	return baseline.WithMemory(ctx, p.Metrics)
+}
+
+func legacyBytes(docs []LegacyDocument) int {
+	total := 0
+	for _, d := range docs {
+		total += d.Bytes()
+	}
+	return total
+}
+
+// EstimateTokens converts bytes to an estimated token count.
+//
+// It is an ESTIMATE and is named as one everywhere it surfaces. AO does not
+// have the provider's tokenizer, and a number presented as exact would be
+// wrong in a way nobody could audit — so the four-bytes-per-token convention
+// the context router already uses is applied here too, which at least makes
+// the two surfaces comparable.
+//
+// A provider-specific tokenizer can be added later as an adapter; nothing in
+// the core takes a dependency on one, which is what keeps pack assembly
+// provider-neutral.
+func EstimateTokens(bytes int) int {
+	if bytes <= 0 {
+		return 0
+	}
+	return (bytes + packBytesPerToken - 1) / packBytesPerToken
+}
+
+// ProjectRepos is the project registry as the provisioner needs it: which
+// project an id names, and which repositories it owns.
+type ProjectRepos interface {
+	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
+	ListWorkspaceRepos(ctx context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error)
+}
+
+// WithProjectScope makes every Provision prove that the requested repository
+// is the named project's root or one of its registered workspace repositories,
+// and that the project is registered and not archived, before any sync or
+// read. The daemon always installs it; without it (tests, offline harnesses)
+// the caller is trusted to pair the two correctly.
+func (p *Provisioner) WithProjectScope(projects ProjectRepos) *Provisioner {
+	p.scope = projects
+	return p
+}
+
+// outOfScope returns the fail-closed reason for a request whose project and
+// repository do not belong together, or "" when they do (or no scope is set).
+func (p *Provisioner) outOfScope(ctx context.Context, req ProvisionRequest) string {
+	if strings.TrimSpace(string(req.ProjectID)) == "" {
+		return "no project named: memory is scoped by project and is not served to an unnamed one"
+	}
+	if p.scope == nil {
+		return ""
+	}
+	project, found, err := p.scope.GetProject(ctx, string(req.ProjectID))
+	switch {
+	case err != nil:
+		return "project registry unavailable: memory withheld rather than served unscoped"
+	case !found:
+		return "project " + string(req.ProjectID) + " is not registered: memory withheld"
+	case !project.ArchivedAt.IsZero():
+		return "project " + string(req.ProjectID) + " is archived: memory withheld"
+	}
+	if strings.TrimSpace(req.RepoPath) == "" {
+		return ""
+	}
+	allowed := []string{project.Path}
+	if repos, err := p.scope.ListWorkspaceRepos(ctx, string(req.ProjectID)); err == nil {
+		for _, r := range repos {
+			allowed = append(allowed, filepath.Join(project.Path, r.RelativePath))
+		}
+	}
+	for _, candidate := range allowed {
+		if SameRepoPath(candidate, req.RepoPath) {
+			return ""
+		}
+	}
+	return "repository is not one of project " + string(req.ProjectID) + "'s registered repositories: memory withheld"
+}
+
+// FreshnessVerdict classifies what a consumer is being handed.
+type FreshnessVerdict string
+
+const (
+	// FreshnessCurrent means memory is provably at the checkout's commit and
+	// complete.
+	FreshnessCurrent FreshnessVerdict = "current"
+	// FreshnessStale means memory was derived at a commit other than the one the
+	// checkout is at (the sync to bring it forward did not complete).
+	FreshnessStale FreshnessVerdict = "stale"
+	// FreshnessUnverified means AO could not read the checkout's commit, or ran no
+	// check, so it cannot prove currency either way.
+	FreshnessUnverified FreshnessVerdict = "unverified"
+	// FreshnessPartial means memory is at the right commit but covers only part
+	// of the repository.
+	FreshnessPartial FreshnessVerdict = "partial"
+)
+
+// Verdict decides the freshness contract for this dispatch. Frente 3 / 3B:
+//
+//   - use       -> current: served as-is;
+//   - degrade   -> stale / unverified / partial: served WITH an explicit
+//     notice, because the working tree is always the authority and a
+//     summary of an earlier commit still orients an agent -- but it is
+//     never presented as current;
+//   - rebuild   -> automatic: every dispatch whose memory is not current
+//     runs a sync first (EnsureFresh), so a stale verdict means that sync
+//     did not complete, and the next dispatch tries again;
+//   - reject    -> withheld, never served: no completed pass, a failed pass,
+//     a repository-identity drift, a linked worktree, a request outside
+//     the project's scope, an archived project.
+func (p Provisioned) Verdict() FreshnessVerdict {
+	f := p.Freshness
+	packCommit := p.Pack.Stats.IndexedCommit
+	switch {
+	case f.HeadCommit == "" || packCommit == "":
+		return FreshnessUnverified
+	case packCommit != f.HeadCommit:
+		return FreshnessStale
+	case f.Partial || (f.Graph.Attempted && f.Graph.Partial):
+		return FreshnessPartial
+	case f.Graph.Attempted && f.Graph.Usable && f.Graph.IndexedCommit != "" && f.Graph.IndexedCommit != f.HeadCommit:
+		return FreshnessStale
+	}
+	return FreshnessCurrent
+}
+
+// FreshnessNotice is AO's statement, outside the untrusted data block, of how
+// current the attached memory is. It is never empty when memory is attached:
+// "current" is said as plainly as "stale".
+func (p Provisioned) FreshnessNotice() string {
+	f := p.Freshness
+	packCommit := p.Pack.Stats.IndexedCommit
+	var b strings.Builder
+	switch p.Verdict() {
+	case FreshnessCurrent:
+		fmt.Fprintf(&b, "MEMORY FRESHNESS: CURRENT -- derived at the checkout's own commit %s.\n", noticeSHA(packCommit))
+	case FreshnessStale:
+		fmt.Fprintf(&b, "MEMORY FRESHNESS: STALE -- memory was derived at commit %s but the checkout is at %s", noticeSHA(packCommit), noticeSHA(f.HeadCommit))
+		if f.Graph.Attempted && f.Graph.IndexedCommit != "" && f.Graph.IndexedCommit != f.HeadCommit {
+			fmt.Fprintf(&b, " (code graph at %s)", noticeSHA(f.Graph.IndexedCommit))
+		}
+		b.WriteString(". Facts may describe code that has since changed; verify against the working tree before relying on them.")
+		if f.Reason != "" {
+			b.WriteString(" Sync: " + f.Reason + ".")
+		}
+		b.WriteString("\n")
+	case FreshnessUnverified:
+		b.WriteString("MEMORY FRESHNESS: UNVERIFIED -- AO could not prove this memory matches the checkout")
+		if packCommit != "" {
+			fmt.Fprintf(&b, " (derived at commit %s)", noticeSHA(packCommit))
+		}
+		b.WriteString("; verify against the working tree before relying on it.\n")
+	case FreshnessPartial:
+		fmt.Fprintf(&b, "MEMORY FRESHNESS: PARTIAL -- derived at the checkout's commit %s but covering only part of the repository", noticeSHA(packCommit))
+		if f.PartialReason != "" {
+			b.WriteString(" (" + f.PartialReason + ")")
+		} else if f.Graph.Partial {
+			b.WriteString(" (the code graph stopped at its file bound)")
+		}
+		b.WriteString("; absence of a fact here is not evidence of absence in the repository.\n")
+	}
+	if f.DirtyTracked > 0 {
+		fmt.Fprintf(&b, "The checkout has uncommitted changes to %d tracked file(s); facts about those files may reflect uncommitted content.\n", f.DirtyTracked)
+	}
+	if f.Graph.Attempted && !f.Graph.Usable {
+		reason := f.Graph.Reason
+		if reason == "" {
+			reason = "no complete graph is available"
+		}
+		b.WriteString("CODE GRAPH: UNAVAILABLE -- " + reason + "; structural evidence is omitted.\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func noticeSHA(sha string) string {
+	if sha == "" {
+		return "(none)"
+	}
+	return shortSHA(sha)
+}

@@ -73,6 +73,7 @@ function createWorkspaceStream(sessionId: string, queryClient: QueryClient): Wor
 		try {
 			const source = new EventSource(
 				`${baseUrl.replace(/\/+$/, "")}/api/v1/sessions/${encodeURIComponent(sessionId)}/workspace/events`,
+				{ withCredentials: true },
 			);
 			stream.source = source;
 			source.onopen = () => {

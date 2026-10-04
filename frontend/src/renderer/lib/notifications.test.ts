@@ -86,6 +86,7 @@ function notification(overrides: Partial<NotificationDTO> = {}): NotificationDTO
 		title: "checkout-flow needs input",
 		body: "The agent is waiting for your response.",
 		status: "unread",
+		severity: "warning",
 		createdAt: "2026-06-16T10:00:00Z",
 		target: { kind: "session", sessionId: "mer-1" },
 		...overrides,
@@ -458,7 +459,10 @@ describe("createNotificationsTransport", () => {
 		expect(showNotificationMock).toHaveBeenCalledTimes(1);
 	});
 
-	it.each(["ready_to_merge", "pr_merged", "pr_closed_unmerged"] as const)(
+	// task_completed is the whole point of stepping away from the screen, and
+	// workflow_completed has no terminal pane to be redundant with, so neither
+	// is suppressed the way a needs_input prompt on the visible session is.
+	it.each(["ready_to_merge", "pr_merged", "pr_closed_unmerged", "task_completed", "workflow_completed"] as const)(
 		"still shows the %s toast for the focused active session",
 		(type) => {
 			setWindowState({ focused: true, visible: true });

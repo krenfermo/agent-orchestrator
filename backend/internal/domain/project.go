@@ -36,6 +36,11 @@ type ProjectRecord struct {
 	// Config holds the typed per-project configuration AO resolves at spawn. An
 	// IsZero value means unset.
 	Config ProjectConfig
+	// TenantID is the organization that owns this project (P4-C). Never empty
+	// once persisted: the store substitutes DefaultTenantID for a zero value on
+	// write, so "no tenant-less project" is a property of the storage boundary
+	// rather than a rule every call site has to remember.
+	TenantID TenantID
 }
 
 // GitStatus tracks whether a workspace child is a usable git repository

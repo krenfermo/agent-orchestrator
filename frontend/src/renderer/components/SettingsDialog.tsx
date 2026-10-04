@@ -1,4 +1,21 @@
-import { Bot, CircleHelp, GitBranch, Inbox, MonitorCog, RefreshCw, Settings2, TriangleAlert, X } from "lucide-react";
+import {
+	Bot,
+	CircleHelp,
+	FolderGit2,
+	Gauge,
+	GitBranch,
+	Inbox,
+	SquareKanban,
+	Link2,
+	MonitorCog,
+	Puzzle,
+	RefreshCw,
+	Settings2,
+	ShieldCheck,
+	TriangleAlert,
+	UserCircle,
+	X,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GlobalSettingsForm, type GlobalSettingsSection } from "./GlobalSettingsForm";
@@ -21,6 +38,7 @@ import {
 	settingsDialogHeaderClass,
 } from "./ui/dialog";
 import { type SettingsModal, useUiStore } from "../stores/ui-store";
+import { useCanAny } from "../stores/auth-store";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 
@@ -30,6 +48,7 @@ export function SettingsDialog() {
 	const closeSettings = useUiStore((state) => state.closeSettings);
 	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
 	const openProjectSettings = useUiStore((state) => state.openProjectSettings);
+	const canAdminister = useCanAny("users.read", "teams.read");
 	const [keyboardShortcutsOpen, setKeyboardShortcutsOpen] = useState(false);
 	const [connectMobileOpen, setConnectMobileOpen] = useState(false);
 	const keyboardShortcutsRestoreRef = useRef<SettingsModal | null>(null);
@@ -47,7 +66,23 @@ export function SettingsDialog() {
 
 	const globalSections: Array<{ id: Exclude<GlobalSettingsSection, "all">; label: string; icon: typeof Settings2 }> = [
 		{ id: "general", label: t("settings.general"), icon: Settings2 },
+		{ id: "environment", label: "Environment", icon: Gauge },
+		{ id: "agents", label: "Development Agents", icon: Bot },
+		{ id: "sourceControl", label: "Source Control", icon: Link2 },
+		{ id: "projects", label: "Projects", icon: FolderGit2 },
+		// Always offered, like project Skills below: whether a registry is
+		// configured and whether anything is installed are answers only the
+		// daemon has, and the panel renders its own empty states.
+		{ id: "skills", label: t("settings.skills.title"), icon: Puzzle },
 		{ id: "updates", label: t("settings.updates"), icon: RefreshCw },
+		{ id: "account", label: t("settings.account"), icon: UserCircle },
+		// P4-B: the administration entry appears only when the BACKEND reports a
+		// capability for it. Hiding it is convenience, not authorization -- the
+		// routes behind it refuse a caller without the permission whether or not
+		// this row was ever rendered.
+		...(canAdminister
+			? [{ id: "access" as const, label: t("settings.access"), icon: ShieldCheck }]
+			: []),
 		{ id: "help", label: t("settings.help"), icon: CircleHelp },
 	];
 
@@ -56,6 +91,20 @@ export function SettingsDialog() {
 		{ id: "agents", label: t("settings.project.agents"), icon: Bot },
 		{ id: "workflow", label: t("settings.project.workflow"), icon: GitBranch },
 		{ id: "intake", label: t("settings.project.intake"), icon: Inbox },
+		// Planning is always offered, like access: whether a connection exists
+		// is a per-project answer only the daemon has, and the panel renders
+		// its own "not connected" state rather than being hidden.
+		{ id: "planning", label: t("settings.project.planning"), icon: SquareKanban },
+		// Project access is always offered: unlike the installation-wide
+		// administration entry, whether the caller may CHANGE it is a per-project
+		// answer only the daemon has, and the panel renders read-only when it
+		// reports no manage permission.
+		// Skills is always offered, for the same reason as access and planning:
+		// whether anything is installed, and whether the caller may activate
+		// it, are per-project answers only the daemon has. The panel renders
+		// its own empty and read-only states.
+		{ id: "skills", label: t("settings.project.skills"), icon: Puzzle },
+		{ id: "access", label: t("settings.project.access"), icon: ShieldCheck },
 	];
 
 	const isProjectSettings = displaySettings?.scope === "project";
@@ -105,7 +154,7 @@ export function SettingsDialog() {
 	};
 
 	useEffect(() => {
-		if (settingsModal?.scope === "global") setActiveSection("general");
+		if (settingsModal?.scope === "global") setActiveSection(settingsModal.section ?? "general");
 		if (settingsModal?.scope === "project") {
 			setActiveProjectSection("general");
 			setProjectSaveState({
@@ -125,7 +174,7 @@ export function SettingsDialog() {
 			<DialogContent
 				className={cn(
 					settingsDialogContentClass,
-					"h-(--size-settings-dialog-height) w-(--size-settings-dialog-wide) max-h-none origin-center overflow-hidden p-0",
+					"h-(--size-settings-dialog-height) w-[min(var(--size-settings-dialog-wide),calc(100vw-var(--space-8)))] max-h-none origin-center overflow-hidden p-0",
 				)}
 				showCloseButton={false}
 			>

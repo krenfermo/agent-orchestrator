@@ -424,7 +424,7 @@ func assertSessionStartMatcher(t *testing.T, groups []hooksjson.MatcherGroup) {
 	t.Helper()
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
-			if hook.Command == qwenHookCommandPrefix+"session-start" {
+			if qwenHooks.Matches(hook.Command, qwenHookCommandPrefix+"session-start") {
 				if group.Matcher == nil || *group.Matcher != "startup|resume" {
 					t.Fatalf("session-start hook not under startup/resume matcher: %#v", group)
 				}
@@ -718,7 +718,7 @@ func countQwenHookCommand(entries []hooksjson.MatcherGroup, command string) int 
 	count := 0
 	for _, entry := range entries {
 		for _, hook := range entry.Hooks {
-			if hook.Command == command {
+			if qwenHooks.Matches(hook.Command, command) {
 				count++
 			}
 		}

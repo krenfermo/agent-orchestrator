@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
+import { ArrowDown } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
@@ -37,9 +38,20 @@ import { aoBridge } from "../lib/bridge";
 import { TERMINAL_FONT_SIZE_DEFAULT } from "../lib/design-tokens";
 import { isWebLink, openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { isMacPlatform } from "../lib/platform";
+import {
+	noteTerminalClipboardFocus,
+	registerTerminalClipboardTarget,
+	type TerminalClipboardTarget,
+} from "../lib/terminal-clipboard";
+import {
+	createTailFollowTracker,
+	NEW_LINE_COUNT_CAP,
+	type ViewportAnchor,
+} from "../lib/terminal-follow";
 import { applyDocumentTheme, applyDocumentThemeStyle } from "../lib/theme";
 import { buildTerminalThemes } from "../lib/terminal-themes";
 import { useUiStore, type Theme } from "../stores/ui-store";
+import { Button } from "./ui/button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -234,6 +246,18 @@ type TerminalContextMenuAction = "copy" | "paste" | "selectAll" | "clear";
 
 type TerminalContextMenuActions = Record<TerminalContextMenuAction, () => void>;
 
+// Bounded scrollback: 5000 lines of retained history per terminal.
+//
+// The bound exists because xterm keeps every retained line as a live JS buffer
+// in the renderer, and AO holds many terminals alive at once — TerminalPane's
+// cache retains a mounted surface per handle generation across route switches,
+// so nothing frees that history until the handle is replaced. An unbounded (or
+// very large) scrollback therefore grows for the whole life of a long-running
+// Claude/Codex session and is never reclaimed. 5000 lines is ~200 screens at a
+// typical 24-row grid — enough to scroll back through a long agent session —
+// and caps one pane's history at single-digit megabytes.
+const TERMINAL_SCROLLBACK_LINES = 5000;
+
 // For mouse-tracking panes we synthesize SGR mouse-wheel reports and write them
 // to the pane; tmux (with `mouse on`, set by the runtime adapter) acts on them
 // and scrolls its scrollback via copy-mode. Left to itself xterm would convert
@@ -255,6 +279,42 @@ const PAGE_DOWN = "\x1b[6~";
 
 function pageKeyReport(lines: number): string {
 	return lines < 0 ? PAGE_UP : PAGE_DOWN;
+}
+
+// The tail-follow rules (slack window, new-line cap, anchor arithmetic) live in
+// lib/terminal-follow.ts so they can be unit-tested without a live xterm.
+
+type ScrollbackNavigation = "pageUp" | "pageDown" | "top" | "bottom";
+
+/**
+ * Keyboard scrollback navigation, for panes whose history lives in xterm
+ * itself (see `ownsLocalScrollback`). Panes that keep their own transcript
+ * never consult this, so their key input reaches the agent unchanged.
+ *
+ * Page keys are the terminal's on such a pane, the way they are in a native
+ * terminal: a shell ignores CSI 5~/6~ anyway, and macOS reports Fn+Up / Fn+Down
+ * as PageUp / PageDown, so both spellings land here.
+ *
+ * Home/End are NOT unconditionally the terminal's. At a live prompt they are
+ * readline's beginning-of-line / end-of-line and hijacking them would break
+ * ordinary line editing, so they only become scrollback keys once the user is
+ * demonstrably reviewing history — explicitly with Shift, or implicitly while
+ * the viewport has already left the tail.
+ */
+function scrollbackNavigation(event: KeyboardEvent, following: boolean): ScrollbackNavigation | null {
+	if (event.ctrlKey || event.altKey || event.metaKey) return null;
+	switch (event.key) {
+		case "PageUp":
+			return "pageUp";
+		case "PageDown":
+			return "pageDown";
+		case "Home":
+			return event.shiftKey || !following ? "top" : null;
+		case "End":
+			return event.shiftKey || !following ? "bottom" : null;
+		default:
+			return null;
+	}
 }
 
 function forceSelectionMode(term: Terminal): void {
@@ -286,6 +346,11 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		y: 0,
 		link: null,
 	});
+	// Whether the viewport is riding the live tail, and how much output has
+	// arrived since it stopped. Published from the mount effect (which owns the
+	// authoritative values) purely so the jump-to-latest control can render.
+	const [tailState, setTailState] = useState({ following: true, newLines: 0 });
+	const jumpToLatestRef = useRef<(() => void) | null>(null);
 	// The web link currently under the cursor, tracked via the link providers'
 	// hover/leave callbacks so the right-click menu can offer "Open in system
 	// browser" for it.
@@ -335,13 +400,20 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		const host = hostRef.current;
 		if (!host) return undefined;
 		let reportedFocused = false;
+		// Assigned further down, once copySelection/pasteFromClipboard exist. The
+		// focus handlers below only read it, and they cannot fire before the effect
+		// body finishes.
+		let clipboardTarget: TerminalClipboardTarget | null = null;
 		const reportFocused = (focused: boolean) => {
 			const next = focused && Boolean(callbacksRef.current.onChangeFontSize);
 			if (next === reportedFocused) return;
 			reportedFocused = next;
 			aoBridge.terminal.setFocused(next);
 		};
-		const handleFocusIn = () => reportFocused(true);
+		const handleFocusIn = () => {
+			if (clipboardTarget) noteTerminalClipboardFocus(clipboardTarget);
+			reportFocused(true);
+		};
 		const handleFocusOut = (event: FocusEvent) => {
 			const next = event.relatedTarget;
 			if (next instanceof Node && host.contains(next)) return;
@@ -405,9 +477,11 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				// only matters for normal-buffer panes that print their transcript and
 				// rely on the terminal's scrollback (codex, a plain shell). Keep it > 0
 				// so that history survives to be scrolled locally (see the wheel
-				// handler's normal-buffer branch). The scrollbar itself is hidden in
-				// CSS; its matching FitAddon reservation is removed after open() below.
-				scrollback: 5000,
+				// handler's normal-buffer branch), and bounded so it cannot grow
+				// without limit (see TERMINAL_SCROLLBACK_LINES). The scrollbar itself
+				// is hidden in CSS; its matching FitAddon reservation is removed after
+				// open() below.
+				scrollback: TERMINAL_SCROLLBACK_LINES,
 				theme: props.theme === "dark" ? dark : light,
 			});
 		} catch (error) {
@@ -504,6 +578,107 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				// Terminal is being torn down or its hidden textarea is unavailable.
 			}
 		};
+		const showLatestOutput = () => {
+			term.scrollToBottom();
+			// Hidden output can leave the offscreen DOM scrollbar stale even
+			// after xterm's logical viewport moves. Synchronize it before either
+			// the first-load cover or retained-cache container is revealed.
+			const viewport = host.querySelector<HTMLElement>(".xterm-viewport");
+			if (!viewport) return;
+			viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+		};
+
+		// ---- Following the live tail ----------------------------------------
+		//
+		// xterm already pins the viewport when the buffer scrolls under a reader
+		// who has scrolled up, so "new output must not yank them back" is not the
+		// work here. What is missing is telling them anything: once they scroll
+		// up, output keeps arriving off-screen with nothing to say so, and the
+		// only way back is hunting for the bottom with the wheel.
+		//
+		// Follow is DERIVED from the buffer, never asserted — see
+		// lib/terminal-follow.ts, which owns those rules (and is unit-tested
+		// without an xterm). Every path that moves the viewport — wheel, page
+		// keys, the activation scroll, the resize anchor below — ends in an
+		// onScroll, so this cannot drift out of sync with what is on screen, and
+		// scrolling back to within the slack window re-arms auto-follow on its
+		// own without touching the control.
+		let tailPublishFrame: number | null = null;
+		const publishTailState = () => {
+			tailPublishFrame = null;
+			const { following, newLines } = follow.state;
+			setTailState((current) =>
+				current.following === following && current.newLines === newLines ? current : { following, newLines },
+			);
+		};
+		// Output arrives a line at a time, so a burst would otherwise re-render
+		// the control once per line. Coalesce to one publish per frame.
+		const scheduleTailPublish = () => {
+			if (tailPublishFrame !== null) return;
+			tailPublishFrame = requestAnimationFrame(publishTailState);
+		};
+		const follow = createTailFollowTracker({
+			readPosition: () => term.buffer.active,
+			onChange: scheduleTailPublish,
+		});
+		// Close the gap xterm's user-scrolling lock leaves when the reader comes
+		// to rest inside the slack window — see needsTailSettle() for why being
+		// near the bottom is not the same as following it. Called from the paths
+		// that move the viewport rather than from the onScroll listener, so it
+		// never re-enters xterm's scroll dispatch from inside xterm's own scroll
+		// event.
+		const settleAtTail = () => {
+			if (follow.needsTailSettle()) term.scrollToBottom();
+		};
+		const scrollTracker = term.onScroll(follow.syncFromViewport);
+		const lineTracker = term.onLineFeed(follow.noteLineFeed);
+		const jumpToLatest = () => {
+			showLatestOutput();
+			follow.syncFromViewport();
+			// Focus belongs in the terminal, not on a transient control the user
+			// pressed once — the next keystroke is meant for the agent.
+			focusTerminal();
+		};
+		jumpToLatestRef.current = jumpToLatest;
+
+		// The pane's history lives in xterm itself: a normal-buffer pane with
+		// mouse tracking off (codex, a plain shell) prints its transcript and
+		// relies on the terminal's scrollback, exactly as it would in a native
+		// terminal. Alt-buffer panes, mouse-tracking panes, and the keyboard-
+		// scroll TUIs keep their transcript inside the app instead, so scrolling
+		// them is the app's job and every gesture must be forwarded untouched.
+		const ownsLocalScrollback = () =>
+			callbacksRef.current.paneScrollsByKeyboard !== true &&
+			term.modes.mouseTrackingMode === "none" &&
+			term.buffer.active.type === "normal";
+
+		// A fit that changes the grid reflows the buffer, and xterm's post-resize
+		// viewport lands wherever that reflow leaves it — which the user reads as
+		// the terminal jumping while they drag the task-panel splitter, resize the
+		// window, or toggle the sidebar. Anchor it instead: remember where the
+		// viewport sat relative to the live tail, and put it back afterwards.
+		//
+		// A fit that does NOT change the grid is a no-op inside FitAddon, and the
+		// restore is then a no-op too — which is what keeps an active selection
+		// alive across the layout changes that leave the cell count untouched.
+		// When the grid does change, the reflow rewrites the very lines a
+		// selection is anchored to and xterm exposes no way to map the old range
+		// onto the new buffer, so that selection is lost with or without this.
+		const restoreViewportAnchor = (anchor: ViewportAnchor) => {
+			const restore = follow.anchorRestore(anchor);
+			if (restore.toBottom) {
+				term.scrollToBottom();
+				return;
+			}
+			if (restore.delta !== 0) term.scrollLines(restore.delta);
+			settleAtTail();
+		};
+		const fitPreservingViewport = () => {
+			const anchor = follow.captureAnchor();
+			fit.fit();
+			restoreViewportAnchor(anchor);
+		};
+
 		contextMenuActionsRef.current = {
 			clear: () => {
 				term.clear();
@@ -534,6 +709,20 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			});
 		};
 		host.addEventListener("contextmenu", openContextMenu);
+		// The title-bar Edit menu dispatches edit.copy/paste/selectAll to the main
+		// process, which runs them as DOM edits (webContents.copy()). xterm's
+		// selection is drawn by its own renderer and is not a DOM selection, so
+		// that path is a no-op over a terminal. Publish the real actions — the same
+		// ones the keyboard shortcut and the right-click menu use — so the Edit
+		// menu stays consistent with them.
+		clipboardTarget = {
+			copy: () => copySelection(),
+			paste: () => pasteFromClipboard(),
+			selectAll: () => term.selectAll(),
+			ownsFocus: () => terminalHasFocus(host),
+		};
+		const unregisterClipboardTarget = registerTerminalClipboardTarget(clipboardTarget);
+		if (terminalHasFocus(host)) noteTerminalClipboardFocus(clipboardTarget);
 		term.attachCustomKeyEventHandler((event) => {
 			// xterm invokes this same handler on keydown, keyup, AND keypress (see
 			// Terminal.ts _keyDown/_keyUp/_keyPress). Only keydown should trigger our
@@ -584,6 +773,20 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				pasteFromClipboard();
 				return false;
 			}
+			// Scrollback navigation, only for panes that keep their history here —
+			// see scrollbackNavigation() for which keys qualify and why Home/End
+			// stay with the running program at a live prompt. Consuming the event
+			// keeps the key off both the PTY and the app's outer key handlers.
+			const navigation = ownsLocalScrollback() ? scrollbackNavigation(event, follow.state.following) : null;
+			if (navigation) {
+				consumeTerminalShortcut(event);
+				if (navigation === "pageUp") term.scrollPages(-1);
+				else if (navigation === "pageDown") term.scrollPages(1);
+				else if (navigation === "top") term.scrollToTop();
+				else term.scrollToBottom();
+				settleAtTail();
+				return false;
+			}
 			const normalized = normalizedTerminalShortcut(event);
 			if (!normalized) return true;
 			consumeTerminalShortcut(event);
@@ -614,7 +817,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			// output, but must not refit or emit PTY resizes while hidden.
 			if (callbacksRef.current.isVisible === false) return;
 			try {
-				fit.fit();
+				fitPreservingViewport();
 			} catch {
 				// Container momentarily has no size (hidden/unmounting) — a later
 				// trigger retries.
@@ -644,7 +847,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			}
 			if (fitAllowsHidden || callbacksRef.current.isVisible !== false) {
 				try {
-					fit.fit();
+					fitPreservingViewport();
 				} catch {
 					// The next observer/window event retries if the host is transiently
 					// unmeasurable (for example while entering fullscreen).
@@ -757,9 +960,34 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		// deltas accumulate so a full cell-height emits one line. Returning false
 		// suppresses xterm's arrow-key wheel fallback. Ctrl/Cmd wheel is the
 		// font-size zoom (CenterPane), so leave it for that handler.
+		//
+		// Every other wheel over the terminal is CONSUMED here — preventDefault
+		// plus stopPropagation — because this handler is the only thing allowed to
+		// move the terminal, and nothing outside it should move at all:
+		//  - preventDefault cancels the browser's own scroll for this gesture. The
+		//    `.xterm-viewport` element is a real overflow:scroll box, so without it
+		//    the browser scrolls it natively ON TOP of our term.scrollLines() call
+		//    (two notches per notch), and once that box hits its top/bottom the
+		//    gesture chains to the nearest scrollable ancestor. Every ancestor
+		//    between here and the shell content row is `overflow-x-hidden`, which
+		//    CSS resolves to `overflow-y: auto` — i.e. they are scroll containers,
+		//    and they are what scrolled the page out from under the terminal.
+		//  - Racing a native viewport scroll against the programmatic one is also
+		//    what snapped the viewport to the bottom mid-gesture; with the native
+		//    scroll cancelled, ordinary wheel/trackpad scrolling only moves
+		//    scrollback by the lines computed here.
+		//  - stopPropagation keeps ancestor wheel listeners out of it too. It is
+		//    safe for the font-size zoom: CenterPane's onWheelCapture runs in the
+		//    capture phase, before the event reaches this target-phase handler, and
+		//    the ctrl/meta gesture returns above without being consumed anyway.
+		// `overscroll-behavior: contain` on the viewport (styles.css) and on the
+		// host box below is the belt to this suspenders, for any wheel that
+		// reaches the viewport without passing through here.
 		let wheelAccumPx = 0;
 		term.attachCustomWheelEventHandler((event) => {
 			if (event.ctrlKey || event.metaKey) return false;
+			if (event.cancelable) event.preventDefault();
+			event.stopPropagation();
 			let lines: number;
 			if (event.deltaMode === 1 /* DOM_DELTA_LINE */) {
 				lines = Math.trunc(event.deltaY) || Math.sign(event.deltaY);
@@ -771,6 +999,10 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				lines = Math.trunc(wheelAccumPx / rowHeight);
 				wheelAccumPx -= lines * rowHeight;
 			}
+			// Sub-cell trackpad delta: already banked in wheelAccumPx above, so the
+			// gesture is consumed (it stays cancelled) and simply hasn't crossed a
+			// line boundary yet. Leaking these to the page is what let a slow
+			// two-finger scroll over the terminal drift the surrounding view.
 			if (lines === 0) return false;
 			// A full-screen TUI that keeps its own transcript and scrolls it only by
 			// keyboard (opencode) ignores wheel/mouse reports on every platform; route
@@ -784,8 +1016,9 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			// prints its transcript and relies on the terminal's own scrollback — the
 			// way it scrolls in a raw terminal. Scroll xterm's viewport locally; the
 			// pane never sees these bytes. Requires scrollback > 0 (see Terminal opts).
-			if (term.modes.mouseTrackingMode === "none" && term.buffer.active.type === "normal") {
+			if (ownsLocalScrollback()) {
 				term.scrollLines(lines);
+				settleAtTail();
 				return false;
 			}
 			// Mouse tracking on: the pane (tmux/zellij copy-mode, or any app that
@@ -850,15 +1083,41 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		host.addEventListener("dragover", dragOverInput);
 		host.addEventListener("drop", dropInput);
 
-		const showLatestOutput = () => {
-			term.scrollToBottom();
-			// Hidden output can leave the offscreen DOM scrollbar stale even
-			// after xterm's logical viewport moves. Synchronize it before either
-			// the first-load cover or retained-cache container is revealed.
-			const viewport = host.querySelector<HTMLElement>(".xterm-viewport");
-			if (!viewport) return;
-			viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+		// Selecting terminal text is a drag, and a drag that starts on the last
+		// visible row is routinely released outside the terminal — over the
+		// inspector rail, the panel splitter, the session topbar. The browser
+		// then dispatches `click` on the nearest common ancestor of the press and
+		// the release, which is an outer container that may well act on it: focus
+		// leaves the terminal, a panel collapses, a task action fires. None of
+		// that was a click on that control; it was the tail of a selection. Claim
+		// the whole gesture for the terminal — swallow the escaping click and put
+		// focus back where the user is typing, so the next keystroke still
+		// reaches the agent.
+		let pointerGestureFromTerminal = false;
+		const beginPointerGesture = (event: PointerEvent) => {
+			if (event.button !== 0) return;
+			pointerGestureFromTerminal = true;
 		};
+		// A press that starts anywhere else is that control's, not ours. Window
+		// capture runs ahead of the host's own capture listener, so a press
+		// inside the terminal is cleared here and re-claimed a moment later.
+		const releasePointerGesture = (event: PointerEvent) => {
+			if (event.target instanceof Node && host.contains(event.target)) return;
+			pointerGestureFromTerminal = false;
+		};
+		const claimGestureClick = (event: MouseEvent) => {
+			if (!pointerGestureFromTerminal) return;
+			pointerGestureFromTerminal = false;
+			// A click that stayed inside the terminal is already the terminal's.
+			// Only one that escaped needs to be kept off the outer controls.
+			if (event.target instanceof Node && host.contains(event.target)) return;
+			event.preventDefault();
+			event.stopPropagation();
+			focusTerminal();
+		};
+		host.addEventListener("pointerdown", beginPointerGesture, true);
+		window.addEventListener("pointerdown", releasePointerGesture, true);
+		window.addEventListener("click", claimGestureClick, true);
 
 		let cancelActivationPreparation: (() => void) | null = null;
 		const prepareForActivation = (): Promise<void> => {
@@ -941,12 +1200,21 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			window.removeEventListener("resize", scheduleVisibleFit);
 			host.removeEventListener("copy", copyInput);
 			window.removeEventListener("keydown", copyShortcut, true);
+			unregisterClipboardTarget();
+			clipboardTarget = null;
 			selectionChange.dispose();
 			host.removeEventListener("contextmenu", openContextMenu);
 			host.removeEventListener("paste", pasteInput, true);
 			host.removeEventListener("compositionend", compositionInput, true);
 			host.removeEventListener("dragover", dragOverInput);
 			host.removeEventListener("drop", dropInput);
+			host.removeEventListener("pointerdown", beginPointerGesture, true);
+			window.removeEventListener("pointerdown", releasePointerGesture, true);
+			window.removeEventListener("click", claimGestureClick, true);
+			scrollTracker.dispose();
+			lineTracker.dispose();
+			if (tailPublishFrame !== null) cancelAnimationFrame(tailPublishFrame);
+			jumpToLatestRef.current = null;
 			contextMenuActionsRef.current = null;
 			cancelActivationPreparation?.();
 			clearSuppressNativePaste();
@@ -987,6 +1255,11 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		if (term) callbacksRef.current.onVisibleSize?.(term.cols, term.rows);
 	}, [props.isVisible]);
 
+	// Only for a terminal the user is actually looking at: parked entries in the
+	// retained cache keep parsing output and would otherwise each accumulate an
+	// invisible control of their own.
+	const showJumpToLatest = props.isVisible !== false && !tailState.following;
+
 	const fullscreenElement = document.fullscreenElement;
 	const contextMenuPortalContainer =
 		props.isFullscreen &&
@@ -1006,9 +1279,39 @@ export function XtermTerminal(props: XtermTerminalProps) {
 					backgroundColor: "var(--color-bg-terminal-opaque)",
 					height: "100%",
 					overflow: "hidden",
+					// Stop scroll chaining at the terminal box: a wheel that reaches
+					// here without going through the custom wheel handler must not walk
+					// up to the `overflow-x-hidden` (and therefore vertically
+					// scrollable) ancestors in routes/_shell.tsx and move the page.
+					overscrollBehavior: "contain",
 					width: "100%",
 				}}
 			/>
+			{showJumpToLatest && (
+				// pointer-events-none on the strip so the wheel and a selection drag
+				// still reach the terminal rows underneath it; only the pill itself
+				// is clickable.
+				<div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+					<Button
+						className="pointer-events-auto rounded-full bg-surface/95 px-3 shadow-md backdrop-blur"
+						data-testid="terminal-jump-to-latest"
+						// Keep focus in the terminal: the pill is a transient
+						// affordance, and the keystroke after it is meant for the agent.
+						onMouseDown={(event) => event.preventDefault()}
+						onClick={() => jumpToLatestRef.current?.()}
+						size="sm"
+						type="button"
+						variant="outline"
+					>
+						<ArrowDown aria-hidden="true" className="size-3.5" />
+						{tailState.newLines >= NEW_LINE_COUNT_CAP
+							? t("terminal.newLinesCapped", { count: NEW_LINE_COUNT_CAP })
+							: tailState.newLines > 0
+								? t("terminal.newLines", { count: tailState.newLines })
+								: t("terminal.jumpToLatest")}
+					</Button>
+				</div>
+			)}
 			<DropdownMenu modal={false} open={contextMenu.open} onOpenChange={setContextMenuOpen}>
 				<DropdownMenuTrigger asChild>
 					<button

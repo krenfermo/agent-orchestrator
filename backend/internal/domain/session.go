@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // These ID types are distinct string types so they can't be swapped at a call
 // site by accident.
@@ -32,11 +35,29 @@ type SessionMetadata struct {
 	DiffBaseRef       string `json:"diffBaseRef,omitempty"`
 	RuntimeHandleID   string `json:"runtimeHandleId,omitempty"`
 	RuntimeLaunchID   string `json:"runtimeLaunchId,omitempty"`
+	// RuntimeInstanceID is the immutable incarnation the runtime was created
+	// as (tmux's `$N`). RuntimeHandleID is a reusable NAME and is only a
+	// discovery key; this is the authority key, and it is what a destructive
+	// action must be addressed to. Empty for every session created before
+	// P1-D, which is an honest "AO cannot address this exact incarnation"
+	// rather than a reason to guess.
+	RuntimeInstanceID string `json:"runtimeInstanceId,omitempty"`
+	// RuntimeOwnerToken is the ownership marker attached ATOMICALLY at runtime
+	// creation, binding the runtime to this session and to this launch
+	// generation. Reading it back off a live runtime proves not merely "AO
+	// made this" but "AO made this for this session's launch N" -- which is
+	// what stops a stale handle adopting a replacement. Empty means unowned,
+	// and unowned is never ownership.
+	RuntimeOwnerToken string `json:"runtimeOwnerToken,omitempty"`
 	AgentSessionID    string `json:"agentSessionId,omitempty"`
 	Prompt            string `json:"prompt,omitempty"`
 	// LatestUserPrompt is the latest real user-authored task direction observed
 	// for this AO session. Internal AO coordination messages (for example an
 	// agent-switch handoff request) must not replace it.
+	//
+	// It is stored bounded — see BoundLatestUserPrompt, which is the single
+	// definition of "the exact bytes this field ends up holding" for both the
+	// writer and any reader that has to recognise what it wrote.
 	LatestUserPrompt string `json:"latestUserPrompt,omitempty"`
 	// LatestAssistantUpdate is the latest user-facing assistant update observed
 	// before any internal agent-switch coordination turn.
@@ -73,6 +94,31 @@ type SessionMetadata struct {
 	BrowserCapabilityVerifier string `json:"-"`
 }
 
+// LatestUserPromptBytes is the bound applied to SessionMetadata.LatestUserPrompt
+// before it is persisted. It lives here, on the field's own type, rather than in
+// whichever package happens to do the writing, because it is part of what the
+// field MEANS: two packages that disagree about it disagree about whether a
+// stored prompt is the one they sent.
+const LatestUserPromptBytes = 16 << 10
+
+// BoundLatestUserPrompt renders a message exactly as it will be stored in
+// SessionMetadata.LatestUserPrompt.
+//
+// It is a function rather than a bare constant so that "the bytes that end up
+// in that field" has one definition, not one per caller: the trim, the byte
+// bound and the UTF-8 repair are all part of the answer, and a reader that
+// reproduces two of the three still gets a different string. session_manager
+// calls it on the way in; workflow's fix-delivery recovery calls it on the way
+// out to recognise its own prompt in a session it may have been restarted away
+// from.
+func BoundLatestUserPrompt(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) <= LatestUserPromptBytes {
+		return trimmed
+	}
+	return strings.ToValidUTF8(trimmed[:LatestUserPromptBytes], "�")
+}
+
 // SessionRecord is the persistence shape. It intentionally stores only durable
 // facts: identity, agent harness, activity_state, is_terminated, and operational
 // metadata. The user-facing Status is derived from these facts plus PR facts.
@@ -100,7 +146,26 @@ type SessionRecord struct {
 	// surfaces as StatusNoSignal after a grace period. Internal fact, not part
 	// of the API read model.
 	FirstSignalAt time.Time `json:"-"`
-	IsTerminated  bool      `json:"isTerminated"`
+	// TurnCompletedAt is when the agent last reported that its turn ENDED with
+	// no work left in flight — the Stop-class hook a harness fires when it has
+	// finished answering, or a Chat driver's turn-completed event. It is the
+	// durable proof that a task did its work, and the only thing that lets a
+	// finished task read Completed instead of Idle once it goes quiet.
+	//
+	// Three properties are load-bearing. It is written from a REPORTED turn
+	// boundary, never from an idle reading, a runtime probe, or a stopped
+	// pane, so "the agent went quiet" and "the agent said it was done" stay
+	// different facts. It is CLEARED when the next turn starts, so the receipt
+	// always describes the current quiet period rather than an older one. And
+	// it is durable and never expires, so the status survives inactivity and a
+	// daemon restart — unlike FirstSignalAt, which is deliberately cleared on
+	// every spawn/restore because it is about the hook pipeline, not the work.
+	//
+	// Zero means "no completion has been reported for the current turn", which
+	// is what every session written before this column existed reads as.
+	// Internal fact, not part of the API read model.
+	TurnCompletedAt time.Time `json:"-"`
+	IsTerminated    bool      `json:"isTerminated"`
 	// TerminateOnPRMerge is a user-controlled lifecycle policy. When enabled,
 	// completing the session's PR set through a merge tears down the session.
 	TerminateOnPRMerge bool            `json:"terminateOnPrMerge"`
@@ -123,11 +188,44 @@ type SessionRecord struct {
 // plus derived display facts. Neither Status nor SCMStatus is persisted.
 type Session struct {
 	SessionRecord
-	Status           SessionStatus `json:"status" enum:"working,pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged,needs_input,exited,idle,terminated,no_signal"`
+	Status           SessionStatus `json:"status" enum:"working,pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged,needs_input,exited,idle,completed,terminated,no_signal"`
 	SCMStatus        SessionStatus `json:"scmStatus,omitempty" enum:"pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged"`
 	TerminalHandleID string        `json:"terminalHandleId,omitempty"`
 	// PRs are the session's attributed pull requests (one session can own many).
 	// They feed status derivation and are surfaced on the API read model. Not
 	// serialized here: the HTTP boundary maps them to the curated wire shape.
 	PRs []PRFacts `json:"-"`
+}
+
+// SessionRuntimeOwnerToken is the ownership marker AO attaches to a session's
+// runtime at creation.
+//
+// It binds two things, and both are load-bearing:
+//
+//   - the SESSION, so a runtime can be attributed to the work it belongs to;
+//   - the LAUNCH generation, so a runtime created for launch N is
+//     distinguishable from one created for launch N+1 of the same session.
+//
+// A marker whose value is the session's own name would prove only that
+// something wrote the name back, which any process could do. Binding the launch
+// is what makes a stale handle unable to adopt — or destroy — a replacement.
+//
+// Empty inputs produce an empty token: a session AO cannot fence has no
+// ownership marker rather than a weak one.
+func SessionRuntimeOwnerToken(sessionID SessionID, launchID string) string {
+	if sessionID == "" || launchID == "" {
+		return ""
+	}
+	return "ao-session:" + string(sessionID) + ":" + launchID
+}
+
+// RuntimeOwnedBySession reports whether an ownership token read back from a
+// live runtime proves it is the one AO created for this session and launch.
+//
+// It is a strict equality on purpose. A prefix or "contains" check would let a
+// token from a different launch of the same session pass, which is exactly the
+// stale-generation adoption the token exists to prevent.
+func RuntimeOwnedBySession(observedToken string, sessionID SessionID, launchID string) bool {
+	expected := SessionRuntimeOwnerToken(sessionID, launchID)
+	return expected != "" && observedToken == expected
 }

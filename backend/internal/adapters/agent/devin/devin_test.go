@@ -435,7 +435,7 @@ func TestGetAgentHooksInstallsLocalDevinConfig(t *testing.T) {
 		t.Fatalf("SessionStart hooks = %#v, want one AO command", sessionStart)
 	}
 	hook := sessionStart[0].Hooks[0]
-	if hook.Type != "command" || hook.Command != "ao hooks devin session-start" || hook.Timeout != 30 {
+	if hook.Type != "command" || !devinHooks.Matches(hook.Command, "ao hooks devin session-start") || hook.Timeout != 30 {
 		t.Fatalf("SessionStart hook = %#v", hook)
 	}
 	gitignore, err := os.ReadFile(filepath.Join(ws, ".devin", ".gitignore"))

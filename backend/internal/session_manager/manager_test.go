@@ -41,6 +41,10 @@ type fakeStore struct {
 	// sharedLog, when non-nil, receives an ordered call entry for each
 	// UpsertSessionWorktree invocation so ordering tests can compare across fakes.
 	sharedLog *[]string
+	// owners models the sessions.owner_user_id column (Checkpoint 8P-B.1/
+	// 8P-B.2) so relaunch-isolation tests can assert the persisted owner
+	// survives a restore/resume, not just the initial Spawn.
+	owners map[domain.SessionID]domain.UserID
 }
 
 func newFakeStore() *fakeStore {
@@ -151,6 +155,20 @@ func (f *fakeStore) DeleteSessionWorktrees(_ context.Context, id domain.SessionI
 	}
 	delete(f.worktrees, id)
 	return nil
+}
+func (f *fakeStore) SetSessionOwner(_ context.Context, id domain.SessionID, owner domain.UserID) (bool, error) {
+	if f.owners == nil {
+		f.owners = map[domain.SessionID]domain.UserID{}
+	}
+	f.owners[id] = owner
+	return true, nil
+}
+func (f *fakeStore) GetSessionOwner(_ context.Context, id domain.SessionID) (*domain.UserID, error) {
+	owner, ok := f.owners[id]
+	if !ok {
+		return nil, nil
+	}
+	return &owner, nil
 }
 
 type fakeLCM struct {
@@ -773,6 +791,9 @@ func (w *fakeWorkspace) ForceDestroy(_ context.Context, info ports.WorkspaceInfo
 		*w.sharedLog = append(*w.sharedLog, entry)
 	}
 	return w.forceDestroyErr
+}
+func (w *fakeWorkspace) MaterializeIntegrationCommit(_ context.Context, _ ports.WorkspaceInfo, _, _, _ string, _ []string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 func (w *fakeWorkspace) StashUncommitted(_ context.Context, info ports.WorkspaceInfo) (string, error) {
 	w.stashCalls++
@@ -3173,7 +3194,14 @@ func TestSpawnWorker_IncludesReviewCIAndPlanningInstructions(t *testing.T) {
 		"mark every thread you fixed as resolved",
 		"multiple PRs/MRs with CI failures or review comments",
 		"decide the order based on blockers, stack order, failing scope, and user priority",
-		"Do not use the agent runtime's built-in subagent or task-delegation tools",
+		// P7 narrowed this from a blanket ban to a ban on delegating the
+		// WORK, so a bounded read-only question can be answered in a separate
+		// context instead of in this conversation. Both halves are asserted:
+		// the prohibition that protects what AO tracks, and the permission
+		// that does not touch it.
+		"Do not delegate the assigned WORK to the agent runtime's built-in subagent or task-delegation tools",
+		"must come from this AO session, because that is the session AO tracks, reviews, and verifies",
+		"Using a subagent to answer a bounded, read-only question for you",
 		"For complex tasks, write a short implementation plan before editing",
 	} {
 		if !strings.Contains(systemPrompt, want) {
@@ -4514,7 +4542,7 @@ func pathPinManager(executable func() (string, error)) (*Manager, *fakeStore, *f
 // kills activity tracking).
 func TestSpawnAndRestore_PinHookPATHToDaemonBinary(t *testing.T) {
 	daemonExe := filepath.Join(t.TempDir(), "ao")
-	want := filepath.Dir(daemonExe) + string(os.PathListSeparator) + "/usr/bin"
+	want := filepath.Dir(daemonExe) + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
 	executable := func() (string, error) { return daemonExe, nil }
 
 	cases := []struct {
@@ -4552,33 +4580,66 @@ func TestSpawnAndRestore_PinHookPATHToDaemonBinary(t *testing.T) {
 }
 
 // TestSpawn_HookPATHPinUnavailable asserts the degraded path is loud, not
-// silent: when the daemon executable cannot anchor `ao` resolution, PATH is
-// left to the runtime's inherited default and a warning is logged.
+// silent, for a genuinely unresolvable daemon executable: PATH is left to
+// the runtime's inherited default and a warning is logged.
 func TestSpawn_HookPATHPinUnavailable(t *testing.T) {
-	cases := []struct {
-		name       string
-		executable func() (string, error)
-	}{
-		{"executable unresolvable", func() (string, error) { return "", errors.New("no exe") }},
-		{"executable not named ao", func() (string, error) { return "/opt/aod/ao-daemon", nil }},
+	m, _, rt, logBuf := pathPinManager(func() (string, error) { return "", errors.New("no exe") })
+	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			m, _, rt, logBuf := pathPinManager(tc.executable)
-			if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
-				t.Fatal(err)
-			}
-			if got, ok := rt.lastCfg.Env["PATH"]; ok {
-				t.Fatalf("runtime env PATH = %q, want unset when the pin cannot be applied", got)
-			}
-			if !strings.Contains(logBuf.String(), "not pinned") {
-				t.Fatalf("expected a 'not pinned' warning in the log, got %q", logBuf.String())
-			}
-		})
+	if got, ok := rt.lastCfg.Env["PATH"]; ok {
+		t.Fatalf("runtime env PATH = %q, want unset when the pin cannot be applied", got)
+	}
+	if !strings.Contains(logBuf.String(), "not pinned") {
+		t.Fatalf("expected a 'not pinned' warning in the log, got %q", logBuf.String())
+	}
+}
+
+// TestSpawn_HookPATHNotPinnedStaysUsable covers Checkpoint 8I.2: a daemon
+// executable not named "ao" can't anchor `ao` hook resolution, but PATH must
+// still be a fully usable base-plus-system-dirs value, not collapse to
+// nothing. (Checkpoint 8I.1 hit exactly this: HookPATH used to hard-error
+// here, callers left PATH unset/degraded, and a reviewer pane's PATH
+// collapsed down to a single narrow directory, breaking that agent CLI's own
+// auth lookup even though credentials were fine.)
+func TestSpawn_HookPATHNotPinnedStaysUsable(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	m, _, rt, logBuf := pathPinManager(func() (string, error) { return "/opt/aod/ao-daemon", nil })
+	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
+		t.Fatal(err)
+	}
+	want := "/opt/aod" + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	if got := rt.lastCfg.Env["PATH"]; got != want {
+		t.Fatalf("runtime env PATH = %q, want %q", got, want)
+	}
+	if !strings.Contains(logBuf.String(), "PATH pin not applied") {
+		t.Fatalf("expected a 'PATH pin not applied' warning in the log, got %q", logBuf.String())
 	}
 }
 
 // TestSpawn_ProjectPATHIsPinBase asserts a project's PATH override survives the
+// TestSpawn_HookPATHDiagnosticsDoNotLogEnvValues guards against a regression
+// where the "PATH pin not applied" diagnostic (or any HookPATH-adjacent log
+// line) leaks the actual PATH/env content — which could include a
+// messaging-token-style secret, exactly the kind of value nestedAgentEnvVars
+// exists to keep out of AO's own spawned processes in the first place.
+// Structured log fields are fine (session id, the expected binary name); the
+// PATH value itself must never appear.
+func TestSpawn_HookPATHDiagnosticsDoNotLogEnvValues(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin/super-secret-project-path-marker")
+	m, _, _, logBuf := pathPinManager(func() (string, error) { return "/opt/aod/ao-daemon", nil })
+	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
+		t.Fatal(err)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "PATH pin not applied") {
+		t.Fatalf("expected a 'PATH pin not applied' warning in the log, got %q", logged)
+	}
+	if strings.Contains(logged, "super-secret-project-path-marker") {
+		t.Fatalf("HookPATH diagnostic leaked the PATH value into the log: %q", logged)
+	}
+}
+
 // pin as its base rather than being clobbered or clobbering: the daemon dir
 // still comes first.
 func TestSpawn_ProjectPATHIsPinBase(t *testing.T) {
@@ -4591,7 +4652,7 @@ func TestSpawn_ProjectPATHIsPinBase(t *testing.T) {
 	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Dir(daemonExe) + string(os.PathListSeparator) + "/proj/bin"
+	want := filepath.Dir(daemonExe) + string(os.PathListSeparator) + "/proj/bin" + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
 	if got := rt.lastCfg.Env["PATH"]; got != want {
 		t.Fatalf("runtime env PATH = %q, want %q", got, want)
 	}
@@ -4620,7 +4681,7 @@ func TestSpawnAndRestore_PrependsResolvedBinaryAndNodeDirsToRuntimePATH(t *testi
 			t.Fatal(err)
 		}
 	}
-	want := strings.Join([]string{binDir, nodeDir, filepath.Dir(daemonExe), "/usr/bin"}, string(os.PathListSeparator))
+	want := strings.Join([]string{binDir, nodeDir, filepath.Dir(daemonExe), "/usr/bin", "/bin"}, string(os.PathListSeparator))
 
 	for _, operation := range []string{"spawn", "restore"} {
 		t.Run(operation, func(t *testing.T) {
@@ -4693,7 +4754,7 @@ func TestSpawn_DoesNotAddNodeRuntimeForNativeBinary(t *testing.T) {
 	if nodeLookups != 0 {
 		t.Fatalf("node LookPath calls = %d, want 0 for native binary", nodeLookups)
 	}
-	want := strings.Join([]string{binDir, "/ao/bin", "/usr/bin"}, string(os.PathListSeparator))
+	want := strings.Join([]string{binDir, "/ao/bin", "/usr/bin", "/bin"}, string(os.PathListSeparator))
 	if got := rt.lastCfg.Env["PATH"]; got != want {
 		t.Fatalf("runtime env PATH = %q, want %q", got, want)
 	}
@@ -6678,10 +6739,44 @@ func TestSend_NoNudgeWhenBlockedAppearsMidWait(t *testing.T) {
 	}
 }
 
-func TestSend_StillNudgesWhenWaitingInput(t *testing.T) {
-	// waiting_input (an idle prompt awaiting the next instruction) is the
-	// PRIMARY nudge scenario: a long-idle worker with an unsubmitted pasted
-	// draft. The decision-safety guard must not disable it.
+func TestSend_StillNudgesWhenIdle(t *testing.T) {
+	// ActivityIdle is the nudge scenario: a composer sitting at an idle prompt
+	// with an unsubmitted pasted draft. Claude Code reports that as
+	// Notification(idle_prompt) -> ActivityIdle (adapters/agent/claudecode/
+	// activity.go). The decision-safety guard must not disable it.
+	st := newFakeStore()
+	st.sessions["s1"] = domain.SessionRecord{ID: "s1", Harness: "claude-code",
+		Activity: domain.Activity{State: domain.ActivityIdle}}
+	msg := &flipOnNudgeMessenger{sessionID: "s1", store: st}
+	m := newSendTestManager(t, signalingAgent{}, msg, st)
+
+	if err := m.Send(context.Background(), "s1", "do the thing", nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(msg.msgs) != 2 {
+		t.Fatalf("Send calls = %d, want 2 (initial + one nudge for idle)", len(msg.msgs))
+	}
+	if msg.msgs[1] != "" {
+		t.Fatalf("nudge msg = %q, want empty (Enter-only)", msg.msgs[1])
+	}
+}
+
+// TestSend_NeverNudgesWhenWaitingInput is the F4 regression at the manager
+// level.
+//
+// This test previously asserted the opposite, on the premise that
+// waiting_input means "an idle prompt awaiting the next instruction". It does
+// not: the Claude Code adapter maps Notification(idle_prompt) to ActivityIdle
+// and Notification(agent_needs_input) -- which is what an OPEN AskUserQuestion
+// fires -- to ActivityWaitingInput. So waiting_input means the agent is asking
+// a question, and an Enter into that pane selects the highlighted option rather
+// than flushing a draft.
+//
+// In the gate that silently answered a worker's "which helper convention should
+// the new helper follow?" by choosing option 1, while AO's own durable
+// workflow_questions row stayed unresolved with delivered=0 -- AO answering its
+// own question with no record of having done so.
+func TestSend_NeverNudgesWhenWaitingInput(t *testing.T) {
 	st := newFakeStore()
 	st.sessions["s1"] = domain.SessionRecord{ID: "s1", Harness: "claude-code",
 		Activity: domain.Activity{State: domain.ActivityWaitingInput}}
@@ -6691,11 +6786,13 @@ func TestSend_StillNudgesWhenWaitingInput(t *testing.T) {
 	if err := m.Send(context.Background(), "s1", "do the thing", nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if len(msg.msgs) != 2 {
-		t.Fatalf("Send calls = %d, want 2 (initial + one nudge for waiting_input)", len(msg.msgs))
+	if len(msg.msgs) != 1 {
+		t.Fatalf("Send calls = %d, want 1 (the message itself, and no Enter into an open question)", len(msg.msgs))
 	}
-	if msg.msgs[1] != "" {
-		t.Fatalf("nudge msg = %q, want empty (Enter-only)", msg.msgs[1])
+	for i, sent := range msg.msgs[1:] {
+		if sent == "" {
+			t.Fatalf("nudge %d delivered an Enter into a session waiting on a person", i+1)
+		}
 	}
 }
 
@@ -6854,4 +6951,77 @@ func (m *flipOnNudgeMessenger) Send(_ context.Context, _ domain.SessionID, msg s
 		m.flipped = true
 	}
 	return nil
+}
+
+// TestSend_StaysBlockedForDialogsAfterStructuredResponsesExist — P3-C §25.
+//
+// The structured dialog-response path is a SECOND door, never a widening of
+// this one. Runtime.Send still means "type a message and submit it", and that
+// is still exactly the wrong interaction for a prompt whose Enter confirms a
+// highlighted row.
+//
+// The regression this pins is the tempting one: having built a safe way to
+// answer a dialog, relaxing this guard so the old caller "just works" would put
+// every existing text send back on the mechanism that answered the user's
+// permission dialog for them.
+func TestSend_StaysBlockedForDialogsAfterStructuredResponsesExist(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["s1"] = domain.SessionRecord{ID: "s1", Harness: "claude-code",
+		Activity: domain.Activity{State: domain.ActivityBlocked}}
+	msg := &fakeMessenger{}
+	m := newSendTestManager(t, signalingAgent{}, msg, st)
+
+	// The exact shape of the incident: a decision AO wants the worker to act on,
+	// while the worker sits on a select prompt.
+	err := m.Send(context.Background(), "s1",
+		"Decision:\npathutil.go\n\nContinue the current task using this decision.", nil)
+	if !errors.Is(err, ErrAwaitingDecision) {
+		t.Fatalf("Send error = %v, want ErrAwaitingDecision — the text path must stay shut", err)
+	}
+	if len(msg.msgs) != 0 {
+		t.Fatalf("%d messages reached the pane, want 0", len(msg.msgs))
+	}
+}
+
+// P9 review 2.1: a tmux server that could not be REACHED is not a dead runtime.
+// Boot reconciliation must neither stash, terminate nor tear down a session
+// whose runtime may still be running behind a refused connection.
+func TestReconcileLive_UnreachableServerIsNotDeath(t *testing.T) {
+	st := newFakeStore()
+	rt := &fakeRuntime{aliveErr: fmt.Errorf("probe: %w: no server running on /tmp/tmux-501/ao", ports.ErrRuntimeUnavailable)}
+	ws := &fakeWorkspace{}
+	lcm := &fakeLCM{store: st}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: rt, Agents: fakeAgents{}, Workspace: ws, Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm, LookPath: lookPath})
+	rec := domain.SessionRecord{ID: "s9", ProjectID: "p1",
+		Metadata: domain.SessionMetadata{Branch: "ao/s9/root", WorkspacePath: "/wt/s9", RuntimeHandleID: "s9"}}
+
+	if err := m.reconcileLive(context.Background(), rec); err == nil {
+		t.Fatal("reconcileLive concluded something from an unreachable server")
+	}
+	if ws.stashCalls != 0 || lcm.terminated["s9"] != 0 || rt.destroyed != 0 || len(st.worktrees["s9"]) != 0 {
+		t.Fatalf("an unreachable server was treated as death: stash=%d terminated=%d destroyed=%d markers=%v",
+			ws.stashCalls, lcm.terminated["s9"], rt.destroyed, st.worktrees["s9"])
+	}
+}
+
+// Only a runtime server whose socket provably does not exist (a reboot) is the
+// conclusive "gone": the session is preserved for restore exactly as before.
+func TestReconcileLive_AbsentServerIsDeath(t *testing.T) {
+	st := newFakeStore()
+	rt := &fakeRuntime{aliveErr: fmt.Errorf("probe: %w: %w: error connecting to /tmp/tmux-501/ao (No such file or directory)",
+		ports.ErrRuntimeUnavailable, ports.ErrRuntimeServerAbsent)}
+	ws := &fakeWorkspace{stashRef: "refs/ao/preserved/s8"}
+	lcm := &fakeLCM{store: st}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: rt, Agents: fakeAgents{}, Workspace: ws, Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm, LookPath: lookPath})
+	rec := domain.SessionRecord{ID: "s8", ProjectID: "p1",
+		Metadata: domain.SessionMetadata{Branch: "ao/s8/root", WorkspacePath: "/wt/s8", RuntimeHandleID: "s8"}}
+
+	if err := m.reconcileLive(context.Background(), rec); err != nil {
+		t.Fatalf("reconcileLive: %v", err)
+	}
+	if ws.stashCalls != 1 || lcm.terminated["s8"] != 1 {
+		t.Fatalf("a provably absent server was not recovered: stash=%d terminated=%d", ws.stashCalls, lcm.terminated["s8"])
+	}
 }

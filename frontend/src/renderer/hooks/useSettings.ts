@@ -17,6 +17,14 @@ export interface Settings {
 	defaultSessionMode: SessionMode;
 	/** Agents that can run in chat mode today. Empty means chat is unavailable. */
 	chatHarnesses: string[];
+	/**
+	 * The daemon's project-memory rollout stage ("off"/"assisted"/"preferred").
+	 *
+	 * Undefined means the daemon did not report one, which is UNKNOWN and not
+	 * "off": a surface that showed "off" here would be telling the user
+	 * something about their configuration that AO never said.
+	 */
+	memoryMode?: "off" | "assisted" | "preferred";
 }
 
 export function useSettings() {
@@ -28,6 +36,7 @@ export function useSettings() {
 			return {
 				defaultSessionMode: (data?.defaultSessionMode ?? "tui") as SessionMode,
 				chatHarnesses: data?.chatHarnesses ?? [],
+				memoryMode: data?.memoryMode,
 			};
 		},
 	});

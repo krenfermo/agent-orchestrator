@@ -738,8 +738,14 @@ func TestActivity_MetadataOnlyStoresAgentSessionIDWithoutChangingActivity(t *tes
 	if got.Metadata.AgentSessionID != "native-session-1" {
 		t.Fatalf("AgentSessionID = %q, want native-session-1", got.Metadata.AgentSessionID)
 	}
-	if got.Activity != rec.Activity {
-		t.Fatalf("metadata-only hook changed activity: got %+v, want %+v", got.Activity, rec.Activity)
+	// The activity STATE and the moment it was entered are untouched; only the
+	// liveness clock moves, because a metadata-only callback is still the
+	// current launch reporting in.
+	if got.Activity.State != rec.Activity.State || !got.Activity.LastActivityAt.Equal(rec.Activity.LastActivityAt) {
+		t.Fatalf("metadata-only hook changed the activity transition: got %+v, want %+v", got.Activity, rec.Activity)
+	}
+	if !got.Activity.LastSignalAt.After(rec.Activity.LastSignalAt) {
+		t.Fatalf("metadata-only hook did not record liveness: %+v", got.Activity)
 	}
 	if !got.FirstSignalAt.Equal(rec.FirstSignalAt) {
 		t.Fatalf("metadata-only hook changed FirstSignalAt: got %v, want %v", got.FirstSignalAt, rec.FirstSignalAt)
@@ -763,8 +769,11 @@ func TestActivity_SameStateSignalStillStoresAgentSessionID(t *testing.T) {
 	if got.Metadata.AgentSessionID != "native-session-1" {
 		t.Fatalf("AgentSessionID = %q, want native-session-1", got.Metadata.AgentSessionID)
 	}
-	if got.Activity != rec.Activity {
-		t.Fatalf("same-state metadata signal changed activity: got %+v, want %+v", got.Activity, rec.Activity)
+	if got.Activity.State != rec.Activity.State || !got.Activity.LastActivityAt.Equal(rec.Activity.LastActivityAt) {
+		t.Fatalf("same-state metadata signal changed the activity transition: got %+v, want %+v", got.Activity, rec.Activity)
+	}
+	if !got.Activity.LastSignalAt.After(rec.Activity.LastSignalAt) {
+		t.Fatalf("same-state metadata signal did not record liveness: %+v", got.Activity)
 	}
 }
 
@@ -2721,13 +2730,23 @@ func TestActivity_FirstSignalStampsReceipt(t *testing.T) {
 	}
 }
 
+// A same-state repeat carries no new STATE, and none of the state facts may
+// move for it. It does carry one thing — proof the session is still there — so
+// the liveness clock is the single field allowed to change, and only once the
+// coalescing window has elapsed. The window is exercised in
+// liveness_signal_test.go; here the row starts with a liveness clock already at
+// the signal's own instant, which is the shape of a repeat arriving inside it.
 func TestActivity_SameStateRepeatAfterReceiptIsNoOp(t *testing.T) {
 	m, st, _ := newManager()
 	rec := working("mer-1")
 	rec.FirstSignalAt = time.Now()
+	at := time.Now().UTC()
+	rec.Activity.LastSignalAt = at
 	st.sessions["mer-1"] = rec
 	before := st.sessions["mer-1"]
-	if err := m.ApplyActivitySignal(ctx, "mer-1", ports.ActivitySignal{Valid: true, State: domain.ActivityActive}); err != nil {
+	if err := m.ApplyActivitySignal(ctx, "mer-1", ports.ActivitySignal{
+		Valid: true, State: domain.ActivityActive, Timestamp: at,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if st.sessions["mer-1"] != before {

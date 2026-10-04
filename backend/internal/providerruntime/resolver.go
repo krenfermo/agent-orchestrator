@@ -1,0 +1,200 @@
+// Package providerruntime is Checkpoint 8P-B.1's single canonical
+// implementation of "workflow run -> owner -> isolated provider subprocess
+// env". Every real launch path (worker, reviewer, planner, decision
+// resolver) calls the same Resolver instead of re-deriving this logic --
+// see workflow.RuntimeIsolation, which this package's *Resolver implements.
+package providerruntime
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/runtimehome"
+)
+
+// OwnerStore resolves a workflow run's owner. Satisfied by
+// storage/sqlite/store.Store (GetWorkflowRunOwner, Checkpoint 8P-A).
+type OwnerStore interface {
+	GetWorkflowRunOwner(ctx context.Context, id string) (*domain.UserID, error)
+}
+
+// ProfileStore lists a user's provider profiles. Satisfied by
+// storage/sqlite/store.Store (Checkpoint 8P-B).
+type ProfileStore interface {
+	ListProviderProfilesByUser(ctx context.Context, userID domain.UserID) ([]domain.ProviderProfile, error)
+}
+
+// Resolver is the shared owner+env resolution used by every launcher.
+// Every field is required for real isolation to take effect; a nil Owners
+// or Profiles makes Resolve a permanent no-op (env=nil, owner="", err=nil)
+// so wiring this into a build without full 8P-A/8P-B dependencies never
+// blocks a launch that worked before this checkpoint.
+type Resolver struct {
+	Owners   OwnerStore
+	Profiles ProfileStore
+	DataDir  string
+	// TrustedLocal mirrors config.Config.TrustedLocalMode -- the
+	// single-user desktop application. When true, provider launches keep
+	// the HOST/local CLI runtime and its already-authenticated
+	// credentials, whether or not a ProviderProfile exists:
+	//
+	//   - no matching profile: the launch is NOT blocked (an existing
+	//     single-user install must not suddenly refuse to launch the
+	//     moment it upgrades, having never been asked to "connect" a
+	//     provider it already uses via its real CLI); and
+	//   - a matching enabled profile: the profile ID is still reported
+	//     for routing/capacity/health scoping, but NO isolated
+	//     runtime-home is prepared and NO env override is returned, so the
+	//     subprocess keeps the desktop user's real HOME / CLAUDE_CONFIG_DIR
+	//     / CODEX_HOME (and, on macOS, their real login keychain, which is
+	//     where the host CLI's OAuth credential actually lives).
+	//
+	// When false (real multi-user mode) nothing here applies: a matching
+	// profile always yields a strictly isolated per-user runtime env, and
+	// a resolved owner with no matching profile blocks the launch with
+	// ports.ErrProviderProfileRequired -- multi-user mode never inherits
+	// the daemon's own credentials.
+	TrustedLocal bool
+	// Isolation is the operator's explicit statement of the same decision,
+	// and it OVERRIDES the derivation above when set to host or strict.
+	//
+	// It exists because deriving isolation from TrustedLocal alone conflated
+	// two separate choices, with a failure mode nobody could see coming: a
+	// single-user desktop that enabled OIDC sign-in got TrustedLocal=false,
+	// and therefore an isolated runtime home, and therefore -- on macOS,
+	// where a substituted HOME substitutes the whole keychain domain -- a
+	// provider CLI that could no longer reach the credential the person had
+	// signed in with. The planner then hung on an unanswerable keychain
+	// unlock dialog and every run stopped at planner_auth_unavailable. The
+	// zero value (auto) keeps the old derivation exactly.
+	Isolation domain.ProviderRuntimeIsolation
+	// Keychain, when non-nil, receives one line per prepared runtime home
+	// whose AO-owned credential store had to be repaired or could not be
+	// opened. That store being unopenable is the precondition for the
+	// dialog, so it is reported when it is PREPARED rather than discovered
+	// later by a launch that hangs on it.
+	Keychain *slog.Logger
+}
+
+// isolate reports whether this launch gets an AO-owned runtime home.
+func (r *Resolver) isolate() bool {
+	return r.Isolation.IsolateFor(r.TrustedLocal)
+}
+
+// Resolve returns the env overrides to apply for a workflow-run-owned
+// launch of harness, the resolved owner (empty if unresolved/unowned), and
+// the matched ProviderProfileID (Checkpoint 8P-C; empty if unresolved or no
+// profile matched -- e.g. trusted-local with no profile configured). A
+// non-nil error is always ports.ErrProviderProfileRequired (or a durable
+// lookup failure) and means: do not launch.
+func (r *Resolver) Resolve(ctx context.Context, runID string, harness domain.AgentHarness) (env map[string]string, owner domain.UserID, profileID domain.ProviderProfileID, err error) {
+	if r == nil || r.Owners == nil {
+		return nil, "", "", nil
+	}
+	ownerPtr, err := r.Owners.GetWorkflowRunOwner(ctx, runID)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("providerruntime: resolve workflow run owner: %w", err)
+	}
+	if ownerPtr == nil {
+		// Unowned run (predates ownership, or created while no user was
+		// resolved) -- nothing to scope to; behave exactly as before this
+		// checkpoint.
+		return nil, "", "", nil
+	}
+	env, profileID, err = r.ResolveForOwner(ctx, *ownerPtr, harness)
+	return env, *ownerPtr, profileID, err
+}
+
+// ResolveForOwner is Resolve's shared policy step, factored out so a
+// caller that already has an owner from a different durable source (e.g.
+// session_manager's relaunch path, which uses the session's own persisted
+// owner_user_id rather than re-deriving it from a workflow run -- see
+// Checkpoint 8P-B.2 §10/§11) reuses the exact same match-profile/build-env/
+// block decision, instead of re-implementing it. A non-nil error is always
+// ports.ErrProviderProfileRequired (or a durable lookup failure) and means:
+// do not launch.
+func (r *Resolver) ResolveForOwner(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, domain.ProviderProfileID, error) {
+	if r == nil || owner == "" {
+		return nil, "", nil
+	}
+	profile, ok, err := r.matchingProfile(ctx, owner, harness)
+	if err != nil {
+		return nil, "", fmt.Errorf("providerruntime: list provider profiles: %w", err)
+	}
+	if !ok {
+		if !r.isolate() {
+			return nil, "", nil
+		}
+		return nil, "", ports.ErrProviderProfileRequired
+	}
+
+	// Trusted-local (single-user desktop) keeps the HOST CLI runtime even
+	// when a matching profile exists. The profile is still reported (so
+	// routing/capacity/health scoping keep their ProviderProfileID), but no
+	// isolated runtime-home is prepared and no env override is returned:
+	// the launch inherits the desktop user's real, already-authenticated
+	// CLI credentials -- which is exactly the compatibility policy this
+	// type's TrustedLocal field documents. Preparing a runtime-home here
+	// would redirect the subprocess onto an AO-owned macOS login keychain
+	// that does not contain the host's Claude OAuth credential, so the
+	// planner/worker/reviewer would fail to launch (and macOS would prompt
+	// for a keychain password) on a desktop install that was working.
+	//
+	// Multi-user mode (TrustedLocal=false) is unchanged: strict per-user
+	// isolation, never inheriting the daemon host's credentials.
+	//
+	// Isolation, when set, decides this instead of TrustedLocal -- see that
+	// field for why the two had to become separable.
+	if !r.isolate() {
+		return nil, profile.ID, nil
+	}
+
+	home, err := runtimehome.Prepare(r.DataDir, owner)
+	if err != nil {
+		return nil, "", fmt.Errorf("providerruntime: prepare runtime-home: %w", err)
+	}
+	r.reportKeychain(owner, home)
+	return home.SubprocessEnv(), profile.ID, nil
+}
+
+func (r *Resolver) matchingProfile(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (domain.ProviderProfile, bool, error) {
+	if r.Profiles == nil {
+		return domain.ProviderProfile{}, false, nil
+	}
+	profiles, err := r.Profiles.ListProviderProfilesByUser(ctx, owner)
+	if err != nil {
+		return domain.ProviderProfile{}, false, err
+	}
+	for _, p := range profiles {
+		if p.Harness == harness && p.Enabled {
+			return p, true, nil
+		}
+	}
+	return domain.ProviderProfile{}, false, nil
+}
+
+// reportKeychain surfaces what preparing this runtime home found about the
+// OS credential store the launch will resolve.
+//
+// It logs rather than fails on purpose: a broken credential store must not
+// stop a launch that does not need one (a launch carrying ANTHROPIC_API_KEY
+// touches no keychain at all), and a launch that DOES need one is refused by
+// the auth preflight with a far more precise reason than "prepare failed".
+// What must never happen again is this state passing unremarked, which is
+// exactly what `_ =` on every security(1) call used to guarantee.
+func (r *Resolver) reportKeychain(owner domain.UserID, home runtimehome.Environment) {
+	if r.Keychain == nil {
+		return
+	}
+	switch {
+	case home.Keychain.Repaired:
+		r.Keychain.Warn("provider runtime keychain could not be opened with AO's stored secret and was replaced; the provider must be re-connected for this user",
+			"user", owner, "keychain", home.Keychain.Path, "quarantined", home.Keychain.QuarantinedPath)
+	case !home.Keychain.State.Usable():
+		r.Keychain.Warn("provider runtime keychain cannot be opened without an interactive prompt; unattended launches that need it will be refused",
+			"user", owner, "keychain", home.Keychain.Path, "detail", home.Keychain.Detail)
+	}
+}

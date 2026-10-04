@@ -451,22 +451,11 @@ func (s *Service) verifyOrchestratorReplacement(project domain.ProjectRecord, se
 	if expected := project.Config.Orchestrator.Harness; expected != "" && sess.Harness != expected {
 		return fmt.Errorf("orchestrator replacement verification failed: new session %s uses harness %q, want %q", sess.ID, sess.Harness, expected)
 	}
-	expectedBranch := sessionmanager.DefaultOrchestratorBranch(serviceSessionPrefix(project), s.dataDir)
+	expectedBranch := sessionmanager.ProjectOrchestratorBranch(project, s.dataDir)
 	if sess.Metadata.Branch != "" && sess.Metadata.Branch != expectedBranch {
 		return fmt.Errorf("orchestrator replacement verification failed: new session %s uses branch %q, want %q", sess.ID, sess.Metadata.Branch, expectedBranch)
 	}
 	return nil
-}
-
-func serviceSessionPrefix(project domain.ProjectRecord) string {
-	if p := strings.TrimSpace(project.Config.SessionPrefix); p != "" {
-		return p
-	}
-	id := project.ID
-	if len(id) <= 12 {
-		return id
-	}
-	return id[:12]
 }
 
 func newestSession(sessions []domain.Session) domain.Session {
@@ -892,6 +881,14 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrNotResumable):
 		return apierr.Conflict("SESSION_NOT_RESUMABLE",
 			"This session has no saved agent session or prompt to resume from", nil)
+	// Checkpoint 8P-E.14: both are legitimate, operator-clearable states of a
+	// direct-branch project, not faults, so they surface as 409 with the full
+	// explanation (which branch, who holds it, what to do) rather than as a
+	// generic 500. The manager's message already names the owner.
+	case errors.Is(err, sessionmanager.ErrBranchBusy):
+		return apierr.Conflict("BRANCH_IN_USE", err.Error(), nil)
+	case errors.Is(err, sessionmanager.ErrBranchDirty):
+		return apierr.Conflict("BRANCH_DIRTY", err.Error(), nil)
 	case errors.Is(err, sessionmanager.ErrProjectNotResolvable):
 		return apierr.Invalid("PROJECT_NOT_RESOLVABLE", "Project is not registered or has no repo. Register it with `ao project add`", nil)
 	case errors.Is(err, sessionmanager.ErrUnknownHarness):
@@ -938,6 +935,17 @@ func toAPIError(err error) error {
 		return apierr.Invalid("BRANCH_NOT_FETCHED", err.Error(), nil)
 	case errors.Is(err, ports.ErrWorkspaceBranchInvalid):
 		return apierr.Invalid("INVALID_BRANCH", err.Error(), nil)
+	// Deliberately NOT INVALID_BRANCH, and deliberately not a 400. A git probe
+	// that was killed or could not start said nothing about the branch name, so
+	// answering "your branch name is invalid" would be AO inventing a permanent
+	// verdict for a transient condition -- which is exactly what turned a
+	// killed `git check-ref-format --branch ao/sige-12/root` into a terminal
+	// INVALID_BRANCH for a name git accepts. A conflict is the honest shape:
+	// the request was not wrong, AO could not resolve it, and retrying is the
+	// remedy.
+	case errors.Is(err, ports.ErrWorkspaceProbeInconclusive):
+		return apierr.Conflict("BRANCH_CHECK_INCONCLUSIVE",
+			"AO could not get an answer from git about this branch (the check was killed or could not run), so it made no claim about the name: "+err.Error(), nil)
 	case errors.Is(err, ports.ErrAgentBinaryNotFound):
 		return apierr.Invalid("AGENT_BINARY_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ports.ErrRuntimePrerequisite):

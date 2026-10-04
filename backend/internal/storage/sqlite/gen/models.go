@@ -12,6 +12,39 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+type AgentCredential struct {
+	ID                string
+	TokenHash         string
+	Role              domain.AgentRole
+	UserID            domain.UserID
+	ProjectID         domain.ProjectID
+	SessionID         domain.SessionID
+	WorkflowRunID     string
+	WorkflowStepID    string
+	ReviewRunID       string
+	RuntimeHandle     string
+	RuntimeInstanceID string
+	Generation        int64
+	Permissions       string
+	CreatedAt         time.Time
+	ExpiresAt         time.Time
+	LastSeenAt        time.Time
+	RevokedAt         sql.NullTime
+}
+
+type AgentHealthEvent struct {
+	ID                  string
+	Harness             string
+	State               string
+	Reason              string
+	FailureClass        string
+	CooldownUntil       sql.NullTime
+	ConsecutiveFailures int64
+	CreatedAt           time.Time
+	UserID              sql.NullString
+	ProviderProfileID   sql.NullString
+}
+
 type AgentModelCatalog struct {
 	AgentID       string
 	ProjectID     string
@@ -59,10 +92,130 @@ type AgentSwitch struct {
 	FinalHandoffHash        string
 }
 
+type AgentToolCoverage struct {
+	UsageSourceID     int64
+	BindingID         int64
+	CoveredFrom       int64
+	CoveredTo         int64
+	MinExtractor      int64
+	MaxExtractor      int64
+	PreCoverageEvents int64
+	FirstCoveredAt    time.Time
+	UpdatedAt         time.Time
+}
+
+type AgentToolObservation struct {
+	ID             int64
+	BindingID      int64
+	UsageSourceID  sql.NullInt64
+	ObservationKey string
+	EventKey       string
+	Ordinal        int64
+	ObservedAt     sql.NullTime
+	Origin         string
+	Op             string
+	ToolName       string
+	PathScope      string
+	Path           sql.NullString
+	ResultBytes    sql.NullInt64
+	ResultItems    sql.NullInt64
+	ResultError    sql.NullInt64
+	RecordedAt     time.Time
+}
+
+type AgentToolObservationAttribution struct {
+	ObservationID    int64
+	BindingID        int64
+	UsageSourceID    sql.NullInt64
+	SubjectKind      string
+	SubjectID        string
+	Harness          string
+	ObservationKey   string
+	EventKey         string
+	Ordinal          int64
+	ObservedAt       sql.NullTime
+	Origin           string
+	Op               string
+	ToolName         string
+	PathScope        string
+	Path             sql.NullString
+	ResultBytes      sql.NullInt64
+	ResultItems      sql.NullInt64
+	ResultError      sql.NullInt64
+	WindowID         interface{}
+	AttributionBasis string
+}
+
 type AppSetting struct {
-	ID                 int64
-	DefaultSessionMode domain.SessionMode
-	UpdatedAt          time.Time
+	ID                        int64
+	DefaultSessionMode        domain.SessionMode
+	UpdatedAt                 time.Time
+	EmailNotificationsEnabled int64
+	EmailRecipient            string
+	SmtpHost                  string
+	SmtpPort                  int64
+	SmtpUsername              string
+	SmtpPasswordEncrypted     string
+	SmtpTls                   string
+	EmailOnCompleted          int64
+	EmailOnNeedsAttention     int64
+	EmailOnFailed             int64
+}
+
+type AuthSession struct {
+	ID         string
+	UserID     domain.UserID
+	TokenHash  string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastSeenAt time.Time
+	RevokedAt  sql.NullTime
+	AuthMethod domain.AuthMethod
+	Issuer     string
+	Subject    string
+}
+
+type BranchLock struct {
+	ID             string
+	LockKey        string
+	ProjectID      string
+	RepoPath       string
+	RepoName       string
+	Branch         string
+	WorkflowRunID  string
+	WorkflowStepID sql.NullString
+	SessionID      sql.NullString
+	OwnerToken     string
+	State          string
+	BaseSha        string
+	AcquiredAt     time.Time
+	RenewedAt      time.Time
+	ReleasedAt     sql.NullTime
+	ReleaseReason  string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	OwnershipKind  string
+}
+
+type CapacityClaim struct {
+	ID                  string
+	ExecutionKind       string
+	State               string
+	WorkflowRunID       string
+	WorkflowStepID      string
+	TaskID              string
+	LifecycleGeneration int64
+	DispatchKey         string
+	OwnerID             string
+	ProjectID           string
+	RuntimeHandle       string
+	RuntimeInstanceID   string
+	Priority            int64
+	EnqueuedAt          time.Time
+	HeldAt              sql.NullTime
+	ReleasedAt          sql.NullTime
+	ReleaseReason       string
+	UpdatedAt           time.Time
 }
 
 type ChangeLog struct {
@@ -72,6 +225,83 @@ type ChangeLog struct {
 	EventType cdc.EventType
 	Payload   string
 	CreatedAt time.Time
+}
+
+type CodeGraphEdge struct {
+	ProjectID  string
+	RepoID     string
+	Generation int64
+	EdgeID     string
+	Path       string
+	Kind       string
+	FromKey    string
+	ToKey      string
+	Line       int64
+	UpdatedAt  time.Time
+}
+
+type CodeGraphFile struct {
+	ProjectID   string
+	RepoID      string
+	Generation  int64
+	Path        string
+	Language    string
+	Role        string
+	ContentHash string
+	SizeBytes   int64
+	UpdatedAt   time.Time
+}
+
+type CodeGraphIndex struct {
+	ProjectID          string
+	RepoID             string
+	RepoPath           string
+	Backend            string
+	Generation         int64
+	ServedGeneration   int64
+	Phase              string
+	IndexedCommit      string
+	PendingCommit      string
+	Branch             string
+	RepoIdentity       string
+	FileCount          int64
+	SymbolCount        int64
+	EdgeCount          int64
+	LastSyncKind       string
+	LastFilesParsed    int64
+	LastFilesReused    int64
+	LastFilesRemoved   int64
+	LastSymbolsAdded   int64
+	LastSymbolsRemoved int64
+	LastEdgesAdded     int64
+	LastEdgesRemoved   int64
+	LastDurationMs     int64
+	LastError          string
+	Architecture       string
+	ArchitectureJson   string
+	StartedAt          sql.NullTime
+	CompletedAt        sql.NullTime
+	UpdatedAt          time.Time
+}
+
+type CodeGraphSymbol struct {
+	ProjectID     string
+	RepoID        string
+	Generation    int64
+	SymbolID      string
+	Path          string
+	Name          string
+	Kind          string
+	Language      string
+	Line          int64
+	EndLine       int64
+	Signature     string
+	Doc           string
+	Summary       string
+	SummarySource string
+	Exported      int64
+	BodyHash      string
+	UpdatedAt     time.Time
 }
 
 type Conversation struct {
@@ -191,10 +421,93 @@ type ConversationTurn struct {
 	PromotedToTurnID     sql.NullString
 }
 
+type ExecutionPlacement struct {
+	ID                  string
+	WorkflowRunID       string
+	TaskID              string
+	WorkflowStepID      string
+	ProjectID           string
+	PlacementGeneration int64
+	LifecycleGeneration int64
+	PlacementType       string
+	RepoPath            string
+	BaseBranch          string
+	BaseSha             string
+	ExecutionBranch     string
+	WorktreePath        string
+	WorktreeRecordID    string
+	MergeTarget         string
+	OwnerToken          string
+	State               string
+	Provenance          string
+	WaitingReason       string
+	IntegratedSha       string
+	Detail              string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	FinalizedAt         sql.NullTime
+}
+
+type ExecutionPlacementOverride struct {
+	ID                 string
+	WorkflowRunID      string
+	TaskID             string
+	WorkflowStepID     string
+	ProjectID          string
+	RequestedPlacement string
+	RequestedBy        string
+	Reason             string
+	State              string
+	AppliedGeneration  int64
+	Detail             string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	ResolvedAt         sql.NullTime
+}
+
+type ExecutionPlacementTransition struct {
+	ID                  string
+	WorkflowRunID       string
+	TaskID              string
+	WorkflowStepID      string
+	ProjectID           string
+	FromGeneration      int64
+	ToGeneration        int64
+	FromPlacementType   string
+	FromRepoPath        string
+	FromExecutionBranch string
+	FromWorktreePath    string
+	FromBaseSha         string
+	RequestedPlacement  string
+	ToPlacementType     string
+	RequestedBy         string
+	Reason              string
+	ExpectedState       string
+	QuiescenceDigest    string
+	State               string
+	RefusalReason       string
+	Detail              string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type ExternalIdentity struct {
+	ID            string
+	UserID        domain.UserID
+	Issuer        string
+	Subject       string
+	Email         string
+	EmailVerified bool
+	DisplayName   string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	LastLoginAt   sql.NullTime
+}
+
 type ModelUsageEvent struct {
 	ID                  int64
 	BindingID           int64
-	UsageSourceID       int64
+	UsageSourceID       sql.NullInt64
 	ModelID             string
 	InputTokens         int64
 	UncachedInputTokens int64
@@ -203,19 +516,64 @@ type ModelUsageEvent struct {
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
 	SourceEventKey      string
+	ObservedAt          sql.NullTime
+	RecordedAt          sql.NullTime
+	TurnClass           domain.TurnClass
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
 }
 
 type Notification struct {
-	ID         string
-	SessionID  domain.SessionID
-	ProjectID  domain.ProjectID
-	PRURL      string
-	Type       domain.NotificationType
-	Title      string
-	Body       string
-	Status     domain.NotificationStatus
-	CreatedAt  time.Time
-	ResolvedAt sql.NullTime
+	ID            string
+	SessionID     *domain.SessionID
+	ProjectID     domain.ProjectID
+	WorkflowRunID string
+	PRURL         string
+	DedupeKey     string
+	Type          domain.NotificationType
+	Title         string
+	Body          string
+	Status        domain.NotificationStatus
+	CreatedAt     time.Time
+	ResolvedAt    sql.NullTime
+	Recipient     domain.NotificationRecipient
+	TaskID        string
+	Severity      domain.NotificationSeverity
+	ReadAt        sql.NullTime
+	DeliveryState domain.NotificationDeliveryState
+	Source        domain.NotificationSource
+	SourceEventID string
+}
+
+type NotificationEmailOutbox struct {
+	NotificationID string
+	Recipient      domain.NotificationRecipient
+	State          string
+	Subject        string
+	Body           string
+	AttemptCount   int64
+	MaxAttempts    int64
+	NextAttemptAt  time.Time
+	LeaseExpiresAt sql.NullTime
+	LastError      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	CompletedAt    sql.NullTime
+}
+
+type OidcLoginFlow struct {
+	ID                  string
+	Nonce               string
+	CodeVerifier        string
+	RedirectUri         string
+	ReturnTo            string
+	ClientKind          string
+	HandoffSecretHash   string
+	AuthenticatedUserID *domain.UserID
+	AuthenticatedAt     sql.NullTime
+	CreatedAt           time.Time
+	ExpiresAt           time.Time
+	ConsumedAt          sql.NullTime
 }
 
 type PR struct {
@@ -313,6 +671,19 @@ type PRReviewThread struct {
 	UpdatedAt    time.Time
 }
 
+type PostRunQaRun struct {
+	ID               string
+	SubjectKind      string
+	SubjectID        string
+	Phase            string
+	FindingsJson     string
+	RepairCycleCount int64
+	MaxRepairCycles  int64
+	Result           string
+	StartedAt        time.Time
+	CompletedAt      sql.NullTime
+}
+
 type Project struct {
 	ID            domain.ProjectID
 	Path          string
@@ -322,6 +693,181 @@ type Project struct {
 	ArchivedAt    sql.NullTime
 	Config        sql.NullString
 	Kind          string
+	OwnerUserID   *domain.UserID
+	TenantID      domain.TenantID
+}
+
+type ProjectGrant struct {
+	ID          string
+	ProjectID   domain.ProjectID
+	SubjectKind domain.GrantSubjectKind
+	SubjectID   string
+	Role        domain.ProjectRole
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	CreatedBy   domain.UserID
+}
+
+type ProjectMemoryContextManifest struct {
+	ID               string
+	ProjectID        string
+	RepoID           string
+	WorkflowRunID    string
+	TaskRef          string
+	Role             string
+	PackDigest       string
+	PolicyVersion    int64
+	Generation       int64
+	IndexedCommit    string
+	ItemIdsJson      string
+	ItemCount        int64
+	SelectedBytes    int64
+	EstimatedTokens  int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ItemVersionsJson string
+	RoleHeadSha      string
+}
+
+type ProjectMemoryFile struct {
+	ProjectID     string
+	RepoID        string
+	Path          string
+	ContentDigest string
+	SizeBytes     int64
+	Generation    int64
+	IndexedCommit string
+	UpdatedAt     time.Time
+}
+
+type ProjectMemoryIndex struct {
+	ProjectID        string
+	RepoID           string
+	RepoPath         string
+	Generation       int64
+	Phase            string
+	IndexedCommit    string
+	PendingCommit    string
+	Branch           string
+	ResumeCursor     string
+	FilesSeen        int64
+	FilesIndexed     int64
+	FilesSkipped     int64
+	ItemsWritten     int64
+	RelationsWritten int64
+	LastError        string
+	StartedAt        sql.NullTime
+	CompletedAt      sql.NullTime
+	UpdatedAt        time.Time
+}
+
+type ProjectMemoryItem struct {
+	ID                 string
+	ProjectID          string
+	RepoID             string
+	ItemType           string
+	Scope              string
+	ItemKey            string
+	Origin             string
+	OriginRef          string
+	Summary            string
+	Content            string
+	SourcePathsJson    string
+	SourceCommit       string
+	SourceDigest       string
+	Generation         int64
+	State              string
+	StateReason        string
+	Confidence         float64
+	MetadataJson       string
+	ContentHash        string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	InvalidatedAt      sql.NullTime
+	Authority          string
+	AuthorityReason    string
+	RepoIdentity       string
+	ProvenanceKind     string
+	PromotionAuthority string
+	VerifiedCommit     string
+	IntegratedCommit   string
+	EvidenceClass      string
+}
+
+type ProjectMemoryRelation struct {
+	ID              string
+	ProjectID       string
+	RepoID          string
+	FromKind        string
+	FromKey         string
+	RelationKind    string
+	ToKind          string
+	ToKey           string
+	Origin          string
+	OriginRef       string
+	SourcePathsJson string
+	SourceCommit    string
+	SourceDigest    string
+	Generation      int64
+	State           string
+	StateReason     string
+	Confidence      float64
+	MetadataJson    string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	InvalidatedAt   sql.NullTime
+	Authority       string
+	AuthorityReason string
+	RepoIdentity    string
+}
+
+type ProjectMemorySource struct {
+	OwnerKind string
+	OwnerID   string
+	ProjectID string
+	RepoID    string
+	Path      string
+}
+
+type ProviderAttempt struct {
+	ID                     string
+	WorkflowRunID          string
+	WorkflowStepID         string
+	TaskID                 string
+	ProjectID              string
+	LifecycleGeneration    int64
+	PlacementGeneration    int64
+	Ordinal                int64
+	Provider               string
+	ProfileID              string
+	State                  string
+	FailureReason          string
+	FailureClass           string
+	FailoverSafety         string
+	MutationEvidenceDigest string
+	RuntimeSessionID       string
+	CapacityClaimID        string
+	PredecessorAttemptID   string
+	SuccessorAttemptID     string
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	TerminalAt             sql.NullTime
+}
+
+type ProviderProfile struct {
+	ID               string
+	UserID           string
+	Provider         string
+	Harness          string
+	DisplayName      string
+	Enabled          int64
+	AuthState        string
+	AuthMethod       string
+	DefaultModel     sql.NullString
+	Capabilities     string
+	SecretCiphertext []byte
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type Review struct {
@@ -352,6 +898,10 @@ type ReviewRun struct {
 	BatchID          string
 	AutoInjectReview bool
 	TriggerSource    domain.ReviewTriggerSource
+	LateVerdict      string
+	LateVerdictBody  string
+	LateVerdictAt    sql.NullTime
+	SupersededBy     string
 }
 
 type Session struct {
@@ -394,6 +944,11 @@ type Session struct {
 	NativeTranscriptPath      string
 	AutoInjectCI              bool
 	AutoReviewEnabled         bool
+	OwnerUserID               *domain.UserID
+	TurnCompletedAt           sql.NullTime
+	RuntimeInstanceID         string
+	RuntimeOwnerToken         string
+	LastSignalAt              sql.NullTime
 }
 
 type SessionCleanupFact struct {
@@ -451,6 +1006,332 @@ type ShellTerminal struct {
 	SessionID  sql.NullString
 }
 
+type SkillActivation struct {
+	ProjectID    domain.ProjectID
+	SkillID      string
+	Version      string
+	Enabled      int64
+	Capabilities string
+	ApprovedBy   string
+	ApprovedAt   sql.NullTime
+	UpdatedAt    time.Time
+}
+
+type SkillAudit struct {
+	ID           string
+	OccurredAt   time.Time
+	Actor        string
+	Action       string
+	SkillID      string
+	Version      string
+	ProjectID    *domain.ProjectID
+	Digest       string
+	Capabilities string
+	Detail       string
+}
+
+type SkillExternalTag struct {
+	RegistryID      string
+	Owner           string
+	Repository      string
+	Tag             string
+	CommitSha       string
+	FirstObservedAt time.Time
+	LastObservedAt  time.Time
+	MovedFromCommit string
+	MovedAt         sql.NullTime
+}
+
+type SkillImageApproval struct {
+	ID         string
+	TenantID   domain.TenantID
+	ProjectID  domain.ProjectID
+	SkillID    string
+	Version    string
+	ModeID     string
+	Tool       string
+	Reference  string
+	Digest     string
+	ApprovedBy string
+	ApprovedAt time.Time
+	ExpiresAt  sql.NullTime
+	RevokedAt  sql.NullTime
+	Note       string
+}
+
+type SkillInstall struct {
+	SkillID      string
+	Version      string
+	Name         string
+	Description  string
+	RiskLevel    string
+	OriginType   string
+	OriginRef    string
+	Digest       string
+	ManifestJson string
+	PackageDir   string
+	InstalledAt  time.Time
+	InstalledBy  string
+}
+
+type SkillInstallOrigin struct {
+	SkillID                 string
+	Version                 string
+	RegistryID              string
+	RegistryName            string
+	RegistryType            string
+	RegistryLocation        string
+	Publisher               string
+	SourceURL               string
+	ManifestDigest          string
+	ArtifactDigest          string
+	TrustState              string
+	TrustPolicy             string
+	SignatureFormat         string
+	Signature               string
+	KeyID                   string
+	AttestationURL          string
+	CompatibilityVerdict    string
+	PublishedAt             sql.NullTime
+	InstalledAt             time.Time
+	InstalledBy             string
+	RevokedAt               sql.NullTime
+	RevocationReason        string
+	RevocationSeenAt        sql.NullTime
+	SignatureScheme         string
+	SignatureAlgorithm      string
+	SigningKeyID            string
+	SigningKeyFingerprint   string
+	SigningKeyOrigin        string
+	TrustRootID             string
+	TrustRootTier           string
+	SignatureSignedAt       sql.NullTime
+	SignatureVerifiedAt     sql.NullTime
+	SignatureResult         string
+	RevocationStateObserved string
+	MetadataFetchedAt       sql.NullTime
+	SourceProvider          string
+	SourceOwner             string
+	SourceRepository        string
+	SourceTag               string
+	SourceCommit            string
+	SourcePath              string
+	SourceVisibility        string
+	SourceFetchedAt         sql.NullTime
+}
+
+type SkillPentestAuthorization struct {
+	ID               string
+	ProjectID        domain.ProjectID
+	SkillID          string
+	TargetScheme     string
+	TargetHost       string
+	TargetPort       int64
+	ScopePaths       string
+	PentestType      string
+	RequestedBy      string
+	AuthorizationRef string
+	Confirmed        int64
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
+	RevokedAt        sql.NullTime
+}
+
+type SkillRegistry struct {
+	ID                   string
+	DisplayName          string
+	Type                 string
+	Location             string
+	Enabled              int64
+	TrustPolicy          string
+	PinnedPublisher      string
+	Priority             int64
+	TenantID             *domain.TenantID
+	CredentialSecretName string
+	AuthType             string
+	ApiKeyHeader         string
+	NetworkPolicy        string
+	Owner                string
+	Repository           string
+	AllowedOwners        string
+	CreatedAt            time.Time
+	CreatedBy            string
+	UpdatedAt            time.Time
+	UpdatedBy            string
+}
+
+type SkillRegistryRevocation struct {
+	RegistryID string
+	Subject    string
+	SubjectKey string
+	SkillID    string
+	Version    string
+	Reason     string
+	RevokedAt  sql.NullTime
+	ObservedAt time.Time
+}
+
+type SkillRegistryStatus struct {
+	RegistryID           string
+	LastProbeState       string
+	LastProbeDetail      string
+	LastProbeAt          sql.NullTime
+	LastProbeLatencyMs   int64
+	LastSyncAt           sql.NullTime
+	LastRevocationSyncAt sql.NullTime
+	UpdatedAt            time.Time
+}
+
+type SkillRun struct {
+	ID               string
+	ProjectID        domain.ProjectID
+	SkillID          string
+	SkillVersion     string
+	ModeID           string
+	Tool             string
+	State            string
+	IdempotencyKey   sql.NullString
+	RequestedBy      string
+	InputsJson       string
+	CapabilitiesJson string
+	PackageDigest    string
+	RunnerID         string
+	RunnerControls   string
+	OwnerInstance    string
+	ImageDigest      string
+	ApprovalID       string
+	ApprovedBy       string
+	Summary          string
+	FindingCount     int64
+	Truncated        int64
+	ReportJson       sql.NullString
+	ReportSha256     string
+	ErrorCode        string
+	ErrorMessage     string
+	CancelRequested  int64
+	CreatedAt        time.Time
+	StartedAt        sql.NullTime
+	FinishedAt       sql.NullTime
+	UpdatedAt        time.Time
+	ParentRunID      sql.NullString
+}
+
+type SkillRunFinding struct {
+	RunID          string
+	Ordinal        int64
+	RuleID         string
+	Severity       string
+	Category       string
+	Title          string
+	Path           string
+	Line           int64
+	Recommendation string
+	Confidence     string
+}
+
+type SkillSecret struct {
+	Name        string
+	Description string
+	SealedValue string
+	CreatedAt   time.Time
+	CreatedBy   string
+	UpdatedAt   time.Time
+}
+
+type SkillSecretGrant struct {
+	ID         string
+	SecretName string
+	TenantID   domain.TenantID
+	ProjectID  domain.ProjectID
+	SkillID    string
+	Version    string
+	ModeID     string
+	GrantedBy  string
+	GrantedAt  time.Time
+	ExpiresAt  time.Time
+	RevokedAt  sql.NullTime
+}
+
+type SkillSecretLease struct {
+	ID         string
+	TenantID   domain.TenantID
+	ProjectID  domain.ProjectID
+	SkillID    string
+	Version    string
+	ModeID     string
+	RunID      string
+	AttemptID  string
+	Refs       string
+	IssuedAt   time.Time
+	ExpiresAt  time.Time
+	ConsumedAt sql.NullTime
+}
+
+type SkillSigningKey struct {
+	KeyID            string
+	TrustRootID      string
+	Publisher        string
+	IsRootKey        int64
+	Algorithm        string
+	PublicKey        string
+	Fingerprint      string
+	Origin           string
+	Status           string
+	ValidFrom        time.Time
+	ValidUntil       sql.NullTime
+	RevokedAt        sql.NullTime
+	RevocationReason string
+	RotatedFromKeyID string
+	CreatedAt        time.Time
+	CreatedBy        string
+	UpdatedAt        time.Time
+	UpdatedBy        string
+}
+
+type SkillTrustRevocation struct {
+	Subject   string
+	SubjectID string
+	Reason    string
+	RevokedAt time.Time
+	RevokedBy string
+}
+
+type SkillTrustRoot struct {
+	ID               string
+	Tier             string
+	DisplayName      string
+	Publisher        string
+	Status           string
+	ValidFrom        time.Time
+	ValidUntil       sql.NullTime
+	RevokedAt        sql.NullTime
+	RevocationReason string
+	CreatedAt        time.Time
+	CreatedBy        string
+	UpdatedAt        time.Time
+	UpdatedBy        string
+}
+
+type Team struct {
+	ID          domain.TeamID
+	Name        string
+	Slug        string
+	Description string
+	Status      domain.TeamStatus
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	TenantID    domain.TenantID
+}
+
+type TeamMembership struct {
+	ID        string
+	TeamID    domain.TeamID
+	UserID    domain.UserID
+	Role      domain.TeamRole
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type TelemetryEvent struct {
 	ID          string
 	OccurredAt  time.Time
@@ -463,9 +1344,51 @@ type TelemetryEvent struct {
 	PayloadJson string
 }
 
+type Tenant struct {
+	ID          domain.TenantID
+	Name        string
+	Slug        string
+	Description string
+	Status      domain.TenantStatus
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type TenantMembership struct {
+	ID        string
+	TenantID  domain.TenantID
+	UserID    domain.UserID
+	Role      domain.TenantRole
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type UsageAttributionWindow struct {
+	ID                  int64
+	DedupeKey           string
+	SessionID           string
+	ProjectID           string
+	WorkflowRunID       string
+	ParentWorkflowRunID string
+	TaskID              string
+	WorkflowStepID      string
+	AttemptID           string
+	AttemptOrdinal      int64
+	Cycle               int64
+	Role                string
+	Harness             string
+	Provider            string
+	Model               string
+	OpenedAt            time.Time
+	CreatedAt           time.Time
+	SubjectKind         string
+}
+
 type UsageBinding struct {
 	ID             int64
-	SessionID      domain.SessionID
+	SubjectKind    string
+	SubjectID      string
+	SessionID      *domain.SessionID
 	Harness        domain.AgentHarness
 	NativeRootID   string
 	InitialModelID string
@@ -487,8 +1410,31 @@ type UsageCodexSourceDiscovery struct {
 	HasMixedChildTypes     int64
 }
 
+type UsageEventAttribution struct {
+	EventID             int64
+	BindingID           int64
+	SubjectKind         string
+	SubjectID           string
+	SessionID           sql.NullString
+	Harness             string
+	ModelID             string
+	InputTokens         int64
+	UncachedInputTokens int64
+	CacheReadTokens     int64
+	CacheWriteTokens    int64
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
+	OutputTokens        int64
+	ReasoningTokens     sql.NullInt64
+	TurnClass           string
+	ObservedAt          sql.NullTime
+	RecordedAt          sql.NullTime
+	WindowID            interface{}
+	AttributionBasis    string
+}
+
 type UsageSessionIntegrity struct {
-	SessionID  string
+	SessionID  sql.NullString
 	Incomplete int64
 }
 
@@ -509,6 +1455,411 @@ type UsageSource struct {
 	NextRetryAt     sql.NullTime
 	LastErrorCode   string
 	UpdatedAt       time.Time
+}
+
+type User struct {
+	ID           domain.UserID
+	DisplayName  string
+	Email        string
+	Username     string
+	PasswordHash string
+	Status       domain.UserStatus
+	Role         domain.UserRole
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type UserExecutionPolicy struct {
+	ID                       string
+	UserID                   string
+	Version                  string
+	AutonomousMode           int64
+	PlannerPriority          string
+	WorkerPriority           string
+	ReviewerPriority         string
+	DecisionResolverPriority string
+	FallbackBehavior         string
+	ReviewIndependence       string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+}
+
+type WorkItemConfig struct {
+	ProjectID           string
+	Provider            string
+	BaseURL             string
+	Workspace           string
+	ExternalProjectID   string
+	ExternalProjectName string
+	ExternalProjectKey  string
+	ApiTokenEncrypted   string
+	Enabled             int64
+	SyncStates          int64
+	SyncComments        int64
+	LastCheckAt         sql.NullTime
+	LastCheckOk         int64
+	LastCheckError      string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type WorkItemLink struct {
+	ID                string
+	ProjectID         string
+	Scope             string
+	ScopeID           string
+	Provider          string
+	Workspace         string
+	ExternalProjectID string
+	ExternalItemID    string
+	ExternalItemKey   string
+	Origin            string
+	SyncEnabled       int64
+	LastSeenTitle     string
+	LastSeenState     string
+	LastSeenAt        sql.NullTime
+	CreatedBy         string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type WorkItemSyncAudit struct {
+	ID              string
+	ProjectID       string
+	LinkID          string
+	Provider        string
+	Operation       string
+	ExternalItemID  string
+	ExternalItemKey string
+	Outcome         string
+	ErrorKind       string
+	Detail          string
+	Attempts        int64
+	DurationMs      int64
+	CreatedAt       time.Time
+}
+
+type WorkItemSyncOutbox struct {
+	ID            string
+	ProjectID     string
+	LinkID        string
+	Event         string
+	Body          string
+	TargetState   string
+	DedupeKey     string
+	Status        string
+	Attempts      int64
+	NextAttemptAt sql.NullTime
+	LastError     string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type WorkflowAttempt struct {
+	ID                      string
+	WorkflowStepID          string
+	AttemptNumber           int64
+	Harness                 string
+	Model                   string
+	StartedAt               time.Time
+	FinishedAt              sql.NullTime
+	Outcome                 *domain.WorkflowAttemptOutcome
+	ErrorClass              *domain.WorkflowErrorClass
+	RetryAfter              sql.NullTime
+	DeadlineAt              sql.NullTime
+	ReviewTargetReviewRunID sql.NullString
+	ReviewTargetFingerprint string
+	ReviewTargetHeadSha     string
+}
+
+type WorkflowCheckpoint struct {
+	ID                string
+	WorkflowRunID     string
+	WorkflowStepID    sql.NullString
+	AttemptID         sql.NullString
+	ProjectID         domain.ProjectID
+	SessionID         sql.NullString
+	Branch            string
+	WorktreePath      string
+	BaseSha           string
+	HeadSha           string
+	ReviewRunID       sql.NullString
+	ReviewVerdict     string
+	RetryState        string
+	NextAction        string
+	DurablePhase      string
+	PayloadVersion    string
+	CreatedAt         time.Time
+	FingerprintBefore string
+	FingerprintAfter  string
+}
+
+type WorkflowDispatchCheckpoint struct {
+	ID                   string
+	WorkflowRunID        string
+	WorkflowStepID       sql.NullString
+	AttemptID            sql.NullString
+	CheckpointID         sql.NullString
+	Phase                string
+	IdempotencyKey       string
+	Harness              string
+	SessionID            sql.NullString
+	LaunchStage          string
+	LaunchOutcome        string
+	ErrorClass           string
+	EvidenceJson         string
+	Detail               string
+	CreatedAt            time.Time
+	Branch               string
+	WorktreePath         string
+	BaseSha              string
+	WorkspaceFingerprint string
+	RuntimeHandleID      string
+	RuntimeLaunchID      string
+	AgentSessionID       string
+	LaunchedAt           sql.NullTime
+}
+
+type WorkflowMutationProvenance struct {
+	ID                         string
+	WorkflowRunID              string
+	WorkflowStepID             sql.NullString
+	AttemptID                  sql.NullString
+	TaskID                     string
+	ProvenanceClass            string
+	Harness                    string
+	SessionID                  sql.NullString
+	Branch                     string
+	WorktreePath               string
+	BaseSha                    string
+	HeadSha                    string
+	FingerprintBefore          string
+	FingerprintAfter           string
+	Reason                     string
+	EvidenceJson               string
+	ObservedAt                 sql.NullTime
+	CreatedAt                  time.Time
+	ProjectID                  string
+	RepoIdentity               string
+	RepoPath                   string
+	Placement                  string
+	Boundary                   string
+	Generation                 int64
+	IntegrationTargetRef       string
+	IntegrationTargetBeforeSha string
+	IntegrationTargetAfterSha  string
+	IntegrationMethod          string
+	IdempotencyKey             string
+}
+
+type WorkflowOutbox struct {
+	ID                 string
+	WorkflowRunID      string
+	WorkflowStepID     sql.NullString
+	IdempotencyKey     string
+	CommandType        domain.WorkflowOutboxCommandType
+	Payload            string
+	Status             domain.WorkflowOutboxStatus
+	CreatedAt          time.Time
+	DispatchedAt       sql.NullTime
+	AcknowledgedAt     sql.NullTime
+	FailedAt           sql.NullTime
+	ErrorClass         string
+	FailureGeneration  string
+	DispatchGeneration string
+}
+
+type WorkflowPlan struct {
+	WorkflowRunID        string
+	Status               string
+	ApprovalMode         string
+	Provider             string
+	Model                string
+	PromptContextVersion string
+	ContextManifestJson  string
+	GeneratedPlanJson    string
+	ValidationJson       string
+	PlanHash             string
+	CommandStatus        string
+	ErrorClass           string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	GeneratedAt          sql.NullTime
+	ApprovedAt           sql.NullTime
+	RejectedAt           sql.NullTime
+	Revision             int64
+}
+
+type WorkflowQuestion struct {
+	ID                   string
+	WorkflowRunID        string
+	WorkflowStepID       sql.NullString
+	WorkflowAttemptID    sql.NullString
+	SessionID            sql.NullString
+	AskingHarness        sql.NullString
+	AskingRole           sql.NullString
+	Fingerprint          string
+	QuestionText         string
+	StructuredChoices    sql.NullString
+	CaptureProvider      sql.NullString
+	CaptureParserVersion sql.NullString
+	CaptureRangeLines    sql.NullInt64
+	Certainty            sql.NullString
+	Classification       sql.NullString
+	ClassificationReason sql.NullString
+	State                sql.NullString
+	CreatedAt            time.Time
+	AnsweredAt           sql.NullTime
+	AnswerSource         sql.NullString
+	AnswerText           sql.NullString
+	AnswerReference      sql.NullString
+	Delivered            int64
+	DeliveredAt          sql.NullTime
+	ResolvingRunID       sql.NullString
+	AutonomyMode         string
+}
+
+type WorkflowQuestionResolution struct {
+	ID                 string
+	WorkflowQuestionID string
+	WorkflowRunID      string
+	AskingSessionID    sql.NullString
+	ResolverHarness    string
+	ResolverSessionID  sql.NullString
+	Status             string
+	Answer             sql.NullString
+	ReasonSummary      sql.NullString
+	EvidenceReferences sql.NullString
+	Certainty          sql.NullString
+	RequiresHuman      int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	CompletedAt        sql.NullTime
+}
+
+type WorkflowRun struct {
+	ID               string
+	ProjectID        domain.ProjectID
+	Objective        string
+	State            domain.WorkflowRunState
+	PolicyVersion    string
+	PolicySnapshot   string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	CompletedAt      sql.NullTime
+	CancelledAt      sql.NullTime
+	ParentWorkflowID sql.NullString
+	PlannedTaskID    sql.NullString
+	UserID           *domain.UserID
+	ArchivedAt       sql.NullTime
+}
+
+type WorkflowStep struct {
+	ID                       string
+	WorkflowRunID            string
+	Kind                     domain.WorkflowStepKind
+	Ordinal                  int64
+	DependsOnStepID          sql.NullString
+	State                    domain.WorkflowStepState
+	AssignedHarness          string
+	SessionID                sql.NullString
+	ReviewRunID              sql.NullString
+	ExpectedArtifactsVersion string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	CompletedAt              sql.NullTime
+	ArtifactJson             string
+}
+
+type WorkflowTask struct {
+	ID                     string
+	WorkflowRunID          string
+	PlanStepID             string
+	Ordinal                int64
+	Title                  string
+	Description            string
+	AcceptanceCriteriaJson string
+	VerifyJson             string
+	ScopeJson              string
+	State                  string
+	AttentionReason        string
+	AttentionJson          string
+	AttentionAt            sql.NullTime
+	ExecutionRunID         sql.NullString
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	CompletedAt            sql.NullTime
+	PlanRevision           int64
+}
+
+type WorkflowTaskCriterionAmendment struct {
+	ID                    string
+	WorkflowRunID         string
+	TaskID                string
+	CriterionIndex        int64
+	OriginalCriterion     string
+	AmendedCriterion      string
+	Disposition           string
+	Reason                string
+	EvidenceJson          string
+	ApprovedBy            string
+	SupersededReviewRunID string
+	CreatedAt             time.Time
+}
+
+type WorkflowTaskDependency struct {
+	WorkflowTaskID  string
+	DependsOnTaskID string
+}
+
+type WorkflowTaskRelationship struct {
+	WorkflowRunID string
+	TaskID        string
+	RelatedTaskID string
+	Relation      string
+	Reason        string
+	Detail        string
+	OverlapJson   string
+	CreatedAt     time.Time
+}
+
+type WorkflowTaskWorktree struct {
+	TaskID           string
+	WorkflowRunID    string
+	ProjectID        string
+	RepoPath         string
+	WorktreePath     string
+	Branch           string
+	TargetBranch     string
+	BaseSha          string
+	DependenciesJson string
+	ExecutionMode    string
+	State            string
+	IntegratedSha    string
+	BranchDeleted    int64
+	Detail           string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ReleasedAt       sql.NullTime
+}
+
+type WorkflowWakeSchedule struct {
+	ID             string
+	WorkflowRunID  string
+	WorkflowStepID sql.NullString
+	Reason         string
+	Status         string
+	IdempotencyKey string
+	ScheduledAt    time.Time
+	KnownResetAt   sql.NullTime
+	AttemptCount   int64
+	ClaimedBy      sql.NullString
+	ClaimedAt      sql.NullTime
+	CompletedAt    sql.NullTime
+	CancelledAt    sql.NullTime
+	LastError      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type WorkspaceRepo struct {

@@ -1,12 +1,34 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AccessSettingsSection } from "./settings/AccessSettingsSection";
+import { AccountSettingsSection } from "./settings/AccountSettingsSection";
+import { DevelopmentAgentsSettingsSection } from "./settings/DevelopmentAgentsSettingsSection";
+import { EfficiencyPolicySettingsSection } from "./settings/EfficiencyPolicySettingsSection";
+import { EmailNotificationsSettingsSection } from "./settings/EmailNotificationsSettingsSection";
+import { EnvironmentSettingsSection } from "./settings/EnvironmentSettingsSection";
+import { ExecutionPolicySettingsSection } from "./settings/ExecutionPolicySettingsSection";
 import { GeneralSettingsSection } from "./settings/GeneralSettingsSection";
+import { ProjectsSettingsSection } from "./settings/ProjectsSettingsSection";
 import { ReportProblemDialog } from "./settings/ReportProblemDialog";
+import { SessionLifecyclePolicySettingsSection } from "./settings/SessionLifecyclePolicySettingsSection";
+import { SkillsSettingsSection } from "./settings/SkillsSettingsSection";
 import { SettingsLinkRow } from "./settings/SettingsRow";
 import { SettingsSection } from "./settings/SettingsSection";
+import { SourceControlSettingsSection } from "./settings/SourceControlSettingsSection";
 import { UpdatesSection } from "./settings/UpdatesSection";
 
-export type GlobalSettingsSection = "general" | "updates" | "help" | "all";
+export type GlobalSettingsSection =
+	| "general"
+	| "environment"
+	| "agents"
+	| "sourceControl"
+	| "projects"
+	| "skills"
+	| "updates"
+	| "account"
+	| "access"
+	| "help"
+	| "all";
 
 export function GlobalSettingsForm({
 	section = "all",
@@ -43,9 +65,38 @@ export function GlobalSettingsForm({
 								onClick={() => onOpenKeyboardShortcuts?.()}
 							/>
 						</SettingsSection>
+						<EmailNotificationsSettingsSection />
+						<EfficiencyPolicySettingsSection />
+						<ExecutionPolicySettingsSection />
+						<SessionLifecyclePolicySettingsSection />
 					</>
 				)}
+				{(section === "all" || section === "environment") && (
+					<EnvironmentSettingsSection titleHidden={leadingTitleHidden} />
+				)}
+				{(section === "all" || section === "agents") && (
+					<DevelopmentAgentsSettingsSection titleHidden={leadingTitleHidden} />
+				)}
+				{(section === "all" || section === "sourceControl") && (
+					<SourceControlSettingsSection titleHidden={leadingTitleHidden} />
+				)}
+				{(section === "all" || section === "projects") && (
+					<ProjectsSettingsSection titleHidden={leadingTitleHidden} />
+				)}
+				{/* Skills moved out of General with phase 10: the marketplace, the
+				    registries it installs from and the image trust root are three
+				    installation-wide decisions, and one of them was already living
+				    under General with no room for the other two. */}
+				{(section === "all" || section === "skills") && (
+					<SkillsSettingsSection titleHidden={leadingTitleHidden} />
+				)}
 				{(section === "all" || section === "updates") && <UpdatesSection titleHidden={leadingTitleHidden} />}
+				{(section === "all" || section === "account") && (
+					<AccountSettingsSection titleHidden={leadingTitleHidden} />
+				)}
+				{(section === "all" || section === "access") && (
+					<AccessSettingsSection titleHidden={leadingTitleHidden} />
+				)}
 				{(section === "all" || section === "help") && (
 					<SettingsSection title={t("settings.getHelp")} titleHidden={leadingTitleHidden} grouped>
 						<SettingsLinkRow label={t("settings.reportProblem")} onClick={() => setReportProblemOpen(true)} />

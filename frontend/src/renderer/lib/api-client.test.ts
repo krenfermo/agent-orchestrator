@@ -7,6 +7,7 @@ import {
 	normalizeApiOperation,
 	setApiDaemonStatus,
 	setApiBaseUrl,
+	setUnauthorizedListener,
 	subscribeApiBaseUrl,
 } from "./api-client";
 import { captureRendererEvent } from "./telemetry";
@@ -76,7 +77,7 @@ describe("apiClient runtime base URL", () => {
 		expect(JSON.parse(seen[0].body ?? "{}")).toEqual({ projectId: "p1", prompt: "hello" });
 	});
 
-	it("skips the rebase when the request already targets the runtime base URL", async () => {
+	it("keeps the target unchanged when the request already points at the runtime base URL", async () => {
 		const seen: (RequestInfo | URL)[] = [];
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
 			seen.push(input);
@@ -87,20 +88,22 @@ describe("apiClient runtime base URL", () => {
 		});
 
 		// Match the base openapi-fetch built the request against (the dev origin
-		// in jsdom), so the rewrite has nothing to do.
+		// in jsdom), so the rewrite has nothing to move.
 		setApiBaseUrl(window.location.origin);
 		const { error } = await apiClient.GET("/api/v1/projects");
 
 		expect(error).toBeUndefined();
 		expect(seen).toHaveLength(1);
-		// Untouched pass-through: fetch receives the original Request object.
-		expect(seen[0]).toBeInstanceOf(Request);
+		// No pass-through of the original Request: every request is dispatched
+		// explicitly so credentials can be set for all of them, not only the ones
+		// that had to be rebased.
+		expect(seen[0].toString()).toBe(`${window.location.origin}/api/v1/projects`);
 	});
 
-	it("passes the request through untouched when the base URL is empty", async () => {
-		const seen: Request[] = [];
+	it("dispatches to the page's own origin when the base URL is empty", async () => {
+		const seen: (RequestInfo | URL)[] = [];
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
-			seen.push(input as Request);
+			seen.push(input);
 			return new Response(JSON.stringify({ projects: [] }), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
@@ -113,9 +116,8 @@ describe("apiClient runtime base URL", () => {
 
 		expect(error).toBeUndefined();
 		expect(getApiBaseUrl()).toBe("");
-		// Empty base → no rewrite; openapi-fetch's own request reaches fetch as-is.
 		expect(seen).toHaveLength(1);
-		expect(seen[0].url).toContain("/api/v1/projects");
+		expect(seen[0].toString()).toContain("/api/v1/projects");
 	});
 
 	it("returns unavailable without fetching when the daemon base URL is untrusted", async () => {
@@ -335,5 +337,107 @@ describe("apiErrorMessage", () => {
 				message: "tmux required (RUNTIME_PREREQUISITE_MISSING)",
 			}),
 		).toBe("tmux required (RUNTIME_PREREQUISITE_MISSING)");
+	});
+});
+
+// The daemon authenticates with an HttpOnly session cookie and is never
+// same-origin with the renderer, so a request that does not ask for credentials
+// arrives anonymous. That was survivable only while identity was synthesized in
+// trusted-local mode; under an auth mode that requires a session it is a 401 on
+// every protected route, from an application that believes it is signed in.
+describe("credentials", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		setApiBaseUrl("http://127.0.0.1:3001");
+		setUnauthorizedListener(null);
+	});
+
+	it("sends the session cookie on every request, including call sites that ask for nothing", async () => {
+		const seen: (RequestCredentials | undefined)[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input: RequestInfo | URL, init?: RequestInit) => {
+			seen.push(init?.credentials);
+			return new Response(JSON.stringify({ projects: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		setApiBaseUrl("http://127.0.0.1:3037");
+		await apiClient.GET("/api/v1/projects");
+		await apiClient.POST("/api/v1/sessions", { body: { projectId: "p1" } as never });
+
+		expect(seen).toEqual(["include", "include"]);
+	});
+
+	it("still sends them when the base URL is the page's own origin", async () => {
+		// The web build reports "" for a ready daemon: same origin, nothing to
+		// rebase, and previously the one path that handed the untouched Request
+		// to fetch — carrying whatever credentials mode the call site chose.
+		const seen: (RequestCredentials | undefined)[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input: RequestInfo | URL, init?: RequestInit) => {
+			seen.push(init?.credentials);
+			return new Response(JSON.stringify({ projects: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		setApiBaseUrl("");
+		await apiClient.GET("/api/v1/projects");
+
+		expect(seen).toEqual(["include"]);
+	});
+});
+
+describe("unauthorized reporting", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		setApiBaseUrl("http://127.0.0.1:3001");
+		setUnauthorizedListener(null);
+	});
+
+	it("reports a 401 from a protected route", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ code: "NOT_AUTHENTICATED" }), {
+				status: 401,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
+		const listener = vi.fn();
+		setUnauthorizedListener(listener);
+
+		await apiClient.GET("/api/v1/projects");
+
+		expect(listener).toHaveBeenCalledWith("/api/v1/projects");
+	});
+
+	it("leaves the auth namespace to answer for itself", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ code: "NOT_AUTHENTICATED" }), {
+				status: 401,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
+		const listener = vi.fn();
+		setUnauthorizedListener(listener);
+
+		await apiClient.GET("/api/v1/auth/me");
+
+		expect(listener).not.toHaveBeenCalled();
+	});
+
+	it("says nothing when the request succeeds", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ projects: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
+		const listener = vi.fn();
+		setUnauthorizedListener(listener);
+
+		await apiClient.GET("/api/v1/projects");
+
+		expect(listener).not.toHaveBeenCalled();
 	});
 });

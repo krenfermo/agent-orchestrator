@@ -11,11 +11,15 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ShellRouteImport } from './routes/_shell'
 import { Route as ShellIndexRouteImport } from './routes/_shell.index'
+import { Route as ShellWorkflowsRouteImport } from './routes/_shell.workflows'
 import { Route as ShellTerminalsRouteImport } from './routes/_shell.terminals'
 import { Route as ShellSettingsRouteImport } from './routes/_shell.settings'
+import { Route as ShellDecisionsRouteImport } from './routes/_shell.decisions'
+import { Route as ShellWorkflowsWorkflowIdRouteImport } from './routes/_shell.workflows.$workflowId'
 import { Route as ShellSessionsSessionIdRouteImport } from './routes/_shell.sessions.$sessionId'
 import { Route as ShellProjectsProjectIdRouteImport } from './routes/_shell.projects.$projectId'
 import { Route as ShellProjectsProjectIdSettingsRouteImport } from './routes/_shell.projects.$projectId_.settings'
+import { Route as ShellProjectsProjectIdIntelligenceRouteImport } from './routes/_shell.projects.$projectId_.intelligence'
 import { Route as ShellProjectsProjectIdSessionsSessionIdRouteImport } from './routes/_shell.projects.$projectId_.sessions.$sessionId'
 
 const ShellRoute = ShellRouteImport.update({
@@ -25,6 +29,11 @@ const ShellRoute = ShellRouteImport.update({
 const ShellIndexRoute = ShellIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellWorkflowsRoute = ShellWorkflowsRouteImport.update({
+  id: '/workflows',
+  path: '/workflows',
   getParentRoute: () => ShellRoute,
 } as any)
 const ShellTerminalsRoute = ShellTerminalsRouteImport.update({
@@ -37,6 +46,17 @@ const ShellSettingsRoute = ShellSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => ShellRoute,
 } as any)
+const ShellDecisionsRoute = ShellDecisionsRouteImport.update({
+  id: '/decisions',
+  path: '/decisions',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellWorkflowsWorkflowIdRoute =
+  ShellWorkflowsWorkflowIdRouteImport.update({
+    id: '/$workflowId',
+    path: '/$workflowId',
+    getParentRoute: () => ShellWorkflowsRoute,
+  } as any)
 const ShellSessionsSessionIdRoute = ShellSessionsSessionIdRouteImport.update({
   id: '/sessions/$sessionId',
   path: '/sessions/$sessionId',
@@ -53,6 +73,12 @@ const ShellProjectsProjectIdSettingsRoute =
     path: '/projects/$projectId/settings',
     getParentRoute: () => ShellRoute,
   } as any)
+const ShellProjectsProjectIdIntelligenceRoute =
+  ShellProjectsProjectIdIntelligenceRouteImport.update({
+    id: '/projects/$projectId_/intelligence',
+    path: '/projects/$projectId/intelligence',
+    getParentRoute: () => ShellRoute,
+  } as any)
 const ShellProjectsProjectIdSessionsSessionIdRoute =
   ShellProjectsProjectIdSessionsSessionIdRouteImport.update({
     id: '/projects/$projectId_/sessions/$sessionId',
@@ -62,30 +88,42 @@ const ShellProjectsProjectIdSessionsSessionIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof ShellIndexRoute
+  '/decisions': typeof ShellDecisionsRoute
   '/settings': typeof ShellSettingsRoute
   '/terminals': typeof ShellTerminalsRoute
+  '/workflows': typeof ShellWorkflowsRouteWithChildren
   '/projects/$projectId': typeof ShellProjectsProjectIdRoute
   '/sessions/$sessionId': typeof ShellSessionsSessionIdRoute
+  '/workflows/$workflowId': typeof ShellWorkflowsWorkflowIdRoute
+  '/projects/$projectId/intelligence': typeof ShellProjectsProjectIdIntelligenceRoute
   '/projects/$projectId/settings': typeof ShellProjectsProjectIdSettingsRoute
   '/projects/$projectId/sessions/$sessionId': typeof ShellProjectsProjectIdSessionsSessionIdRoute
 }
 export interface FileRoutesByTo {
+  '/decisions': typeof ShellDecisionsRoute
   '/settings': typeof ShellSettingsRoute
   '/terminals': typeof ShellTerminalsRoute
+  '/workflows': typeof ShellWorkflowsRouteWithChildren
   '/': typeof ShellIndexRoute
   '/projects/$projectId': typeof ShellProjectsProjectIdRoute
   '/sessions/$sessionId': typeof ShellSessionsSessionIdRoute
+  '/workflows/$workflowId': typeof ShellWorkflowsWorkflowIdRoute
+  '/projects/$projectId/intelligence': typeof ShellProjectsProjectIdIntelligenceRoute
   '/projects/$projectId/settings': typeof ShellProjectsProjectIdSettingsRoute
   '/projects/$projectId/sessions/$sessionId': typeof ShellProjectsProjectIdSessionsSessionIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_shell': typeof ShellRouteWithChildren
+  '/_shell/decisions': typeof ShellDecisionsRoute
   '/_shell/settings': typeof ShellSettingsRoute
   '/_shell/terminals': typeof ShellTerminalsRoute
+  '/_shell/workflows': typeof ShellWorkflowsRouteWithChildren
   '/_shell/': typeof ShellIndexRoute
   '/_shell/projects/$projectId': typeof ShellProjectsProjectIdRoute
   '/_shell/sessions/$sessionId': typeof ShellSessionsSessionIdRoute
+  '/_shell/workflows/$workflowId': typeof ShellWorkflowsWorkflowIdRoute
+  '/_shell/projects/$projectId_/intelligence': typeof ShellProjectsProjectIdIntelligenceRoute
   '/_shell/projects/$projectId_/settings': typeof ShellProjectsProjectIdSettingsRoute
   '/_shell/projects/$projectId_/sessions/$sessionId': typeof ShellProjectsProjectIdSessionsSessionIdRoute
 }
@@ -93,29 +131,41 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/decisions'
     | '/settings'
     | '/terminals'
+    | '/workflows'
     | '/projects/$projectId'
     | '/sessions/$sessionId'
+    | '/workflows/$workflowId'
+    | '/projects/$projectId/intelligence'
     | '/projects/$projectId/settings'
     | '/projects/$projectId/sessions/$sessionId'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/decisions'
     | '/settings'
     | '/terminals'
+    | '/workflows'
     | '/'
     | '/projects/$projectId'
     | '/sessions/$sessionId'
+    | '/workflows/$workflowId'
+    | '/projects/$projectId/intelligence'
     | '/projects/$projectId/settings'
     | '/projects/$projectId/sessions/$sessionId'
   id:
     | '__root__'
     | '/_shell'
+    | '/_shell/decisions'
     | '/_shell/settings'
     | '/_shell/terminals'
+    | '/_shell/workflows'
     | '/_shell/'
     | '/_shell/projects/$projectId'
     | '/_shell/sessions/$sessionId'
+    | '/_shell/workflows/$workflowId'
+    | '/_shell/projects/$projectId_/intelligence'
     | '/_shell/projects/$projectId_/settings'
     | '/_shell/projects/$projectId_/sessions/$sessionId'
   fileRoutesById: FileRoutesById
@@ -140,6 +190,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellIndexRouteImport
       parentRoute: typeof ShellRoute
     }
+    '/_shell/workflows': {
+      id: '/_shell/workflows'
+      path: '/workflows'
+      fullPath: '/workflows'
+      preLoaderRoute: typeof ShellWorkflowsRouteImport
+      parentRoute: typeof ShellRoute
+    }
     '/_shell/terminals': {
       id: '/_shell/terminals'
       path: '/terminals'
@@ -153,6 +210,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/settings'
       preLoaderRoute: typeof ShellSettingsRouteImport
       parentRoute: typeof ShellRoute
+    }
+    '/_shell/decisions': {
+      id: '/_shell/decisions'
+      path: '/decisions'
+      fullPath: '/decisions'
+      preLoaderRoute: typeof ShellDecisionsRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/workflows/$workflowId': {
+      id: '/_shell/workflows/$workflowId'
+      path: '/$workflowId'
+      fullPath: '/workflows/$workflowId'
+      preLoaderRoute: typeof ShellWorkflowsWorkflowIdRouteImport
+      parentRoute: typeof ShellWorkflowsRoute
     }
     '/_shell/sessions/$sessionId': {
       id: '/_shell/sessions/$sessionId'
@@ -175,6 +246,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellProjectsProjectIdSettingsRouteImport
       parentRoute: typeof ShellRoute
     }
+    '/_shell/projects/$projectId_/intelligence': {
+      id: '/_shell/projects/$projectId_/intelligence'
+      path: '/projects/$projectId/intelligence'
+      fullPath: '/projects/$projectId/intelligence'
+      preLoaderRoute: typeof ShellProjectsProjectIdIntelligenceRouteImport
+      parentRoute: typeof ShellRoute
+    }
     '/_shell/projects/$projectId_/sessions/$sessionId': {
       id: '/_shell/projects/$projectId_/sessions/$sessionId'
       path: '/projects/$projectId/sessions/$sessionId'
@@ -185,22 +263,41 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface ShellWorkflowsRouteChildren {
+  ShellWorkflowsWorkflowIdRoute: typeof ShellWorkflowsWorkflowIdRoute
+}
+
+const ShellWorkflowsRouteChildren: ShellWorkflowsRouteChildren = {
+  ShellWorkflowsWorkflowIdRoute: ShellWorkflowsWorkflowIdRoute,
+}
+
+const ShellWorkflowsRouteWithChildren = ShellWorkflowsRoute._addFileChildren(
+  ShellWorkflowsRouteChildren,
+)
+
 interface ShellRouteChildren {
+  ShellDecisionsRoute: typeof ShellDecisionsRoute
   ShellSettingsRoute: typeof ShellSettingsRoute
   ShellTerminalsRoute: typeof ShellTerminalsRoute
+  ShellWorkflowsRoute: typeof ShellWorkflowsRouteWithChildren
   ShellIndexRoute: typeof ShellIndexRoute
   ShellProjectsProjectIdRoute: typeof ShellProjectsProjectIdRoute
   ShellSessionsSessionIdRoute: typeof ShellSessionsSessionIdRoute
+  ShellProjectsProjectIdIntelligenceRoute: typeof ShellProjectsProjectIdIntelligenceRoute
   ShellProjectsProjectIdSettingsRoute: typeof ShellProjectsProjectIdSettingsRoute
   ShellProjectsProjectIdSessionsSessionIdRoute: typeof ShellProjectsProjectIdSessionsSessionIdRoute
 }
 
 const ShellRouteChildren: ShellRouteChildren = {
+  ShellDecisionsRoute: ShellDecisionsRoute,
   ShellSettingsRoute: ShellSettingsRoute,
   ShellTerminalsRoute: ShellTerminalsRoute,
+  ShellWorkflowsRoute: ShellWorkflowsRouteWithChildren,
   ShellIndexRoute: ShellIndexRoute,
   ShellProjectsProjectIdRoute: ShellProjectsProjectIdRoute,
   ShellSessionsSessionIdRoute: ShellSessionsSessionIdRoute,
+  ShellProjectsProjectIdIntelligenceRoute:
+    ShellProjectsProjectIdIntelligenceRoute,
   ShellProjectsProjectIdSettingsRoute: ShellProjectsProjectIdSettingsRoute,
   ShellProjectsProjectIdSessionsSessionIdRoute:
     ShellProjectsProjectIdSessionsSessionIdRoute,

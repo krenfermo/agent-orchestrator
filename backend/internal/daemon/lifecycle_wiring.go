@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/container/dockerreap"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/runtimeselect"
+	directbranchworkspace "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/directbranch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/gitworktree"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
 	scratchworkspace "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/scratch"
@@ -22,6 +23,7 @@ import (
 	activityobserver "github.com/aoagents/agent-orchestrator/backend/internal/observe/activity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/reaper"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
@@ -33,6 +35,12 @@ import (
 type notificationSink interface {
 	Notify(context.Context, ports.NotificationIntent) error
 	Resolve(context.Context, ports.NotificationResolution) error
+}
+
+// sessionFactSink records the durable session-level facts lifecycle observes
+// (a pending decision, a spent repair budget) as notifications.
+type sessionFactSink interface {
+	Record(context.Context, ports.SessionFact) error
 }
 
 // lifecycleStack owns the runtime reaper goroutine started with the lifecycle
@@ -48,15 +56,20 @@ type lifecycleStack struct {
 	autoReviewDone <-chan struct{}
 	scmDone        <-chan struct{}
 	trackerDone    <-chan struct{}
+	wakePollerDone <-chan struct{}
+	// runtimeGCDone is P1-C's periodic Runtime GC loop, awaited on shutdown
+	// like every other background loop here.
+	runtimeGCDone <-chan struct{}
 }
 
 // startLifecycle constructs the Lifecycle Manager over the store and starts the
 // reaper. The goroutine stops when ctx is cancelled; Stop waits for it to drain.
 // The messenger is the per-daemon agent messenger the LCM uses to nudge agents
 // in response to SCM observations (CI failure, review feedback, merge conflict).
-func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runtime, messenger ports.AgentMessenger, notifier notificationSink, telemetry ports.EventSink, agents ports.AgentResolver, logger *slog.Logger) *lifecycleStack {
+func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runtime, messenger ports.AgentMessenger, notifier notificationSink, sessionFacts sessionFactSink, telemetry ports.EventSink, agents ports.AgentResolver, logger *slog.Logger) *lifecycleStack {
 	lcm := lifecycle.New(store, messenger,
 		lifecycle.WithNotificationSink(notifier),
+		lifecycle.WithSessionFactNotifier(sessionFacts),
 		lifecycle.WithTelemetry(telemetry),
 		lifecycle.WithContainerReaper(dockerreap.New(), store),
 		lifecycle.WithActiveSteering(activeTurnSteering(agents)),
@@ -113,6 +126,12 @@ func (l *lifecycleStack) Stop() {
 	if l.trackerDone != nil {
 		<-l.trackerDone
 	}
+	if l.runtimeGCDone != nil {
+		<-l.runtimeGCDone
+	}
+	if l.wakePollerDone != nil {
+		<-l.wakePollerDone
+	}
 }
 
 // sessionLifecycle is the narrow surface of sessionmanager.Manager used for
@@ -164,7 +183,27 @@ func (m sessionLifecycleMessenger) Send(ctx context.Context, id domain.SessionID
 // LCM, the per-session agent resolver, and the agent messenger. The returned
 // service is mounted at httpd APIDeps.Sessions. It also returns the manager so
 // the caller can wire Reconcile into the boot sequence.
-func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
+// sessionStack is what startSession builds: the session subsystem's five
+// outward-facing pieces. They are returned together rather than as five bare
+// results because they are one unit -- the caller mounts Service on the API,
+// wires Manager's Reconcile into the boot sequence, and hands the rest to
+// collaborators that need the same underlying manager.
+type sessionStack struct {
+	// Service is the controller-facing session service, mounted at
+	// httpd APIDeps.Sessions.
+	Service *sessionsvc.Service
+	// Review is the review manager backed by the same session stack.
+	Review reviewsvc.Manager
+	// Lifecycle is the send/stop seam other subsystems drive sessions through.
+	Lifecycle sessionLifecycle
+	// Manager is the raw session manager, exposed so the caller can wire
+	// Reconcile into boot.
+	Manager *sessionmanager.Manager
+	// Workspace is the routed git/scratch workspace observer.
+	Workspace *workspacerouter.Workspace
+}
+
+func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, sessionFacts sessionFactSink, agentCredentials reviewsvc.AgentCredentialCloser, log *slog.Logger) (sessionStack, error) {
 	gitWS, err := gitworktree.New(gitworktree.Options{
 		// Per-session worktrees live under the data dir, so a single AO_DATA_DIR
 		// override moves all durable per-user state together.
@@ -175,18 +214,30 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		RepoResolver: projectRepoResolver{store: store},
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("session workspace: %w", err)
+		return sessionStack{}, fmt.Errorf("session workspace: %w", err)
 	}
 	scratchWS, err := scratchworkspace.New(scratchworkspace.Options{
 		ManagedRoot: filepath.Join(cfg.DataDir, "worktrees"),
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("scratch session workspace: %w", err)
+		return sessionStack{}, fmt.Errorf("scratch session workspace: %w", err)
+	}
+	// Checkpoint 8P-E.11: projects configured for direct-branch execution
+	// work inside their registered repository instead of a managed worktree,
+	// so this adapter deliberately has no ManagedRoot at all -- it resolves
+	// the same project repo paths gitWS does and never writes under the data
+	// dir.
+	directBranchWS, err := directbranchworkspace.New(directbranchworkspace.Options{
+		RepoResolver: projectRepoResolver{store: store},
+	})
+	if err != nil {
+		return sessionStack{}, fmt.Errorf("direct-branch session workspace: %w", err)
 	}
 	ws := workspacerouter.New(workspacerouter.Deps{
-		Git:      gitWS,
-		Scratch:  scratchWS,
-		Projects: store,
+		Git:          gitWS,
+		DirectBranch: directBranchWS,
+		Scratch:      scratchWS,
+		Projects:     store,
 	})
 	mgr := sessionmanager.New(sessionmanager.Deps{
 		Runtime:             runtime,
@@ -201,7 +252,23 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Browser:             browserLifecycle,
 		BrowserCapabilities: browserCapabilities,
 		DataDir:             cfg.DataDir,
+		RunFilePath:         cfg.RunFilePath,
 		Logger:              log,
+		InstallationID:      cfg.InstallationID,
+		// Checkpoint 8P-B.2: relaunch/restore re-derives the same isolated
+		// runtime env a fresh Spawn would have used, from the session's own
+		// persisted owner -- same policy as workflow_wiring.go's resolver
+		// (same construction args, functionally identical, kept as a
+		// separate instance here since this wiring runs before the
+		// workflow coordinator exists).
+		RuntimeIsolation: &providerruntime.Resolver{
+			Owners:       store,
+			Profiles:     store,
+			DataDir:      cfg.DataDir,
+			TrustedLocal: cfg.TrustedLocalMode,
+			Isolation:    cfg.ProviderRuntimeIsolation,
+			Keychain:     log,
+		},
 	})
 	scmProvider := newMultiSCMProvider(cfg.GitLab, log)
 	// Build the multi-tracker dispatching to both GitHub and GitLab. The
@@ -230,22 +297,42 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 	// writer.
 	reviewers, err := reviewer.NewResolver()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("reviewer resolver: %w", err)
+		return sessionStack{}, fmt.Errorf("reviewer resolver: %w", err)
 	}
 	reviewEngine := reviewcore.New(reviewcore.Deps{
 		Store:    store,
 		Sessions: store,
 		PRs:      store,
 		Projects: store,
+		// A review pass that fails durably is something only a person can pick
+		// up: AO does not retry it. The engine raises the fact from the failed
+		// review_run row it just wrote.
+		SessionFacts: sessionFacts,
 		Launcher: reviewcore.NewLauncher(reviewers, runtime, cfg.DataDir,
 			reviewcore.WithRunFilePath(cfg.RunFilePath),
-			reviewcore.WithAgentAuth(reviewerAgentAuth{agents: agents})),
+			reviewcore.WithAgentAuth(reviewerAgentAuth{agents: agents}),
+			// Checkpoint 8P-E.3.1: same per-user isolation policy as this
+			// wiring's own session_manager.Deps.RuntimeIsolation above (same
+			// construction args, functionally identical, kept as a separate
+			// instance for the same reason: this launcher has no workflow
+			// coordinator to share one with).
+			reviewcore.WithOwnerRuntimeEnv(store, &providerruntime.Resolver{
+				Owners:       store,
+				Profiles:     store,
+				DataDir:      cfg.DataDir,
+				TrustedLocal: cfg.TrustedLocalMode,
+				Isolation:    cfg.ProviderRuntimeIsolation,
+				Keychain:     log,
+			})),
 	})
 	reviewSvc := reviewsvc.New(reviewEngine, store,
 		reviewsvc.WithLifecycleReducer(lcm),
-		reviewsvc.WithTelemetry(telemetry))
+		reviewsvc.WithTelemetry(telemetry),
+		// A recorded verdict is the end of the reviewer that recorded it. This
+		// is where AO learns of that, on the one path a reviewer always takes.
+		reviewsvc.WithAgentCredentials(agentCredentials))
 	mgr.SetReviewerTerminator(reviewSvc)
-	return sessionSvc, reviewSvc, mgr, nil
+	return sessionStack{Service: sessionSvc, Review: reviewSvc, Lifecycle: mgr, Manager: mgr, Workspace: ws}, nil
 }
 
 // runtimeMessageSender is the narrow part of the concrete runtime needed by
@@ -408,6 +495,7 @@ func buildAgentResolver(defaultAgent string, log *slog.Logger) (ports.AgentResol
 type projectRepoResolver struct{ store *sqlite.Store }
 
 var _ gitworktree.RepoResolver = projectRepoResolver{}
+var _ directbranchworkspace.RepoResolver = projectRepoResolver{}
 
 func (r projectRepoResolver) RepoPath(projectID domain.ProjectID) (string, error) {
 	rec, ok, err := r.store.GetProject(context.Background(), string(projectID))

@@ -153,3 +153,92 @@ func withSignal(facts contract.SessionFacts) contract.SessionFacts {
 	facts.HasSignal = true
 	return facts
 }
+
+// completed returns a task that has no work in flight and a durable receipt
+// saying its agent reported the work finished.
+func completed() contract.SessionFacts {
+	facts := session(contract.ActivityIdle)
+	facts.TurnCompleted = true
+	return facts
+}
+
+// TestDeriveStatusCompletedNeedsProof pins the difference the Completed status
+// exists to draw: a quiet task is Idle, and only the durable completion receipt
+// promotes it. Nothing here is inferred from time or from a stopped runtime.
+func TestDeriveStatusCompletedNeedsProof(t *testing.T) {
+	if got := contract.DeriveStatus(completed(), nil, statusNow, 90*time.Second); got != contract.StatusCompleted {
+		t.Fatalf("task with a completion receipt = %q, want %q", got, contract.StatusCompleted)
+	}
+	if got := contract.DeriveStatus(session(contract.ActivityIdle), nil, statusNow, 90*time.Second); got != contract.StatusIdle {
+		t.Fatalf("quiet task without a receipt = %q, want %q", got, contract.StatusIdle)
+	}
+}
+
+// TestDeriveStatusCompletedSurvivesInactivity checks that the status does not
+// decay: an untouched receipt still reads Completed a week later, and still
+// reads Completed when the hook pipeline could not be re-proven after a restart
+// (HasSignal false, which alone would mean no_signal).
+func TestDeriveStatusCompletedSurvivesInactivity(t *testing.T) {
+	const grace = 90 * time.Second
+	facts := completed()
+	facts.LastActivityAt = statusNow.Add(-7 * 24 * time.Hour)
+	facts.SignalExpected = true
+
+	if got := contract.DeriveStatus(facts, nil, statusNow, grace); got != contract.StatusCompleted {
+		t.Fatalf("a week later = %q, want %q", got, contract.StatusCompleted)
+	}
+
+	restored := facts
+	restored.HasSignal = false
+	if got := contract.DeriveStatus(restored, nil, statusNow, grace); got != contract.StatusCompleted {
+		t.Fatalf("after a restart cleared the hook receipt = %q, want %q", got, contract.StatusCompleted)
+	}
+	unproven := restored
+	unproven.TurnCompleted = false
+	if got := contract.DeriveStatus(unproven, nil, statusNow, grace); got != contract.StatusNoSignal {
+		t.Fatalf("same session without the completion receipt = %q, want %q", got, contract.StatusNoSignal)
+	}
+}
+
+// TestDeriveStatusCompletedNeverMasksTrouble is requirement five: nothing that
+// failed, was cancelled, or wants the user may read Completed, receipt or not.
+func TestDeriveStatusCompletedNeverMasksTrouble(t *testing.T) {
+	withReceipt := func(activity contract.ActivityState) contract.SessionFacts {
+		facts := session(activity)
+		facts.TurnCompleted = true
+		return facts
+	}
+	terminated := contract.SessionFacts{IsTerminated: true, TurnCompleted: true}
+
+	tests := []struct {
+		name    string
+		session contract.SessionFacts
+		prs     []contract.PRFacts
+		want    contract.SessionStatus
+	}{
+		{"killed or cancelled", terminated, nil, contract.StatusTerminated},
+		{"crashed agent", withReceipt(contract.ActivityExited), nil, contract.StatusExited},
+		{"asking the user", withReceipt(contract.ActivityWaitingInput), nil, contract.StatusNeedsInput},
+		{"blocked on a decision", withReceipt(contract.ActivityBlocked), nil, contract.StatusNeedsInput},
+		{"given more work", withReceipt(contract.ActivityActive), nil, contract.StatusWorking},
+		{"failing CI", completed(), []contract.PRFacts{{URL: "u", CI: contract.CIFailing}}, contract.StatusCIFailed},
+		{
+			"changes requested",
+			completed(),
+			[]contract.PRFacts{{URL: "u", Review: contract.ReviewChangesRequest}},
+			contract.StatusChangesRequested,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := contract.DeriveStatus(tt.session, tt.prs, statusNow, 90*time.Second)
+			if got != tt.want {
+				t.Fatalf("DeriveStatus() = %q, want %q", got, tt.want)
+			}
+			if got == contract.StatusCompleted {
+				t.Fatalf("DeriveStatus() reported a finished task for %q", tt.name)
+			}
+		})
+	}
+}

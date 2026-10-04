@@ -21,6 +21,25 @@ SELECT
     CAST(SUM(mue.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(mue.cache_read_tokens) AS INTEGER) AS cache_read_tokens,
     CAST(SUM(mue.cache_write_tokens) AS INTEGER) AS cache_write_tokens,
+    -- The three terms below PARTITION cache_write_tokens: every token is in
+    -- exactly one of them, whatever shape the row is in. Both columns must be
+    -- present for either lifetime to be believed -- a half-written pair is
+    -- unreachable through the write path today and is exactly what a future
+    -- backfill could produce, and counting its one known column would both
+    -- overstate that lifetime and double count the row against the unknown
+    -- bucket.
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NOT NULL
+                            AND mue.cache_write_1h_tokens IS NOT NULL
+                           THEN mue.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NOT NULL
+                            AND mue.cache_write_1h_tokens IS NOT NULL
+                           THEN mue.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NULL
+                             OR mue.cache_write_1h_tokens IS NULL
+                           THEN mue.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_unknown_ttl_tokens,
     CAST(SUM(mue.output_tokens) AS INTEGER) AS output_tokens,
     CAST(COALESCE(SUM(mue.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
     COUNT(mue.reasoning_tokens) AS reasoning_event_count
@@ -32,18 +51,21 @@ ORDER BY SUM(mue.input_tokens + mue.output_tokens) DESC, ub.harness, mue.model_i
 `
 
 type AggregateUsageBySessionHarnessModelRow struct {
-	Harness             domain.AgentHarness
-	ModelID             string
-	InputTokens         int64
-	UncachedInputTokens int64
-	CacheReadTokens     int64
-	CacheWriteTokens    int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	ReasoningEventCount int64
+	Harness                    domain.AgentHarness
+	ModelID                    string
+	InputTokens                int64
+	UncachedInputTokens        int64
+	CacheReadTokens            int64
+	CacheWriteTokens           int64
+	CacheWrite5mTokens         int64
+	CacheWrite1hTokens         int64
+	CacheWriteUnknownTtlTokens int64
+	OutputTokens               int64
+	ReasoningTokens            int64
+	ReasoningEventCount        int64
 }
 
-func (q *Queries) AggregateUsageBySessionHarnessModel(ctx context.Context, sessionID domain.SessionID) ([]AggregateUsageBySessionHarnessModelRow, error) {
+func (q *Queries) AggregateUsageBySessionHarnessModel(ctx context.Context, sessionID *domain.SessionID) ([]AggregateUsageBySessionHarnessModelRow, error) {
 	rows, err := q.db.QueryContext(ctx, aggregateUsageBySessionHarnessModel, sessionID)
 	if err != nil {
 		return nil, err
@@ -59,6 +81,9 @@ func (q *Queries) AggregateUsageBySessionHarnessModel(ctx context.Context, sessi
 			&i.UncachedInputTokens,
 			&i.CacheReadTokens,
 			&i.CacheWriteTokens,
+			&i.CacheWrite5mTokens,
+			&i.CacheWrite1hTokens,
+			&i.CacheWriteUnknownTtlTokens,
 			&i.OutputTokens,
 			&i.ReasoningTokens,
 			&i.ReasoningEventCount,
@@ -74,6 +99,64 @@ func (q *Queries) AggregateUsageBySessionHarnessModel(ctx context.Context, sessi
 		return nil, err
 	}
 	return items, nil
+}
+
+const backfillModelUsageEventCacheTTL = `-- name: BackfillModelUsageEventCacheTTL :execrows
+UPDATE model_usage_events
+SET cache_write_5m_tokens = ?,
+    cache_write_1h_tokens = ?
+WHERE binding_id = ?
+  AND source_event_key = ?
+  AND cache_write_5m_tokens IS NULL
+  AND cache_write_1h_tokens IS NULL
+  AND model_id = ?
+  AND input_tokens = ?
+  AND uncached_input_tokens = ?
+  AND cache_read_tokens = ?
+  AND cache_write_tokens = ?
+  AND output_tokens = ?
+`
+
+type BackfillModelUsageEventCacheTTLParams struct {
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
+	BindingID           int64
+	SourceEventKey      string
+	ModelID             string
+	InputTokens         int64
+	UncachedInputTokens int64
+	CacheReadTokens     int64
+	CacheWriteTokens    int64
+	OutputTokens        int64
+}
+
+// Move ONE event from lifetime-unknown to lifetime-observed.
+//
+// The WHERE clause is the whole safety of this operation and it is deliberately
+// over-specified. The two IS NULL predicates make the update monotonic: a row
+// can only ever go from unobserved to observed, never from one observation to
+// another, so re-running the backfill is a no-op and a half-written pair is
+// left alone rather than completed from one side. The token vector is repeated
+// in the predicate so a row that changed between the read and the write -- an
+// ingest that landed in between, a transcript that no longer describes this
+// event -- updates nothing instead of writing a lifetime onto a different call.
+func (q *Queries) BackfillModelUsageEventCacheTTL(ctx context.Context, arg BackfillModelUsageEventCacheTTLParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, backfillModelUsageEventCacheTTL,
+		arg.CacheWrite5mTokens,
+		arg.CacheWrite1hTokens,
+		arg.BindingID,
+		arg.SourceEventKey,
+		arg.ModelID,
+		arg.InputTokens,
+		arg.UncachedInputTokens,
+		arg.CacheReadTokens,
+		arg.CacheWriteTokens,
+		arg.OutputTokens,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const completeUsageBindingIfSettled = `-- name: CompleteUsageBindingIfSettled :execrows
@@ -164,12 +247,12 @@ WHERE usage_bindings.session_id = ?2
         AND sessions.updated_at = ?4
         AND sessions.is_terminated = 0
   )
-RETURNING id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+RETURNING id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
 `
 
 type FinalizeUsageBindingsForSessionLaunchParams struct {
 	FinalizedAt              time.Time
-	SessionID                domain.SessionID
+	SessionID                *domain.SessionID
 	ExpectedRuntimeLaunchID  string
 	ExpectedSessionUpdatedAt time.Time
 }
@@ -190,6 +273,8 @@ func (q *Queries) FinalizeUsageBindingsForSessionLaunch(ctx context.Context, arg
 		var i UsageBinding
 		if err := rows.Scan(
 			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
 			&i.SessionID,
 			&i.Harness,
 			&i.NativeRootID,
@@ -211,10 +296,46 @@ func (q *Queries) FinalizeUsageBindingsForSessionLaunch(ctx context.Context, arg
 	return items, nil
 }
 
+const finalizeUsageBindingsForSubject = `-- name: FinalizeUsageBindingsForSubject :execrows
+UPDATE usage_bindings
+SET state = 'finalizing',
+    last_error_code = CASE
+        WHEN usage_bindings.last_error_code = 'codex_source_budget_exceeded'
+        THEN usage_bindings.last_error_code
+        ELSE ''
+    END,
+    updated_at = ?1
+WHERE subject_kind = ?2
+  AND subject_id = ?3
+  AND state NOT IN ('complete', 'partial')
+`
+
+type FinalizeUsageBindingsForSubjectParams struct {
+	FinalizedAt time.Time
+	SubjectKind string
+	SubjectID   string
+}
+
+// Finalizes ONLY this subject's bindings.
+//
+// The session-scoped finalizer below must never be reachable from a pane's own
+// lifecycle: a reviewer's `session-end` used to be able to finalize the WORKER's
+// bindings, because the only finalizer keyed on the session the pane happened to
+// be associated with. Panes finalize themselves through this statement and
+// touch nothing else.
+func (q *Queries) FinalizeUsageBindingsForSubject(ctx context.Context, arg FinalizeUsageBindingsForSubjectParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, finalizeUsageBindingsForSubject, arg.FinalizedAt, arg.SubjectKind, arg.SubjectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getModelUsageEventByKey = `-- name: GetModelUsageEventByKey :one
 SELECT
     model_id, input_tokens, uncached_input_tokens,
-    cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens
+    cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
+    turn_class, cache_write_5m_tokens, cache_write_1h_tokens
 FROM model_usage_events
 WHERE binding_id = ? AND source_event_key = ?
 `
@@ -232,6 +353,9 @@ type GetModelUsageEventByKeyRow struct {
 	CacheWriteTokens    int64
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
+	TurnClass           domain.TurnClass
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
 }
 
 func (q *Queries) GetModelUsageEventByKey(ctx context.Context, arg GetModelUsageEventByKeyParams) (GetModelUsageEventByKeyRow, error) {
@@ -245,27 +369,38 @@ func (q *Queries) GetModelUsageEventByKey(ctx context.Context, arg GetModelUsage
 		&i.CacheWriteTokens,
 		&i.OutputTokens,
 		&i.ReasoningTokens,
+		&i.TurnClass,
+		&i.CacheWrite5mTokens,
+		&i.CacheWrite1hTokens,
 	)
 	return i, err
 }
 
-const getUsageBindingBySessionHarnessRoot = `-- name: GetUsageBindingBySessionHarnessRoot :one
-SELECT id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+const getUsageBindingBySubjectHarnessRoot = `-- name: GetUsageBindingBySubjectHarnessRoot :one
+SELECT id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
 FROM usage_bindings
-WHERE session_id = ? AND harness = ? AND native_root_id = ?
+WHERE subject_kind = ? AND subject_id = ? AND harness = ? AND native_root_id = ?
 `
 
-type GetUsageBindingBySessionHarnessRootParams struct {
-	SessionID    domain.SessionID
+type GetUsageBindingBySubjectHarnessRootParams struct {
+	SubjectKind  string
+	SubjectID    string
 	Harness      domain.AgentHarness
 	NativeRootID string
 }
 
-func (q *Queries) GetUsageBindingBySessionHarnessRoot(ctx context.Context, arg GetUsageBindingBySessionHarnessRootParams) (UsageBinding, error) {
-	row := q.db.QueryRowContext(ctx, getUsageBindingBySessionHarnessRoot, arg.SessionID, arg.Harness, arg.NativeRootID)
+func (q *Queries) GetUsageBindingBySubjectHarnessRoot(ctx context.Context, arg GetUsageBindingBySubjectHarnessRootParams) (UsageBinding, error) {
+	row := q.db.QueryRowContext(ctx, getUsageBindingBySubjectHarnessRoot,
+		arg.SubjectKind,
+		arg.SubjectID,
+		arg.Harness,
+		arg.NativeRootID,
+	)
 	var i UsageBinding
 	err := row.Scan(
 		&i.ID,
+		&i.SubjectKind,
+		&i.SubjectID,
 		&i.SessionID,
 		&i.Harness,
 		&i.NativeRootID,
@@ -283,7 +418,7 @@ SELECT CAST(COALESCE((
 ), 0) AS INTEGER)
 `
 
-func (q *Queries) GetUsageSessionIncomplete(ctx context.Context, sessionID string) (int64, error) {
+func (q *Queries) GetUsageSessionIncomplete(ctx context.Context, sessionID sql.NullString) (int64, error) {
 	row := q.db.QueryRowContext(ctx, getUsageSessionIncomplete, sessionID)
 	var column_1 int64
 	err := row.Scan(&column_1)
@@ -308,6 +443,8 @@ SELECT
     us.next_retry_at,
     us.last_error_code AS source_last_error_code,
     us.updated_at AS source_updated_at,
+    ub.subject_kind,
+    ub.subject_id,
     ub.session_id,
     ub.harness,
     ub.native_root_id,
@@ -335,7 +472,9 @@ type GetUsageSourceWithBindingAndSessionRow struct {
 	NextRetryAt         sql.NullTime
 	SourceLastErrorCode string
 	SourceUpdatedAt     time.Time
-	SessionID           domain.SessionID
+	SubjectKind         string
+	SubjectID           string
+	SessionID           *domain.SessionID
 	Harness             domain.AgentHarness
 	NativeRootID        string
 	InitialModelID      string
@@ -362,6 +501,8 @@ func (q *Queries) GetUsageSourceWithBindingAndSession(ctx context.Context, id in
 		&i.NextRetryAt,
 		&i.SourceLastErrorCode,
 		&i.SourceUpdatedAt,
+		&i.SubjectKind,
+		&i.SubjectID,
 		&i.SessionID,
 		&i.Harness,
 		&i.NativeRootID,
@@ -375,8 +516,8 @@ const hasPendingUsageDiscovery = `-- name: HasPendingUsageDiscovery :one
 SELECT CAST(EXISTS (
     SELECT 1
     FROM usage_bindings ub
-    JOIN sessions s ON s.id = ub.session_id
-    WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+    LEFT JOIN sessions s ON s.id = ub.session_id
+    WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
       AND ub.harness IN ('claude-code', 'codex')
       AND (
           ub.state = 'discovering'
@@ -416,13 +557,16 @@ const insertModelUsageEvent = `-- name: InsertModelUsageEvent :exec
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    source_event_key
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    source_event_key, turn_class, observed_at, recorded_at,
+    -- NULL when the transcript reported no lifetime for this call's cache
+    -- creation. Never 0: zero would assert the writes were short-lived.
+    cache_write_5m_tokens, cache_write_1h_tokens
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertModelUsageEventParams struct {
 	BindingID           int64
-	UsageSourceID       int64
+	UsageSourceID       sql.NullInt64
 	ModelID             string
 	InputTokens         int64
 	UncachedInputTokens int64
@@ -431,6 +575,11 @@ type InsertModelUsageEventParams struct {
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
 	SourceEventKey      string
+	TurnClass           domain.TurnClass
+	ObservedAt          sql.NullTime
+	RecordedAt          sql.NullTime
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
 }
 
 func (q *Queries) InsertModelUsageEvent(ctx context.Context, arg InsertModelUsageEventParams) error {
@@ -445,6 +594,11 @@ func (q *Queries) InsertModelUsageEvent(ctx context.Context, arg InsertModelUsag
 		arg.OutputTokens,
 		arg.ReasoningTokens,
 		arg.SourceEventKey,
+		arg.TurnClass,
+		arg.ObservedAt,
+		arg.RecordedAt,
+		arg.CacheWrite5mTokens,
+		arg.CacheWrite1hTokens,
 	)
 	return err
 }
@@ -537,18 +691,29 @@ JOIN usage_bindings ub ON ub.id = mue.binding_id
 JOIN sessions s ON s.id = ub.session_id
 LEFT JOIN usage_session_integrity integrity ON integrity.session_id = ub.session_id
 WHERE (?1 = '' OR s.project_id = ?1)
+  AND (?2 IS NULL OR s.owner_user_id = ?2)
 GROUP BY ub.session_id
 ORDER BY s.project_id, s.num
 `
 
+type ListCompactSessionUsageParams struct {
+	ProjectID   interface{}
+	OwnerUserID interface{}
+}
+
 type ListCompactSessionUsageRow struct {
-	SessionID   domain.SessionID
+	SessionID   *domain.SessionID
 	TotalTokens int64
 	Incomplete  int64
 }
 
-func (q *Queries) ListCompactSessionUsage(ctx context.Context, projectID interface{}) ([]ListCompactSessionUsageRow, error) {
-	rows, err := q.db.QueryContext(ctx, listCompactSessionUsage, projectID)
+// owner_user_id (Checkpoint 8P-C): NULL means "no ownership scoping"
+// (trusted-local / pre-8P-B session); a non-NULL value restricts results to
+// exactly that owner's own sessions, via the same sessions.owner_user_id
+// column session/project/workflow ownership already scope by -- so User A's
+// usage query structurally cannot return User B's rows.
+func (q *Queries) ListCompactSessionUsage(ctx context.Context, arg ListCompactSessionUsageParams) ([]ListCompactSessionUsageRow, error) {
+	rows, err := q.db.QueryContext(ctx, listCompactSessionUsage, arg.ProjectID, arg.OwnerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -570,10 +735,62 @@ func (q *Queries) ListCompactSessionUsage(ctx context.Context, projectID interfa
 	return items, nil
 }
 
+const listCompactedSessionsForSummaryPrior = `-- name: ListCompactedSessionsForSummaryPrior :many
+SELECT DISTINCT ub.session_id AS session_id
+FROM usage_sources us
+JOIN usage_bindings ub ON ub.id = us.binding_id
+WHERE ub.session_id IS NOT NULL
+  AND json_valid(us.parser_state_json)
+  AND COALESCE(CAST(json_extract(us.parser_state_json, '$.claude.compaction_count') AS INTEGER), 0) > 0
+  AND json_extract(us.parser_state_json, '$.claude.harness_totals') IS NOT NULL
+ORDER BY ub.session_id
+LIMIT ?
+`
+
+// The sessions that have ever replaced their own conversation, newest state last.
+//
+// This is the candidate list for the cross-session summary-cost prior, and the
+// filter is what keeps it affordable: a prior about compaction is only ever about
+// sessions that compacted, and those are a handful even on a corpus of hundreds.
+// Everything else -- what the harness charged itself, what AO attributed, how the
+// residual divides -- is already folded per session by CompactionReader, so this
+// read deliberately returns ONE COLUMN and leaves the arithmetic where it lives.
+//
+// compaction_count is the counter the parser keeps beside the bounded boundary
+// list, so a session whose detail list overflowed still qualifies.
+//
+// Sources with no session, invalid state, or no harness rollup are excluded here
+// rather than in Go: a session with no rollup cannot contribute a summary cost at
+// all, and fetching it only to discard it is a row this read does not need to
+// carry. The LIMIT is a ceiling, not a page: a cohort large enough to hit it has
+// long since earned a folded aggregate of its own.
+func (q *Queries) ListCompactedSessionsForSummaryPrior(ctx context.Context, limit int64) ([]*domain.SessionID, error) {
+	rows, err := q.db.QueryContext(ctx, listCompactedSessionsForSummaryPrior, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*domain.SessionID{}
+	for rows.Next() {
+		var session_id *domain.SessionID
+		if err := rows.Scan(&session_id); err != nil {
+			return nil, err
+		}
+		items = append(items, session_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLatestRetiredCodexReplacementClaimsByPath = `-- name: ListLatestRetiredCodexReplacementClaimsByPath :many
 SELECT us.id, us.binding_id, us.kind, us.native_session_id, us.subagent_id, us.artifact_path, us.file_identity, us.generation, us.byte_offset, us.parser_state_json, us.state, us.failure_count, us.anomaly_count, us.next_retry_at, us.last_error_code, us.updated_at
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
+LEFT JOIN sessions s ON s.id = ub.session_id
 JOIN usage_sources us ON us.id = (
     SELECT latest.id
     FROM usage_sources latest
@@ -585,7 +802,7 @@ JOIN usage_sources us ON us.id = (
 WHERE us.kind = 'codex_rollout'
   AND us.state = 'complete'
   AND us.last_error_code = 'artifact_replaced'
-  AND (s.is_terminated = 0 OR ub.state = 'finalizing')
+  AND (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
 ORDER BY us.binding_id, us.generation, us.id
 `
 
@@ -630,11 +847,11 @@ func (q *Queries) ListLatestRetiredCodexReplacementClaimsByPath(ctx context.Cont
 }
 
 const listUsageBindingsForCodexParent = `-- name: ListUsageBindingsForCodexParent :many
-SELECT DISTINCT ub.id, ub.session_id, ub.harness, ub.native_root_id, ub.initial_model_id, ub.state, ub.last_error_code, ub.updated_at
+SELECT DISTINCT ub.id, ub.subject_kind, ub.subject_id, ub.session_id, ub.harness, ub.native_root_id, ub.initial_model_id, ub.state, ub.last_error_code, ub.updated_at
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
+LEFT JOIN sessions s ON s.id = ub.session_id
 JOIN usage_sources parent ON parent.binding_id = ub.id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND ub.harness = 'codex'
   AND (
       ub.state IN ('discovering', 'active', 'finalizing')
@@ -665,6 +882,8 @@ func (q *Queries) ListUsageBindingsForCodexParent(ctx context.Context, parentNat
 		var i UsageBinding
 		if err := rows.Scan(
 			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
 			&i.SessionID,
 			&i.Harness,
 			&i.NativeRootID,
@@ -687,13 +906,13 @@ func (q *Queries) ListUsageBindingsForCodexParent(ctx context.Context, parentNat
 }
 
 const listUsageBindingsForSession = `-- name: ListUsageBindingsForSession :many
-SELECT id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+SELECT id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
 FROM usage_bindings
 WHERE session_id = ?
 ORDER BY updated_at, id
 `
 
-func (q *Queries) ListUsageBindingsForSession(ctx context.Context, sessionID domain.SessionID) ([]UsageBinding, error) {
+func (q *Queries) ListUsageBindingsForSession(ctx context.Context, sessionID *domain.SessionID) ([]UsageBinding, error) {
 	rows, err := q.db.QueryContext(ctx, listUsageBindingsForSession, sessionID)
 	if err != nil {
 		return nil, err
@@ -704,6 +923,54 @@ func (q *Queries) ListUsageBindingsForSession(ctx context.Context, sessionID dom
 		var i UsageBinding
 		if err := rows.Scan(
 			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
+			&i.SessionID,
+			&i.Harness,
+			&i.NativeRootID,
+			&i.InitialModelID,
+			&i.State,
+			&i.LastErrorCode,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsageBindingsForSubject = `-- name: ListUsageBindingsForSubject :many
+SELECT id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+FROM usage_bindings
+WHERE subject_kind = ? AND subject_id = ?
+ORDER BY updated_at, id
+`
+
+type ListUsageBindingsForSubjectParams struct {
+	SubjectKind string
+	SubjectID   string
+}
+
+func (q *Queries) ListUsageBindingsForSubject(ctx context.Context, arg ListUsageBindingsForSubjectParams) ([]UsageBinding, error) {
+	rows, err := q.db.QueryContext(ctx, listUsageBindingsForSubject, arg.SubjectKind, arg.SubjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []UsageBinding{}
+	for rows.Next() {
+		var i UsageBinding
+		if err := rows.Scan(
+			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
 			&i.SessionID,
 			&i.Harness,
 			&i.NativeRootID,
@@ -726,10 +993,10 @@ func (q *Queries) ListUsageBindingsForSession(ctx context.Context, sessionID dom
 }
 
 const listUsageDiscoveryBindings = `-- name: ListUsageDiscoveryBindings :many
-SELECT ub.id, ub.session_id, ub.harness, ub.native_root_id, ub.initial_model_id, ub.state, ub.last_error_code, ub.updated_at
+SELECT ub.id, ub.subject_kind, ub.subject_id, ub.session_id, ub.harness, ub.native_root_id, ub.initial_model_id, ub.state, ub.last_error_code, ub.updated_at
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+LEFT JOIN sessions s ON s.id = ub.session_id
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND ub.harness IN ('claude-code', 'codex')
   AND (
       ub.state IN ('discovering', 'active', 'finalizing')
@@ -776,6 +1043,8 @@ func (q *Queries) ListUsageDiscoveryBindings(ctx context.Context, limit int64) (
 		var i UsageBinding
 		if err := rows.Scan(
 			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
 			&i.SessionID,
 			&i.Harness,
 			&i.NativeRootID,
@@ -787,6 +1056,50 @@ func (q *Queries) ListUsageDiscoveryBindings(ctx context.Context, limit int64) (
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsageSourceIDsForCacheTTLBackfill = `-- name: ListUsageSourceIDsForCacheTTLBackfill :many
+SELECT DISTINCT us.id AS source_id
+FROM usage_sources us
+JOIN model_usage_events mue ON mue.binding_id = us.binding_id
+WHERE mue.cache_write_5m_tokens IS NULL
+   OR mue.cache_write_1h_tokens IS NULL
+ORDER BY us.id
+`
+
+// Every transcript source that could still carry a cache lifetime for a row
+// that does not have one.
+//
+// Scoped by BINDING and not by the source that happens to own the events. A
+// ledger row is identified by (binding, source_event_key), so a source can
+// describe rows another source owns -- which is exactly what a REPLACED
+// artifact leaves behind: the old source keeps the rows and loses its file,
+// the new one has the file. Selecting on us.id = mue.usage_source_id would
+// skip the source that can still read them.
+//
+// Ordered by id so two runs visit them in the same order and a partial run
+// resumes deterministically.
+func (q *Queries) ListUsageSourceIDsForCacheTTLBackfill(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listUsageSourceIDsForCacheTTLBackfill)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var source_id int64
+		if err := rows.Scan(&source_id); err != nil {
+			return nil, err
+		}
+		items = append(items, source_id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -848,8 +1161,8 @@ const listWatchableUsageSources = `-- name: ListWatchableUsageSources :many
 SELECT us.id, us.binding_id, us.kind, us.native_session_id, us.subagent_id, us.artifact_path, us.file_identity, us.generation, us.byte_offset, us.parser_state_json, us.state, us.failure_count, us.anomaly_count, us.next_retry_at, us.last_error_code, us.updated_at
 FROM usage_sources us
 JOIN usage_bindings ub ON ub.id = us.binding_id
-JOIN sessions s ON s.id = ub.session_id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+LEFT JOIN sessions s ON s.id = ub.session_id
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND NOT (
       us.state = 'complete'
       AND us.last_error_code = 'artifact_replaced'
@@ -903,6 +1216,38 @@ func (q *Queries) ListWatchableUsageSources(ctx context.Context) ([]UsageSource,
 		return nil, err
 	}
 	return items, nil
+}
+
+const refineModelUsageEventTurnClass = `-- name: RefineModelUsageEventTurnClass :exec
+UPDATE model_usage_events
+SET turn_class = ?1
+WHERE binding_id = ?2
+  AND source_event_key = ?3
+  AND turn_class <> ?1
+`
+
+type RefineModelUsageEventTurnClassParams struct {
+	TurnClass      domain.TurnClass
+	BindingID      int64
+	SourceEventKey string
+}
+
+// Raise an already-stored event's turn class as later records of the SAME
+// billed message arrive.
+//
+// One assistant message routinely spans several transcript records, and the
+// tool call is often not in the first of them. The event is inserted on the
+// first record (that is what keeps exactly-once anchored to the message id and
+// not to a record offset), so its class starts as whatever that record could
+// imply and is raised here when a later record of the same message shows the
+// turn did more.
+//
+// This is a CLASS-ONLY write. No token column appears in it, so a refinement
+// can never move a number; and it is guarded on turn_class <> the new value so
+// a re-read of an unchanged transcript writes nothing at all.
+func (q *Queries) RefineModelUsageEventTurnClass(ctx context.Context, arg RefineModelUsageEventTurnClassParams) error {
+	_, err := q.db.ExecContext(ctx, refineModelUsageEventTurnClass, arg.TurnClass, arg.BindingID, arg.SourceEventKey)
+	return err
 }
 
 const touchUsageBinding = `-- name: TouchUsageBinding :exec
@@ -1030,10 +1375,10 @@ func (q *Queries) UpdateUsageSourceLifecycle(ctx context.Context, arg UpdateUsag
 
 const upsertUsageBinding = `-- name: UpsertUsageBinding :one
 INSERT INTO usage_bindings (
-    session_id, harness, native_root_id, initial_model_id, state,
-    last_error_code, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (session_id, harness, native_root_id) DO UPDATE SET
+    subject_kind, subject_id, session_id, harness, native_root_id,
+    initial_model_id, state, last_error_code, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (subject_kind, subject_id, harness, native_root_id) DO UPDATE SET
     initial_model_id = CASE
         WHEN excluded.initial_model_id <> '' THEN excluded.initial_model_id
         ELSE usage_bindings.initial_model_id
@@ -1053,11 +1398,13 @@ ON CONFLICT (session_id, harness, native_root_id) DO UPDATE SET
         ELSE excluded.last_error_code
     END,
     updated_at = excluded.updated_at
-RETURNING id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+RETURNING id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
 `
 
 type UpsertUsageBindingParams struct {
-	SessionID      domain.SessionID
+	SubjectKind    string
+	SubjectID      string
+	SessionID      *domain.SessionID
 	Harness        domain.AgentHarness
 	NativeRootID   string
 	InitialModelID string
@@ -1066,8 +1413,13 @@ type UpsertUsageBindingParams struct {
 	UpdatedAt      time.Time
 }
 
+// Keyed on the SUBJECT, so a reviewer pane, a resolver pane and a planner
+// invocation each bind independently -- and a re-discovered one binds to the row
+// it already had rather than minting a second.
 func (q *Queries) UpsertUsageBinding(ctx context.Context, arg UpsertUsageBindingParams) (UsageBinding, error) {
 	row := q.db.QueryRowContext(ctx, upsertUsageBinding,
+		arg.SubjectKind,
+		arg.SubjectID,
 		arg.SessionID,
 		arg.Harness,
 		arg.NativeRootID,
@@ -1079,6 +1431,8 @@ func (q *Queries) UpsertUsageBinding(ctx context.Context, arg UpsertUsageBinding
 	var i UsageBinding
 	err := row.Scan(
 		&i.ID,
+		&i.SubjectKind,
+		&i.SubjectID,
 		&i.SessionID,
 		&i.Harness,
 		&i.NativeRootID,

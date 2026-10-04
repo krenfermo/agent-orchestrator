@@ -1,0 +1,23 @@
+{
+  "artifactVersion": "1",
+  "source": "./cmd/ao-web-dast",
+  "toolchain": "go1.26.6",
+  "buildEnv": "CGO_ENABLED=0",
+  "buildFlags": "-trimpath -buildvcs=false -ldflags=-s -w -buildid=",
+  "artifacts": [
+    {
+      "goos": "linux",
+      "goarch": "amd64",
+      "file": "ao-web-dast-linux-amd64",
+      "sha256": "d4b7009a9a074470b64e5c5a5de67964b6cbbcc315d6e08f4c331d30db62b65e",
+      "bytes": 6246526
+    },
+    {
+      "goos": "linux",
+      "goarch": "arm64",
+      "file": "ao-web-dast-linux-arm64",
+      "sha256": "d60353a3afa329b5fd68d9141759d8060655ec83505148ac06afbec068b2d419",
+      "bytes": 5767294
+    }
+  ]
+}

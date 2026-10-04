@@ -49,7 +49,9 @@ func (s *Store) UpdateSessionFromActivitySignal(ctx context.Context, rec domain.
 	rows, err := s.qw.UpdateSessionFromActivitySignal(ctx, gen.UpdateSessionFromActivitySignalParams{
 		ActivityState:                activity.State,
 		ActivityLastAt:               activity.LastActivityAt,
+		LastSignalAt:                 timeToNullTime(activity.LastSignalAt),
 		FirstSignalAt:                timeToNullTime(rec.FirstSignalAt),
+		TurnCompletedAt:              timeToNullTime(rec.TurnCompletedAt),
 		AgentSessionID:               rec.Metadata.AgentSessionID,
 		LatestUserPrompt:             rec.Metadata.LatestUserPrompt,
 		LatestAssistantUpdate:        rec.Metadata.LatestAssistantUpdate,
@@ -326,6 +328,25 @@ func (s *Store) GetSession(ctx context.Context, id domain.SessionID) (domain.Ses
 	return getSessionRowToRecord(row), true, nil
 }
 
+// FindSessionByProjectAndIssueID looks up a session by its (project, issue)
+// natural key, ok=false if none. Workflow (Checkpoint 8B) uses this to detect
+// whether a session was already spawned for a given workflow step
+// independent of workflow's own bookkeeping — issue_id is set to
+// "workflow-step:<stepID>" for workflow-spawned worker sessions.
+func (s *Store) FindSessionByProjectAndIssueID(ctx context.Context, projectID domain.ProjectID, issueID domain.IssueID) (domain.SessionRecord, bool, error) {
+	row, err := s.qr.GetSessionByProjectAndIssueID(ctx, gen.GetSessionByProjectAndIssueIDParams{
+		ProjectID: projectID,
+		IssueID:   issueID,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SessionRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("find session by project %s issue %s: %w", projectID, issueID, err)
+	}
+	return getSessionRowToRecord(gen.GetSessionRow(row)), true, nil
+}
+
 // ListSessions returns every session in a project, ordered by num.
 func (s *Store) ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error) {
 	rows, err := s.qr.ListSessionsByProject(ctx, project)
@@ -374,8 +395,10 @@ func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 		Activity: domain.Activity{
 			State:          row.ActivityState,
 			LastActivityAt: row.ActivityLastAt,
+			LastSignalAt:   nullTimeToTime(row.LastSignalAt),
 		},
 		FirstSignalAt:      nullTimeToTime(row.FirstSignalAt),
+		TurnCompletedAt:    nullTimeToTime(row.TurnCompletedAt),
 		IsTerminated:       row.IsTerminated,
 		IsPinned:           row.IsPinned,
 		PinnedAt:           nullTimeToTimePtr(row.PinnedAt),
@@ -389,6 +412,8 @@ func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 			DiffBaseSHA:               row.DiffBaseSha,
 			DiffBaseRef:               row.DiffBaseRef,
 			RuntimeHandleID:           row.RuntimeHandleID,
+			RuntimeInstanceID:         row.RuntimeInstanceID,
+			RuntimeOwnerToken:         row.RuntimeOwnerToken,
 			RuntimeLaunchID:           row.RuntimeLaunchID,
 			AgentSessionID:            row.AgentSessionID,
 			Prompt:                    row.Prompt,
@@ -433,7 +458,9 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		DisplayName:               rec.DisplayName,
 		ActivityState:             activity.State,
 		ActivityLastAt:            activity.LastActivityAt,
+		LastSignalAt:              timeToNullTime(activity.LastSignalAt),
 		FirstSignalAt:             timeToNullTime(rec.FirstSignalAt),
+		TurnCompletedAt:           timeToNullTime(rec.TurnCompletedAt),
 		IsTerminated:              rec.IsTerminated,
 		IsPinned:                  rec.IsPinned,
 		PinnedAt:                  timePtrToNullTime(rec.PinnedAt),
@@ -443,6 +470,8 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		DiffBaseSha:               rec.Metadata.DiffBaseSHA,
 		DiffBaseRef:               rec.Metadata.DiffBaseRef,
 		RuntimeHandleID:           rec.Metadata.RuntimeHandleID,
+		RuntimeInstanceID:         rec.Metadata.RuntimeInstanceID,
+		RuntimeOwnerToken:         rec.Metadata.RuntimeOwnerToken,
 		RuntimeLaunchID:           rec.Metadata.RuntimeLaunchID,
 		AgentSessionID:            rec.Metadata.AgentSessionID,
 		Prompt:                    rec.Metadata.Prompt,
@@ -476,7 +505,9 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		DisplayName:               rec.DisplayName,
 		ActivityState:             activity.State,
 		ActivityLastAt:            activity.LastActivityAt,
+		LastSignalAt:              timeToNullTime(activity.LastSignalAt),
 		FirstSignalAt:             timeToNullTime(rec.FirstSignalAt),
+		TurnCompletedAt:           timeToNullTime(rec.TurnCompletedAt),
 		IsTerminated:              rec.IsTerminated,
 		IsPinned:                  rec.IsPinned,
 		PinnedAt:                  timePtrToNullTime(rec.PinnedAt),
@@ -486,6 +517,8 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		DiffBaseSha:               rec.Metadata.DiffBaseSHA,
 		DiffBaseRef:               rec.Metadata.DiffBaseRef,
 		RuntimeHandleID:           rec.Metadata.RuntimeHandleID,
+		RuntimeInstanceID:         rec.Metadata.RuntimeInstanceID,
+		RuntimeOwnerToken:         rec.Metadata.RuntimeOwnerToken,
 		RuntimeLaunchID:           rec.Metadata.RuntimeLaunchID,
 		AgentSessionID:            rec.Metadata.AgentSessionID,
 		Prompt:                    rec.Metadata.Prompt,
@@ -544,6 +577,13 @@ func normalActivity(a domain.Activity, fallback time.Time) domain.Activity {
 	}
 	if a.LastActivityAt.IsZero() {
 		a.LastActivityAt = time.Now().UTC()
+	}
+	// Every write path that sets a transition has, by definition, just heard
+	// from the session. Seeding the liveness clock from it here means a caller
+	// that only knows about the transition (spawn, restore, the reaper) cannot
+	// leave behind a row that reads as never-heard-from.
+	if a.LastSignalAt.Before(a.LastActivityAt) {
+		a.LastSignalAt = a.LastActivityAt
 	}
 	return a
 }

@@ -199,3 +199,75 @@ describe("supervisor-link", () => {
 		expect(receivedConnection).toBe(false);
 	});
 });
+
+
+describe("connectSupervisor verify gate (P9)", () => {
+	const servers: net.Server[] = [];
+	const handles: Array<{ dispose(): void }> = [];
+	afterEach(async () => {
+		for (const h of handles.splice(0)) h.dispose();
+		await Promise.all(servers.splice(0).map((s) => new Promise<void>((resolve) => s.close(() => resolve()))));
+	});
+
+	async function listen(addr: string): Promise<net.Server> {
+		const server = net.createServer();
+		servers.push(server);
+		await new Promise<void>((resolve, reject) => {
+			server.listen(addr, () => resolve());
+			server.once("error", reject);
+		});
+		return server;
+	}
+
+	it("never connects to a socket whose daemon is not the proven one, and ends the link", async () => {
+		const addr = tmpSocketPath();
+		const server = await listen(addr);
+		let connections = 0;
+		server.on("connection", (s) => {
+			connections++;
+			s.destroy();
+		});
+		const link = connectSupervisor(addr, { verify: async () => "foreign" });
+		handles.push(link);
+		await new Promise<void>((r) => setTimeout(r, 600));
+		expect(connections).toBe(0);
+		expect(link.connected).toBe(false);
+	});
+
+	it("waits without connecting while unproven, then connects once proven", async () => {
+		const addr = tmpSocketPath();
+		const server = await listen(addr);
+		let verdict: "unproven" | "proven" = "unproven";
+		const connected = nextConnection(server);
+		let early = false;
+		server.on("connection", () => {
+			if (verdict !== "proven") early = true;
+		});
+		const link = connectSupervisor(addr, { verify: async () => verdict });
+		handles.push(link);
+		await new Promise<void>((r) => setTimeout(r, 500));
+		verdict = "proven";
+		const conn = await withTimeout(connected, 6_000, "never connected after proof");
+		expect(early).toBe(false);
+		conn.destroy();
+	});
+
+	it("after a drop, re-links only if the same daemon is still proven", async () => {
+		const addr = tmpSocketPath();
+		const server = await listen(addr);
+		let verdict: "proven" | "foreign" = "proven";
+		let connections = 0;
+		server.on("connection", (s) => {
+			connections++;
+			if (connections === 1) {
+				verdict = "foreign"; // another daemon took the socket path
+				setTimeout(() => s.destroy(), 50);
+			}
+		});
+		const link = connectSupervisor(addr, { verify: async () => verdict });
+		handles.push(link);
+		await new Promise<void>((r) => setTimeout(r, 1_500));
+		expect(connections).toBe(1);
+		expect(link.connected).toBe(false);
+	});
+});

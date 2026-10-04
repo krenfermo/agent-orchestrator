@@ -1,0 +1,411 @@
+package workflow
+
+import (
+	stdctx "context"
+	"fmt"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+)
+
+// resolutionStalenessThreshold bounds how long a resolution attempt may sit
+// at status=running before observeResolutionStep gives up waiting and forces
+// the owning question to human_required instead of guessing. Mirrors
+// reviewStalenessThreshold's "no longer confident, ask for attention"
+// framing (review_progress.go) — scoped to the ONE question whose resolution
+// went stale, never the whole run.
+const resolutionStalenessThreshold = 30 * time.Minute
+
+// reconcileDecisionResolvers is Checkpoint 8K-B pass 2's read-time
+// dispatch+observe pass for every question currently at state=resolving
+// (auto_resolvable). Called from reconcileQuestions, right after detection,
+// mirroring the review<->fix cascade's "opportunistically observe and
+// dispatch the next eligible step within this same call" convention — never
+// a background poller.
+//
+// Returns a non-empty nextAction string when at least one resolving question
+// is stuck waiting for provider capacity (Checkpoint 8K-B's
+// "waiting_for_capacity" read-time-derived NextAction, never persisted as a
+// new WorkflowRunState) — the caller (GetRun) only applies it when no
+// higher-priority pending/human_required question override already won.
+func (c *Coordinator) reconcileDecisionResolvers(ctx stdctx.Context, run domain.WorkflowRun, now time.Time) (string, error) {
+	if c.questionsStore == nil || run.State.Terminal() {
+		return "", nil
+	}
+	openQuestions, err := c.questionsStore.ListWorkflowQuestionsByRun(ctx, run.ID)
+	if err != nil {
+		return "", err
+	}
+	waitingForCapacity := ""
+	for _, q := range openQuestions {
+		if q.State != domain.QuestionStateResolving {
+			continue
+		}
+		if q.ResolvingRunID == nil {
+			nextAction, derr := c.dispatchDecisionResolver(ctx, run, q, now)
+			if derr != nil {
+				return "", derr
+			}
+			if nextAction != "" {
+				// Checkpoint 8N.1: before this fix, a resolver capacity wait
+				// was purely read-time-derived (this whole function is only
+				// ever reached via GetRun, including ContinueRun's own
+				// trailing GetRun call) — the only thing that ever retried
+				// dispatchDecisionResolver was another GetRun, i.e. a
+				// browser polling the UI. That is exactly the dependency
+				// Checkpoint 8N.1 must remove: schedule a durable
+				// question_resolver_capacity wake here so the daemon poller
+				// retries it unattended, with GetRun's own opportunistic
+				// retry-on-read staying as a harmless idempotent bonus path
+				// rather than the only mechanism.
+				c.scheduleQuestionResolverCapacityWake(ctx, run, q)
+				if waitingForCapacity == "" {
+					waitingForCapacity = nextAction
+				}
+			}
+			continue
+		}
+		if err := c.observeResolutionStep(ctx, run, q, now); err != nil {
+			return "", err
+		}
+	}
+	return waitingForCapacity, nil
+}
+
+// dispatchDecisionResolver mints a fresh workflow_question_resolutions row
+// and launches a read-only resolver session for one auto_resolvable question
+// that has no current resolution attempt yet. If no provider is currently
+// usable (per selectDecisionResolverProvider), it makes no changes and
+// returns the "waiting_for_capacity" NextAction string — the question stays
+// at state=resolving and dispatch is retried on the next reconcile pass.
+func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.WorkflowRun, q domain.WorkflowQuestion, now time.Time) (string, error) {
+	if c.decisionResolverLauncher == nil {
+		return "waiting_for_capacity: resolver unavailable (no launcher configured)", nil
+	}
+	selection := c.selectDecisionResolverProvider(ctx, run, q.AskingHarness)
+	if !selection.Available {
+		return "waiting_for_capacity: resolver unavailable", nil
+	}
+
+	branch, worktreePath, fingerprint := c.resolverWorkspaceForQuestion(ctx, q)
+	if worktreePath == "" {
+		// P3-C: the checkpoint has no worktree path. For a DIRECT-BRANCH
+		// placement it never will -- such a run has no worktree, it works in the
+		// repository itself -- so the run's own frozen placement is the durable
+		// fact that answers "where is this work happening". Without this the
+		// resolver could never be dispatched for a direct-branch run at all, and
+		// every autonomous decision on one parked forever on a capacity wait.
+		if path, placementBranch := c.placementWorkspacePath(ctx, run); path != "" {
+			worktreePath = path
+			if branch == "" {
+				branch = placementBranch
+			}
+		}
+	}
+	if worktreePath == "" {
+		// No usable checkout to hand the resolver a workspace over: surface
+		// ambiguity via the same capacity-wait channel rather than guessing a
+		// path, and let a later pass (once a checkpoint exists) retry.
+		return "waiting_for_capacity: resolver unavailable (no worktree recorded yet)", nil
+	}
+
+	resolutionID := "wqr-" + c.newID()
+	resolverSessionID := domain.SessionID("decision-resolver-" + resolutionID)
+	var askingSessionID *domain.SessionID
+	if q.SessionID != nil {
+		v := *q.SessionID
+		askingSessionID = &v
+	}
+	resolution := domain.WorkflowQuestionResolution{
+		ID:                 domain.WorkflowQuestionResolutionID(resolutionID),
+		WorkflowQuestionID: q.ID,
+		WorkflowRunID:      q.WorkflowRunID,
+		AskingSessionID:    askingSessionID,
+		ResolverHarness:    selection.Harness,
+		Status:             domain.ResolutionStatusPending,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	if _, err := c.questionsStore.InsertWorkflowQuestionResolution(ctx, resolution); err != nil {
+		return "", err
+	}
+	if _, err := c.questionsStore.SetWorkflowQuestionResolvingRunID(ctx, string(q.ID), strPtr(resolutionID)); err != nil {
+		return "", err
+	}
+
+	// Checkpoint 8M §9: the decision resolver's own minimal-evidence context
+	// pack — objective/acceptance criteria/fingerprint, reusing
+	// BuildTaskCheckpointSummary now that it lives in this same package (see
+	// task_checkpoint_summary.go's doc comment: this was previously blocked
+	// by an import cycle through httpd/controllers, resolved by moving the
+	// builder here in this checkpoint). No worker transcript, never a new
+	// fetch beyond the plan artifact this dispatch already needs.
+	var acceptanceCriteria []string
+	var contextPackText string
+	if artifact, aerr := c.planArtifactForRun(ctx, run); aerr == nil {
+		acceptanceCriteria = artifact.AcceptanceCriteria
+		facts := BuildTaskCheckpointSummary(TaskCheckpointSummaryInput{
+			Detail: RunDetail{Run: run}, Artifact: &artifact,
+		})
+		facts.CurrentFingerprint = fingerprint
+		contextPackText = RenderContextPackForRole(BuildSessionContextPack(domain.WorkflowRoleDecisionResolver, facts))
+	}
+
+	prompt := BuildDecisionResolverPrompt(DecisionResolverPromptInput{
+		Objective:          run.Objective,
+		AcceptanceCriteria: acceptanceCriteria,
+		EffectiveSpec:      RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, acceptanceCriteria)),
+		QuestionText:       q.QuestionText,
+		Choices:            q.StructuredChoices,
+		Branch:             branch,
+		WorktreePath:       worktreePath,
+		PolicyVersion:      run.PolicyVersion,
+		AllowSameProvider:  selection.SameProvider,
+		ResolverSessionID:  string(resolverSessionID),
+		ResolutionRunID:    resolutionID,
+		ContextPack:        contextPackText,
+	})
+
+	// Record the resolver's identity (transition to running, set
+	// resolver_session_id) BEFORE calling Preflight/Launch, not after: the
+	// prompt already carries this exact identity, so a resolver that
+	// responds immediately after being spawned (or, in tests, a fake
+	// launcher whose Launch synchronously simulates the callback) must be
+	// able to validate against it the instant Launch returns — recording it
+	// only after Launch would otherwise be a real, if narrow, race between
+	// "resolver started" and "coordinator finished bookkeeping".
+	if _, err := c.questionsStore.TransitionResolutionStatus(ctx, resolutionID, domain.ResolutionStatusPending, domain.ResolutionStatusRunning,
+		"", "", nil, nil, false, now, nil); err != nil {
+		return "", err
+	}
+	if _, err := c.questionsStore.SetResolutionResolverSessionID(ctx, resolutionID, string(resolverSessionID)); err != nil {
+		return "", err
+	}
+
+	// P3-E: the resolver's attribution window, keyed on the RESOLUTION -- the
+	// same durable authority the pane's environment carries as its usage
+	// subject, so the resolver's own tokens land under decision_resolver and
+	// never under the worker that asked. Opened before Preflight/Launch so it
+	// precedes any token the resolver could spend.
+	c.openUsageWindow(ctx, usageWindowSpec{
+		Subject: domain.RuntimePaneSubject(resolutionID),
+		Role:    domain.WorkflowRoleDecisionResolver,
+		Run:     run, AttemptID: resolutionID, Harness: string(selection.Harness),
+		OpenedAt: now,
+	})
+
+	if err := c.decisionResolverLauncher.Preflight(ctx, selection.Harness, worktreePath); err != nil {
+		return c.recordResolutionFailure(ctx, resolutionID, fmt.Errorf("resolver preflight: %w", err), now)
+	}
+	runtimeEnv, _, _, err := c.resolveRuntimeEnv(ctx, run.ID, selection.Harness)
+	if err != nil {
+		return c.recordResolutionFailure(ctx, resolutionID, err, now)
+	}
+	if _, err := c.decisionResolverLauncher.Launch(ctx, DecisionResolverLaunchRequest{
+		Harness:           selection.Harness,
+		AskingSessionID:   derefSessionID(askingSessionID),
+		ProjectID:         domain.ProjectID(run.ProjectID),
+		ResolutionID:      resolutionID,
+		ResolverSessionID: resolverSessionID,
+		WorkspacePath:     worktreePath,
+		Prompt:            prompt,
+		RuntimeEnv:        runtimeEnv,
+	}); err != nil {
+		return c.recordResolutionFailure(ctx, resolutionID, fmt.Errorf("launch resolver: %w", err), now)
+	}
+	return "", nil
+}
+
+// recordResolutionFailure marks a resolution attempt failed when
+// preflight/launch itself could not even start a session (the attempt was
+// already transitioned to running so the resolver's baked-in identity could
+// be validated the instant it responds — see dispatchDecisionResolver). The
+// owning question is left at state=resolving; observeResolutionStep is what
+// promotes a failed attempt's OWNING question to human_required, keeping
+// exactly one transition path for that escalation rather than two.
+func (c *Coordinator) recordResolutionFailure(ctx stdctx.Context, resolutionID string, cause error, now time.Time) (string, error) {
+	if _, err := c.questionsStore.TransitionResolutionStatus(ctx, resolutionID, domain.ResolutionStatusRunning, domain.ResolutionStatusFailed,
+		"", cause.Error(), nil, nil, false, now, &now); err != nil {
+		return "", err
+	}
+	if c.log != nil {
+		c.log.Warn("workflow: decision resolver launch failed", "resolution", resolutionID, "err", cause)
+	}
+	return "", nil
+}
+
+// observeResolutionStep is the pure fact-based observation of one question's
+// current resolution attempt, mirroring observeReviewStep: re-reads the
+// resolution row (a pure DB fact written by the real `ao decision resolve`
+// CLI call hitting the real HTTP endpoint) and applies the corresponding
+// question-state transition. Called every reconcile pass for any resolving
+// question with a current resolution row.
+func (c *Coordinator) observeResolutionStep(ctx stdctx.Context, run domain.WorkflowRun, q domain.WorkflowQuestion, now time.Time) error {
+	if q.ResolvingRunID == nil {
+		return nil
+	}
+	resolution, found, err := c.questionsStore.GetWorkflowQuestionResolution(ctx, string(*q.ResolvingRunID))
+	if err != nil {
+		return err
+	}
+	if !found {
+		// Defensive: dangling pointer. Force human_required rather than
+		// silently stalling forever.
+		return c.forceQuestionHumanRequired(ctx, q, "resolver_dangling_reference: resolution row referenced by resolving_run_id no longer exists", now)
+	}
+
+	switch resolution.Status {
+	case domain.ResolutionStatusPending, domain.ResolutionStatusRunning:
+		if now.Sub(resolution.UpdatedAt) > resolutionStalenessThreshold {
+			if _, err := c.questionsStore.TransitionResolutionStatus(ctx, string(resolution.ID), resolution.Status, domain.ResolutionStatusFailed,
+				"", "resolver did not respond within the staleness window", nil, nil, false, now, &now); err != nil {
+				return err
+			}
+			return c.forceQuestionHumanRequired(ctx, q, "resolver_stale: no result within the staleness window", now)
+		}
+		return nil
+
+	case domain.ResolutionStatusComplete:
+		if resolution.RequiresHuman {
+			return c.forceQuestionHumanRequired(ctx, q, "resolver_requires_human: "+resolution.ReasonSummary, now)
+		}
+		answerText := resolution.Answer
+		if answerText == "" {
+			// Defensive: a complete, non-requires-human resolution with no
+			// answer text should not happen given the resolve-service's own
+			// validation, but never invent an answer.
+			return c.forceQuestionHumanRequired(ctx, q, "ambiguous_resolution_state: resolution completed with no answer and requires_human=false", now)
+		}
+		// P3-C: WHICH automatic source produced this answer is a durable fact
+		// about the question, not about the resolver that ran. The same
+		// read-only cross-provider machinery serves both cases; what separates
+		// them is why the question reached it. A discovery-shaped question the
+		// classifier recognised on its own is `resolver`. A question AO judged
+		// a low-risk choice it was AUTHORIZED to make instead of asking is
+		// `autonomous`, and only that one has an autonomy policy behind it that
+		// a person may want to change.
+		//
+		// Neither is ever recorded as `human`. See domain.AnswerSourceAutonomous.
+		source := domain.AnswerSourceResolver
+		if q.AutonomyMode.Valid() {
+			source = domain.AnswerSourceAutonomous
+		}
+		ok, err := c.questionsStore.AnswerWorkflowQuestion(ctx, string(q.ID), domain.QuestionStateResolving, domain.QuestionStateAnswered,
+			source, answerText, "", now)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			// Lost a race (e.g. run cancelled concurrently) — not an error.
+			return nil
+		}
+		if c.messageSender != nil {
+			// Immediate delivery attempt, mirroring detectQuestionForStep's
+			// own "answer just computed, sweep again now for responsiveness"
+			// pattern (questions_wiring.go) — the top-of-reconcileQuestions
+			// sweep also covers this on the very next call (restart
+			// recovery), the delivered flag makes both calls safe.
+			// Best-effort: observeResolutionStep also runs on the read path, and
+			// a worker session that refuses the write must not make the run
+			// unreadable. The answer is durable; the delivery is retried.
+			c.deliverAnsweredQuestions(ctx, run, now)
+		}
+		return nil
+
+	case domain.ResolutionStatusFailed:
+		return c.forceQuestionHumanRequired(ctx, q, "resolver_failed: "+resolution.ReasonSummary, now)
+
+	case domain.ResolutionStatusCancelled:
+		// Cancellation only ever originates from CancelRun, which already
+		// moves the question to cancelled directly — nothing further to do.
+		return nil
+
+	default:
+		return nil
+	}
+}
+
+// forceQuestionHumanRequired transitions a resolving question to
+// human_required (resolver failed/stale/dangling/requires_human) without
+// ever writing an answer_text/answer_source — the resolver's advisory
+// answer (if any) stays only on the resolution row for pass 3's UI, clearly
+// labeled, never delivered as a decision.
+func (c *Coordinator) forceQuestionHumanRequired(ctx stdctx.Context, q domain.WorkflowQuestion, reason string, now time.Time) error {
+	_, err := c.questionsStore.TransitionWorkflowQuestionState(ctx, string(q.ID), domain.QuestionStateResolving, domain.QuestionStateHumanRequired, reason, now)
+	return err
+}
+
+func strPtr(s string) *string { return &s }
+
+func derefSessionID(id *domain.SessionID) domain.SessionID {
+	if id == nil {
+		return ""
+	}
+	return *id
+}
+
+// resolverWorkspaceForQuestion finds the checkout the resolver should read.
+//
+// IT LOOKS FOR THE LATEST CHECKPOINT THAT ACTUALLY CARRIES A WORKSPACE, not
+// simply the latest checkpoint. That distinction is the whole of this function,
+// and it was a real defect: a step's append-only ledger ends with whatever phase
+// was written last, and several of those phases legitimately record no workspace
+// — `worker_blocked` is one, and it is exactly the phase a step is in when a
+// worker pauses on a question. So the resolver asked for "the latest
+// checkpoint", got a row with an empty worktree path, and parked on
+// "waiting_for_capacity: no worktree recorded yet" for a workspace AO had
+// already written down twice on the same step.
+//
+// The consequence was that an auto_resolvable question on a WORKTREE-placed run
+// could never be resolved: the wake fired, dispatch re-read the same blank row,
+// and the question sat in `resolving` forever. Direct-branch runs were unharmed,
+// because placementWorkspacePath answers for them — which is why this went
+// unnoticed.
+//
+// It changes no question semantics and invents nothing: it reads the same
+// durable checkpoints, and returns empty when none of them recorded a workspace,
+// leaving the existing placement fallback and capacity-wait behaviour exactly as
+// they were.
+func (c *Coordinator) resolverWorkspaceForQuestion(ctx stdctx.Context, q domain.WorkflowQuestion) (branch, worktreePath, fingerprint string) {
+	if q.WorkflowStepID == nil {
+		return "", "", ""
+	}
+	stepID := string(*q.WorkflowStepID)
+
+	// The fingerprint still comes from the LATEST checkpoint when it has one:
+	// it describes the tree as it stands now, which is what the resolver should
+	// reason about, and it is independent of which row recorded the path.
+	if cp, hasCP, cerr := c.store.GetLatestWorkflowCheckpointByStep(ctx, stepID); cerr == nil && hasCP {
+		fingerprint = cp.FingerprintAfter
+		if fingerprint == "" {
+			fingerprint = cp.FingerprintBefore
+		}
+		if cp.WorktreePath != "" {
+			return cp.Branch, cp.WorktreePath, fingerprint
+		}
+	}
+
+	checkpoints, err := c.store.ListWorkflowCheckpoints(ctx, string(q.WorkflowRunID))
+	if err != nil {
+		return "", "", fingerprint
+	}
+	// Newest first: the most recent recorded workspace for THIS step wins, so a
+	// step that moved workspace mid-flight resolves against where it is now.
+	for i := len(checkpoints) - 1; i >= 0; i-- {
+		cp := checkpoints[i]
+		if cp.WorkflowStepID == nil || *cp.WorkflowStepID != stepID {
+			continue
+		}
+		if cp.WorktreePath == "" {
+			continue
+		}
+		if fingerprint == "" {
+			fingerprint = cp.FingerprintAfter
+			if fingerprint == "" {
+				fingerprint = cp.FingerprintBefore
+			}
+		}
+		return cp.Branch, cp.WorktreePath, fingerprint
+	}
+	return "", "", fingerprint
+}

@@ -1,11 +1,12 @@
 # Agent Orchestrator Architecture
 
-Agent Orchestrator is a long-running Go daemon that supervises multiple parallel AI coding agent sessions. Every session owns an isolated git worktree and one committed interface mode at a time. A TUI session runs its agent inside a tmux/conpty runtime; a Chat session runs a native protocol controller without an agent terminal runtime. A durable handoff may move a compatible native conversation between them, but both controllers are never live at once. The daemon coordinates both through the same session, lifecycle, workspace, storage, and observation boundaries.
+Agent Orchestrator is a long-running Go daemon that supervises multiple parallel AI coding agent sessions. A session's working tree is decided by its project's **execution mode** (Checkpoint 8P-E.11): in the default `isolated_worktree` mode every session owns an isolated git worktree on a generated `ao/*` branch, while in `direct_branch` mode sessions work in the registered repository itself on its configured branch, serialized by a durable branch lock instead of by physical isolation (see [Execution modes](#execution-modes)). Every session holds one committed interface mode at a time. A TUI session runs its agent inside a tmux/conpty runtime; a Chat session runs a native protocol controller without an agent terminal runtime. A durable handoff may move a compatible native conversation between them, but both controllers are never live at once. The daemon coordinates both through the same session, lifecycle, workspace, storage, and observation boundaries.
 
 ## Table of Contents
 
 - [Mental Model](#mental-model)
 - [System Overview](#system-overview)
+- [Execution modes](#execution-modes)
 - [Core Architectural Principles](#core-architectural-principles)
 - [Component Architecture](#component-architecture)
 - [Data Flows](#data-flows)
@@ -16,6 +17,7 @@ Agent Orchestrator is a long-running Go daemon that supervises multiple parallel
 - [HTTP Layer](#http-layer)
 - [Terminal Multiplexing](#terminal-multiplexing)
 - [Browser Runtime Bridge](#browser-runtime-bridge)
+- [Notifications](#notifications)
 
 ---
 
@@ -129,6 +131,106 @@ graph TB
 ```
 
 ---
+
+## Execution modes
+
+A project chooses how its sessions materialise a working tree via
+`ProjectConfig.ExecutionMode`. The value is resolved through
+`domain.ResolveExecutionMode(kind, config)`, never read raw: an unset mode means
+`isolated_worktree` (so no project registered before Checkpoint 8P-E.11 changes
+behavior on upgrade), and a scratch project is always `isolated_worktree`
+because it has no repository to work in.
+
+| | `isolated_worktree` (default) | `direct_branch` |
+| --- | --- | --- |
+| Working tree | one `git worktree` per session under `~/.ao/worktrees` | the registered repository itself |
+| Branch | generated `ao/<session>/root` | the project's configured `defaultBranch` |
+| Adapter | `adapters/workspace/gitworktree` | `adapters/workspace/directbranch` |
+| Concurrency | physical isolation | durable branch lock (`branch_locks`) |
+| Cleanup | remove the worktree | nothing to clean up |
+| Session prefix | contributes to the generated branch name | names sessions only; creates no branch |
+
+`adapters/workspace/router` picks the adapter from the project's resolved mode.
+A direct-branch project whose adapter is unconfigured fails loudly rather than
+falling back to the worktree the user opted out of.
+
+### Task worktree lifecycle
+
+`internal/workspace` owns the worktrees a *plan's tasks* run in, as opposed to
+`adapters/workspace/gitworktree`, which owns the one a *session* runs in. It
+decides and records; `internal/worktree` performs — that package holds the only
+git the manager may run. A
+multi-task plan asks questions the per-session record cannot answer: which task
+a directory belongs to, which branch the work is ultimately for (never the
+throwaway `ao/*` one), and which commits — the base, plus each dependency's —
+it was cut against. All of those move or disappear, so `Ensure` writes them to
+`workflow_task_worktrees` (one row per task) instead of re-deriving them later.
+
+Two invariants:
+
+- The user's checkout is never disturbed. The manager only adds its own
+  directories, removes ones it created, prunes dead registrations, and reads
+  refs. `worktree.Git` has no checkout/reset/stash/clean method, and its exec
+  implementation refuses any git subcommand outside a read-only + `worktree`
+  allowlist — so the property is established by reading one small package
+  rather than by auditing every call site.
+- A `direct_branch` task gets nothing: no directory, no branch, no row, and no
+  git command at all. Its work happens in the user's own repository, and a
+  lifecycle record would assert AO owns something it does not.
+
+`Release` removes the directory but keeps the branch: tearing down a checkout
+must never discard commits, and the released row still names where the work is.
+It does not force, so a worktree holding uncommitted work makes teardown fail
+(recorded as `failed`) rather than deleting an agent's changes.
+
+### Branch locks
+
+Direct branch removes the isolation that made concurrent workflows safe, so
+mutual exclusion becomes explicit and durable. `internal/branchlock` resolves a
+project into the concrete repository+branch pairs a run will write — one per
+registered repository, so a workspace project's root and children keep
+independent branches and never serialize against each other — and takes all of
+them or none.
+
+Exclusion itself is enforced by SQLite: `branch_locks` carries a partial unique
+index on `(lock_key) WHERE state = 'held'`, so a second holder is a constraint
+violation rather than something application code has to check for. A run that
+loses moves to `waiting` with a `waiting_for_branch` checkpoint naming the
+owning workflow and a durable `branch_lock` wake that resumes it once the branch
+is free. A repository holding a human's uncommitted changes moves the run to
+`needs_attention` with `dirty_worktree` instead — waiting would never resolve it.
+
+Locks are released on completion, cancellation, and by boot reconciliation,
+which decides each held lock from durable workflow state: a lock whose run is
+gone or terminal is released, one whose run is still live is adopted by the new
+daemon instance rather than freed.
+
+### Autonomous git policy
+
+`ProjectConfig.Git` states what an unattended workflow may do to the repository:
+`localCommit`, `push`, and `merge`, each `automatic` / `require_approval` /
+`never`. Defaults are asymmetric on purpose — a local commit is reversible and
+invisible outside the machine, so it defaults to `automatic` and is part of
+normal autonomous completion; push and merge change state other people see, so
+both default to `never`. Merge resolves to a hard `never` in direct-branch mode,
+where there is no separate work branch to merge from.
+
+The autonomous local commit runs between "verified" and "completed", while the
+branch lock is still held — the only window in which the work is known-good and
+the repository is provably the run's to write. A commit failure parks the run in
+`needs_attention` and keeps the lock rather than reporting a completed run whose
+work is uncommitted.
+
+### Planner lifecycle context
+
+Autonomous planner execution runs under a workflow-owned lifecycle context — one
+scoped to the run itself, the same scope that owns the run's durable facts and
+its branch-lock wake. That context must never inherit a short-lived transport
+deadline (an inbound HTTP request context, for example) or a wake-poller tick
+deadline: both are bounded by the caller's own lifetime, not the plan's, so
+either would cancel planning before it can legitimately finish and park a run in
+`needs_attention` for a deadline it never actually exceeded.
+
 
 ## Core Architectural Principles
 
@@ -995,6 +1097,91 @@ expires within at most five minutes. AO never requests or stores request or
 response bodies; it allowlists safe headers and redacts URL credentials,
 fragments, and query values. Closing the tab, ending the session, or shutting
 down Electron disables and discards the capture.
+
+---
+
+## Notifications
+
+AO tells a person when something important happened, and stays quiet otherwise.
+One table, `notifications`, is the durable authority behind the in-app
+notification center, its cursor-paginated history, the live SSE stream, and the
+optional email fan-out. There is no second notification store and no second
+event bus.
+
+### Two producers, two authorities
+
+| Producer | Raises | From |
+| --- | --- | --- |
+| `workflow` coordinator (`completion_notify.go`, `attention_notify.go`) | `workflow_completed`, `task_completed`, `workflow_failed`, `task_failed`, `workflow_needs_attention`, `task_needs_attention` | a workflow RUN's terminal state and its attention checkpoint |
+| `service/notification.SessionFactNotifier` | `human_question_required`, `repair_exhausted`, `integration_failed` | durable facts about a SESSION |
+
+The split is not cosmetic. A session can sit on a permission prompt, exhaust its
+nudge budget, or have a review pass fail under it without its run ever changing
+state; a run can complete or fail without any single session saying so. Each
+session fact names the durable authority it is read from:
+
+- `human_question_required` <- `sessions.activity_state` entering blocked
+- `repair_exhausted` <- the attempt map persisted in `pr.last_nudge_signature`
+- `integration_failed` <- a `review_run` row written with status failed
+
+Facts are read off the authority that already owns them, at the moment it
+commits. Nothing publishes them, nothing queues them, and nothing writes the
+fact a second time — a notification row is the only thing a producer creates.
+
+### The autonomous policy
+
+While AO still has an autonomous move left, it makes it silently. A repair
+ATTEMPT notifies nobody; a repair EXHAUSTION does. `SessionFactRepairAttempted`
+exists precisely so that silence is a policy stated in one place
+(`policyFor`) rather than an absent branch spread across call sites.
+
+Deferred deliberately: `budget_warning` / `budget_exhausted`.
+`domain.UsageBudgetStatus` is a read model computed on demand from ledger rows;
+nothing records that a run CROSSED a threshold, so there is no durable fact to
+notify from. Adding the types before that authority exists would mean polling
+and diffing in memory, which a restart re-announces.
+
+### Idempotency and restart safety
+
+Every event-keyed notification carries a `dedupe_key` derived only from durable
+identity — never an observation time, a message body, or an in-memory counter.
+A unique index over `(type, dedupe_key)` makes that permanent rather than scoped
+to open rows, which is what a terminal fact needs: a reconcile, a retry, or a
+daemon that crashed between writing the row and publishing it all replay to the
+same single row, even after the user has already read it.
+
+Rows with an empty `dedupe_key` keep the older open-row rule
+(`idx_notifications_open_dedupe`, partial on `dedupe_key = ''`), so a condition
+that comes and goes can still be raised again once resolved.
+
+### Delivery semantics
+
+- **In-app: exactly-once.** The row IS the delivery, and the insert is idempotent.
+- **Email: at-least-once**, stated in `domain.EmailDeliverySemantics`. A send
+  that succeeds on the wire but crashes before the row is marked sent is
+  retried; SMTP offers nothing that would make it exactly-once. Duplicate mail
+  is the failure mode chosen over lost mail.
+
+`notification_email_outbox` makes the OWING durable: one row per notification
+(the primary key, so it inherits the notification's own event dedupe), moving
+`pending -> sending -> sent`, with `failed` as the bounded-retry state and
+`dead` as the terminal give-up. The attempt is spent at CLAIM time, so a crash
+mid-send still costs one and a wedging message cannot retry forever; a `sending`
+row whose lease expired is reclaimed by the next daemon.
+
+Email never gates the work it reports. An unconfigured transport enqueues
+nothing, in-app notifications are unaffected, and every delivery failure is a
+log line.
+
+### Recipient boundary
+
+`notifications.recipient` is the principal abstraction, and every list and count
+query is scoped by it. AO is single-user today and the only value written is
+`local`, so this changes no result — it exists so the authority boundary lives in
+the SQL rather than in a caller's discipline. **Extension point (P4-B/P4-C):**
+give it a real identity source and require producers to address rows explicitly
+instead of defaulting to the local principal. No users or teams table is created
+for it.
 
 ---
 

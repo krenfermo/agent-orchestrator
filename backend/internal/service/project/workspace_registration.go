@@ -32,7 +32,7 @@ func prepareWorkspaceProject(ctx context.Context, parent string, projectID domai
 	if err := validateWorkspaceParent(ctx, parent); err != nil {
 		return nil, err
 	}
-	children, err := detectWorkspaceChildren(ctx, parent, projectID, registeredAt)
+	children, ignoreOnly, err := detectWorkspaceChildren(ctx, parent, projectID, registeredAt)
 	if err != nil {
 		return nil, err
 	}
@@ -56,11 +56,11 @@ func prepareWorkspaceProject(ctx context.Context, parent string, projectID domai
 		})
 	}
 	if isGitRepo(parent) {
-		if err := adoptWorkspaceParent(ctx, parent, children); err != nil {
+		if err := adoptWorkspaceParent(ctx, parent, children, ignoreOnly); err != nil {
 			return nil, err
 		}
 	} else {
-		if err := initWorkspaceParent(ctx, parent, children); err != nil {
+		if err := initWorkspaceParent(ctx, parent, children, ignoreOnly); err != nil {
 			return nil, err
 		}
 	}
@@ -152,12 +152,21 @@ func validateWorkspaceParent(ctx context.Context, parent string) error {
 	return nil
 }
 
-func detectWorkspaceChildren(ctx context.Context, parent string, projectID domain.ProjectID, registeredAt time.Time) ([]domain.WorkspaceRepoRecord, error) {
+// detectWorkspaceChildren returns the direct child directories of parent that
+// are actual Git repositories, classified Ready or NeedsInit (unborn HEAD,
+// missing origin, or a linked-worktree .git file — all cases where the child
+// is still a real, if incomplete, git repository). Plain directories with no
+// .git of their own at all (docs/, backend/, .claude/, .pytest_cache/, etc.)
+// are never workspace repos — they are reported separately in ignoreOnly so
+// callers can still gitignore them in the parent (protecting against any
+// gitlink buried inside), without registering them as repos.
+func detectWorkspaceChildren(ctx context.Context, parent string, projectID domain.ProjectID, registeredAt time.Time) ([]domain.WorkspaceRepoRecord, []string, error) {
 	entries, err := os.ReadDir(parent)
 	if err != nil {
-		return nil, apierr.Invalid("INVALID_PATH", "Workspace path could not be read", nil)
+		return nil, nil, apierr.Invalid("INVALID_PATH", "Workspace path could not be read", nil)
 	}
 	var repos []domain.WorkspaceRepoRecord
+	var ignoreOnly []string
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -168,7 +177,7 @@ func detectWorkspaceChildren(ctx context.Context, parent string, projectID domai
 		}
 		child := filepath.Join(parent, name)
 		if name == domain.RootWorkspaceRepoName {
-			return nil, apierr.Invalid("WORKSPACE_CHILD_RESERVED_NAME",
+			return nil, nil, apierr.Invalid("WORKSPACE_CHILD_RESERVED_NAME",
 				"Child repository name is reserved for internal use",
 				map[string]any{
 					"path":         child,
@@ -176,13 +185,7 @@ func detectWorkspaceChildren(ctx context.Context, parent string, projectID domai
 				})
 		}
 		if !isGitRepo(child) {
-			repos = append(repos, domain.WorkspaceRepoRecord{
-				ProjectID:    projectID,
-				Name:         name,
-				RelativePath: filepath.ToSlash(name),
-				RegisteredAt: registeredAt,
-				GitStatus:    domain.GitStatusNeedsInit,
-			})
+			ignoreOnly = append(ignoreOnly, filepath.ToSlash(name))
 			continue
 		}
 		if err := validateWorkspaceChild(ctx, child); err != nil {
@@ -198,20 +201,21 @@ func detectWorkspaceChildren(ctx context.Context, parent string, projectID domai
 				})
 				continue
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		repos = append(repos, domain.WorkspaceRepoRecord{
 			ProjectID:     projectID,
 			Name:          name,
 			RelativePath:  filepath.ToSlash(name),
 			RepoOriginURL: resolveGitOriginURL(child),
-			DefaultBranch: resolveDefaultBranch(child),
+			DefaultBranch: resolveWorkspaceChildBranch(child),
 			RegisteredAt:  registeredAt,
 			GitStatus:     domain.GitStatusReady,
 		})
 	}
 	sort.Slice(repos, func(i, j int) bool { return repos[i].Name < repos[j].Name })
-	return repos, nil
+	sort.Strings(ignoreOnly)
+	return repos, ignoreOnly, nil
 }
 
 func validateWorkspaceChild(ctx context.Context, child string) error {
@@ -253,8 +257,8 @@ func validateWorkspaceChild(ctx context.Context, child string) error {
 	return nil
 }
 
-func adoptWorkspaceParent(ctx context.Context, parent string, repos []domain.WorkspaceRepoRecord) error {
-	changed, err := ensureWorkspaceGitignore(parent, repos)
+func adoptWorkspaceParent(ctx context.Context, parent string, repos []domain.WorkspaceRepoRecord, ignoreOnly []string) error {
+	changed, err := ensureWorkspaceGitignore(parent, repos, ignoreOnly)
 	if err != nil {
 		return apierr.Invalid("WORKSPACE_PARENT_GITIGNORE_FAILED", "Failed to update workspace parent .gitignore", map[string]any{"error": err.Error()})
 	}
@@ -273,7 +277,7 @@ func adoptWorkspaceParent(ctx context.Context, parent string, repos []domain.Wor
 	return nil
 }
 
-func initWorkspaceParent(ctx context.Context, parent string, repos []domain.WorkspaceRepoRecord) (retErr error) {
+func initWorkspaceParent(ctx context.Context, parent string, repos []domain.WorkspaceRepoRecord, ignoreOnly []string) (retErr error) {
 	// Snapshot the original .gitignore so we can restore it on failure.
 	// If the file doesn't exist, originalGitignore is nil.
 	gitignorePath := filepath.Join(parent, ".gitignore")
@@ -298,7 +302,7 @@ func initWorkspaceParent(ctx context.Context, parent string, repos []domain.Work
 		}
 	}()
 
-	if _, err := ensureWorkspaceGitignore(parent, repos); err != nil {
+	if _, err := ensureWorkspaceGitignore(parent, repos, ignoreOnly); err != nil {
 		return apierr.Invalid("WORKSPACE_PARENT_GITIGNORE_FAILED", "Failed to write workspace parent .gitignore", map[string]any{"error": err.Error()})
 	}
 	if _, err := gitOutput(ctx, parent, "add", "-A"); err != nil {
@@ -313,7 +317,7 @@ func initWorkspaceParent(ctx context.Context, parent string, repos []domain.Work
 	return nil
 }
 
-func ensureWorkspaceGitignore(parent string, repos []domain.WorkspaceRepoRecord) (bool, error) {
+func ensureWorkspaceGitignore(parent string, repos []domain.WorkspaceRepoRecord, ignoreOnly []string) (bool, error) {
 	path := filepath.Join(parent, ".gitignore")
 	seen := map[string]bool{}
 	var lines []string
@@ -334,6 +338,12 @@ func ensureWorkspaceGitignore(parent string, repos []domain.WorkspaceRepoRecord)
 	var additions []string
 	for _, repo := range repos {
 		additions = append(additions, "/"+filepath.ToSlash(repo.RelativePath)+"/")
+	}
+	// ignoreOnly covers plain, non-repo child directories that are not
+	// registered as workspace repos but must still be kept out of the parent
+	// index — one may contain a nested gitlink git would otherwise stage.
+	for _, name := range ignoreOnly {
+		additions = append(additions, "/"+name+"/")
 	}
 	additions = append(additions, workspaceRootIgnoreDenylist...)
 	changed := false
@@ -390,13 +400,46 @@ func workspaceReposFromRecords(records []domain.WorkspaceRepoRecord) []Workspace
 	out := make([]WorkspaceRepo, 0, len(records))
 	for _, rec := range records {
 		out = append(out, WorkspaceRepo{
-			Name:         rec.Name,
-			RelativePath: rec.RelativePath,
-			Repo:         rec.RepoOriginURL,
-			GitStatus:    string(rec.GitStatus),
+			Name:          rec.Name,
+			RelativePath:  rec.RelativePath,
+			Repo:          sanitizeRemoteURL(rec.RepoOriginURL),
+			Transport:     classifyTransport(rec.RepoOriginURL),
+			GitStatus:     string(rec.GitStatus),
+			DefaultBranch: rec.DefaultBranch,
 		})
 	}
 	return out
+}
+
+// resolveWorkspaceChildBranch returns a workspace child repo's base branch,
+// preferring the repo's own currently checked-out branch over the remote's
+// `origin/HEAD`. This is the opposite priority from the single-repo
+// resolveDefaultBranch (see its doc comment): a workspace child is an
+// existing, independently managed checkout the user deliberately arranged
+// under the workspace root — its checked-out branch IS the branch they are
+// actively developing on, which may have permanently diverged from what the
+// remote still advertises as its default (verified against the real MEDUSA
+// workspace: backend_node is checked out on `medusa_back_v2`, the team's
+// actual integration branch, while GitHub's origin/HEAD for that repo is
+// still `main`). Falls back to origin/HEAD, then "", exactly like
+// resolveDefaultBranch, for a child in a detached-HEAD state (though such a
+// child is normally rejected earlier as GitStatusNeedsInit — see
+// validateWorkspaceChild — so this fallback is a last resort, not the common
+// path).
+func resolveWorkspaceChildBranch(path string) string {
+	if out, err := aoprocess.Command("git", "-C", path, "symbolic-ref", "--short", "HEAD").Output(); err == nil {
+		if branch := strings.TrimSpace(string(out)); branch != "" {
+			return branch
+		}
+	}
+	if out, err := aoprocess.Command(
+		"git", "-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD",
+	).Output(); err == nil {
+		if ref := strings.TrimSpace(string(out)); ref != "" {
+			return strings.TrimPrefix(ref, "origin/")
+		}
+	}
+	return ""
 }
 
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {

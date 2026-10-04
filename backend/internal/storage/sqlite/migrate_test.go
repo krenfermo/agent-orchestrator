@@ -15,7 +15,14 @@ import (
 
 var expectedUsageTableColumns = map[string][]string{
 	"usage_bindings": {
-		"id", "session_id", "harness", "native_root_id", "initial_model_id",
+		"id",
+		// P3-E (migration 0150). A binding names a SUBJECT, not necessarily a
+		// session: a reviewer pane, a decision-resolver pane and a planner
+		// invocation all spend real provider tokens and none of them is a row
+		// in `sessions`. session_id survives as a real, nullable, foreign-keyed
+		// column so every session-scoped read keeps meaning what it meant.
+		"subject_kind", "subject_id",
+		"session_id", "harness", "native_root_id", "initial_model_id",
 		"state", "last_error_code", "updated_at",
 	},
 	"usage_sources": {
@@ -27,6 +34,27 @@ var expectedUsageTableColumns = map[string][]string{
 		"id", "binding_id", "usage_source_id", "model_id", "input_tokens", "uncached_input_tokens",
 		"cache_read_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens",
 		"source_event_key",
+		// P3-E (migration 0149). observed_at is the provider's own event time
+		// and recorded_at the ingest instant. Both are durable collection
+		// state, not display state: observed_at is what places a token inside
+		// the role window that was open when it was spent, and it stays NULL
+		// rather than being invented when an artifact carried no timestamp.
+		"observed_at", "recorded_at",
+		// P7 (migration 0169). turn_class is what the call DID, derived from
+		// the block types and tool names of the assistant message it bills
+		// for. It belongs on this list for the same reason observed_at does:
+		// it is collected, not displayed, and it is deliberately the ONLY
+		// thing the classifier keeps -- no command, no argument, no path and
+		// no message body reaches this table through it.
+		"turn_class",
+		// P7.2B1 (migration 0170). Which cache LIFETIME this call's creation
+		// bought: creating an entry that lives an hour costs more than one
+		// that lives five minutes, and the provider says which it made. Both
+		// are NULLABLE and NULL is not zero -- a row written before the column
+		// never observed the lifetime, which is a different fact from having
+		// created no short-lived cache. They are counts, like every other
+		// column here, and carry nothing about what the call said or did.
+		"cache_write_5m_tokens", "cache_write_1h_tokens",
 	},
 }
 

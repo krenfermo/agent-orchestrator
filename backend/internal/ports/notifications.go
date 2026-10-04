@@ -16,6 +16,14 @@ type NotificationIntent struct {
 	PRURL     string
 	CreatedAt time.Time
 
+	// WorkflowRunID anchors a run-level intent (workflow_completed) that has no
+	// session behind it.
+	WorkflowRunID string
+	// DedupeKey names the one real-world event this intent reports. Required for
+	// the completion family, which must never announce the same finished work
+	// twice; see domain.NotificationRecord.DedupeKey.
+	DedupeKey string
+
 	// Enrichment hints. These avoid storage reads on the hot path.
 	SessionDisplayName string
 	PRNumber           int
@@ -24,6 +32,26 @@ type NotificationIntent struct {
 	PRTargetBranch     string
 	Provider           string
 	Repo               string
+	// WorkflowObjective is the human-written objective of a completed run, used
+	// in place of the run id nobody recognizes.
+	WorkflowObjective string
+	// AttentionReason is the canonical stop reason for the attention family
+	// (workflow.ReasonFixBudgetExhausted and friends). Carried as a plain string
+	// so ports does not depend on the workflow package's vocabulary.
+	AttentionReason string
+	// Detail is the one-line, human-readable account of THIS occurrence — the
+	// same sentence the Board shows next to the stop.
+	Detail string
+
+	// TaskID is the optional planned-task anchor carried onto the stored row.
+	TaskID string
+	// Source and SourceEventID are provenance: which producer raised this, and
+	// the durable id of the observation it read. Both are stored so a row can
+	// be traced back to the fact that caused it. Empty Source defaults to
+	// lifecycle, which is where every intent came from before providers were
+	// distinguished.
+	Source        domain.NotificationSource
+	SourceEventID string
 }
 
 // NotificationResolution is the lifecycle-to-notification-producer contract for

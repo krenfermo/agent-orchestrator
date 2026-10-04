@@ -73,6 +73,15 @@ type agentSwitchTargetActivationStore interface {
 }
 
 // notificationSink is the optional lifecycle-to-notification-producer boundary.
+// sessionFactSink is the optional lifecycle-to-producer boundary. Lifecycle
+// hands it durable session-level facts it has just written or just read; the
+// producer decides whether any of them is worth notifying about. Lifecycle
+// deliberately holds the ports interface, not the service type: it reduces
+// facts, it does not own notification policy.
+type sessionFactSink interface {
+	Record(ctx context.Context, fact ports.SessionFact) error
+}
+
 type notificationSink interface {
 	Notify(ctx context.Context, intent ports.NotificationIntent) error
 	// Resolve closes notifications whose underlying issue went away. It is the
@@ -122,6 +131,13 @@ func WithNotificationSink(sink notificationSink) Option {
 	return func(m *Manager) { m.notifications = sink }
 }
 
+// WithSessionFactNotifier wires lifecycle's durable session-level facts to the
+// notification producer. Without it the reducer still runs and still writes
+// every fact; only the session-scoped notifications are skipped.
+func WithSessionFactNotifier(sink sessionFactSink) Option {
+	return func(m *Manager) { m.sessionFacts = sink }
+}
+
 // WithTelemetry wires lifecycle activity transitions to the shared telemetry sink.
 func WithTelemetry(sink ports.EventSink) Option {
 	return func(m *Manager) { m.telemetry = sink }
@@ -135,6 +151,23 @@ func WithContainerReaper(reaper ports.ContainerReaper, projects projectConfigLoa
 		m.containers = reaper
 		m.projects = projects
 	}
+}
+
+// branchLockCoordinator is the direct-branch execution-lock surface lifecycle
+// drives at a task session's turn boundaries (Checkpoint 8P-E.14A). Satisfied
+// by the daemon's *branchlock.Manager adapter.
+//
+// Both halves are here because both halves are turn-scoped: the release at the
+// end of a turn is only safe if the next turn takes the lock again.
+type branchLockCoordinator interface {
+	// AcquireForSession takes the locks the session's project requires for a
+	// new turn. A no-op for a project that is not in direct-branch mode, for a
+	// session that already holds them, and for a workflow run's current worker.
+	AcquireForSession(ctx context.Context, projectID domain.ProjectID, sessionID domain.SessionID) ([]domain.BranchLock, error)
+	// ReleaseSession frees every lock the session owns in its own right. Locks
+	// a workflow run owns while this session is its worker are not the
+	// session's and are never touched.
+	ReleaseSession(ctx context.Context, sessionID, reason string) (int64, error)
 }
 
 // WithActiveSteering supplies the adapter-provided active-turn steering
@@ -157,6 +190,9 @@ type Manager struct {
 	// nudges become no-ops but the reducer still runs.
 	guard         *sessionguard.Guard
 	notifications notificationSink
+	// sessionFacts receives session-level facts (a pending decision, a spent
+	// repair budget) after the durable state behind them is committed.
+	sessionFacts sessionFactSink
 	// completionTerminator is late-bound because Session Manager itself depends
 	// on this lifecycle reducer. It is required before the SCM observer starts.
 	completionTerminator sessionTerminator
@@ -169,6 +205,8 @@ type Manager struct {
 	projects         projectConfigLoader
 	operationGateMu  sync.RWMutex
 	operationGate    sessionOperationGate
+	branchLocksMu    sync.RWMutex
+	branchLocks      branchLockCoordinator
 
 	mu        sync.Mutex
 	window    time.Duration
@@ -239,6 +277,86 @@ func (m *Manager) SetUsageFinalizer(finalizer sessionUsageFinalizer) {
 func (m *Manager) SetSessionInputLease(lease sessionguard.InputLease) {
 	if m.guard != nil {
 		m.guard.SetInputLease(lease)
+	}
+}
+
+// SetBranchLocks wires the direct-branch execution lock into the two places
+// lifecycle owns a task session's ownership of its branch:
+//
+//   - MarkTerminated frees every lock the terminated session owns.
+//   - Turn boundaries (ApplyActivitySignal) take the lock when a turn starts and
+//     give it back when the turn ends.
+//
+// Both live here rather than in session_manager for the same reason the
+// container reaper does: these are the places every path converges. Termination
+// converges on MarkTerminated — Kill, spawn failure, retire-for-replacement,
+// daemon-shutdown teardown, cleanup, and the PR/issue-driven termination in
+// reactions.go that never touches session_manager at all. Turn boundaries
+// converge on the activity signal, which is reported the same way whether the
+// prompt came from AO or from a human typing straight into the pane.
+//
+// Late-bound because the daemon builds the lifecycle manager before the branch
+// lock manager exists.
+func (m *Manager) SetBranchLocks(locks branchLockCoordinator) {
+	m.branchLocksMu.Lock()
+	m.branchLocks = locks
+	m.branchLocksMu.Unlock()
+}
+
+func (m *Manager) currentBranchLocks() branchLockCoordinator {
+	m.branchLocksMu.RLock()
+	defer m.branchLocksMu.RUnlock()
+	return m.branchLocks
+}
+
+// acquireSessionBranchLocks takes the session's branch for a turn that is
+// starting.
+//
+// Best-effort by construction, and the reason is worth stating plainly: the
+// signal that a turn started is a hook that fires *after* the prompt was
+// submitted, so there is nothing left to refuse. A conflict here means another
+// task or workflow took the branch while this session was idle; AO logs that
+// truthfully and the session keeps running, rather than pretending it owns a
+// branch it does not. The refusal that actually protects the branch is the one
+// at task start (session_manager.acquireSessionBranchLocks), which happens
+// before any agent exists.
+func (m *Manager) acquireSessionBranchLocks(ctx context.Context, projectID domain.ProjectID, id domain.SessionID) {
+	locks := m.currentBranchLocks()
+	if locks == nil {
+		return
+	}
+	acquired, err := locks.AcquireForSession(ctx, projectID, id)
+	if err != nil {
+		slog.Default().Warn(
+			"lifecycle: branch lock acquire at turn start failed; session is working without the execution lock",
+			"session", id, "project", projectID, "err", err,
+		)
+		return
+	}
+	if len(acquired) > 0 {
+		slog.Default().Info("lifecycle: acquired session branch locks for new turn", "session", id, "count", len(acquired))
+	}
+}
+
+// releaseSessionBranchLocks frees a session's own execution locks, at the end
+// of a turn or when the session terminates.
+// Best-effort and never returned: a release failure must not turn a terminated
+// session into an error, and boot reconciliation releases any lock whose owning
+// session is terminated or has no turn in flight anyway
+// (branchlock/retention.go), so a miss is self-healing rather than a
+// permanently occupied branch.
+func (m *Manager) releaseSessionBranchLocks(ctx context.Context, id domain.SessionID, reason string) {
+	locks := m.currentBranchLocks()
+	if locks == nil {
+		return
+	}
+	n, err := locks.ReleaseSession(ctx, string(id), reason)
+	if err != nil {
+		slog.Default().Warn("lifecycle: branch lock release failed", "session", id, "err", err)
+		return
+	}
+	if n > 0 {
+		slog.Default().Info("lifecycle: released session branch locks", "session", id, "count", n, "reason", reason)
 	}
 }
 
@@ -428,10 +546,43 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 	return nil
 }
 
+// livenessCoalesceWindow bounds how often a signal that changes nothing but the
+// liveness clock is allowed to reach the database.
+//
+// Without it, this reducer would write once per hook callback: run wf-1c2cb9bd
+// made 111 model calls in twenty minutes, and a busier agent makes far more.
+// None of those writes would carry new information — the state is unchanged and
+// the only field moving is a clock nobody reads at sub-minute resolution.
+//
+// Thirty seconds is chosen against the two consumers that exist. The Board
+// renders a relative time, where being up to half a minute behind is invisible.
+// workerNeedsInputCorroborationWindow asks whether a session has been silent
+// for fifteen MINUTES, so a thirty-second quantisation cannot change its
+// verdict. In exchange the write rate for an active session is bounded at two
+// per minute regardless of how hard the agent is working.
+//
+// The window only gates writes whose SOLE effect is the liveness clock. A
+// signal that changes state, stamps a completion receipt, or carries new
+// metadata is written immediately and refreshes liveness on the way through.
+const livenessCoalesceWindow = 30 * time.Second
+
 // ApplyActivitySignal records an authoritative agent activity signal and any
 // native agent session id carried alongside it. Metadata-only hooks leave the
-// existing activity and first-signal facts untouched.
+// existing activity state and first-signal facts untouched; they do advance the
+// liveness clock, because a callback that cleared every generation fence above
+// is this launch reporting in whether or not it carries a state.
 func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, s ports.ActivitySignal) error {
+	// Direct-branch execution ownership is turn-scoped (Checkpoint 8P-E.14A),
+	// and this is where a turn is observed to start and end. The action itself
+	// runs after every return path below has released m.mu — it does repository
+	// I/O and a durable write of its own, and must never do either under the
+	// reducer's lock.
+	var branchLockAction func()
+	defer func() {
+		if branchLockAction != nil {
+			branchLockAction()
+		}
+	}()
 	s.AgentSessionID = strings.TrimSpace(s.AgentSessionID)
 	s.LatestUserPrompt = strings.TrimSpace(s.LatestUserPrompt)
 	s.LatestAssistantUpdate = strings.TrimSpace(s.LatestAssistantUpdate)
@@ -473,6 +624,7 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		}
 	}
 	var intent *ports.NotificationIntent
+	var completionIntent *ports.NotificationIntent
 	m.mu.Lock()
 	for {
 		pending, ok := m.pendingLaunches[id]
@@ -526,6 +678,55 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		m.mu.Unlock()
 		return nil
 	}
+	// The signal now provably belongs to this session's current launch, so its
+	// turn boundary is authoritative and the branch follows it. This is decided
+	// from the RAW signal, before the tool-precedence fold below: precedence
+	// decides what the displayed state should be, not whether a turn ended, and
+	// a turn-completion event is never suppressed by it anyway (it is a turn
+	// boundary — see isTurnBoundaryEvent). Deciding here also means a repeated
+	// stop on an already-idle row still hands the branch back, instead of being
+	// dropped by the same-state early return.
+	switch {
+	case turnCompleted(s):
+		branchLockAction = func() {
+			m.releaseSessionBranchLocks(ctx, id, "task turn ended ("+s.Event+")")
+		}
+	case turnStarted(s):
+		projectID := rec.ProjectID
+		branchLockAction = func() { m.acquireSessionBranchLocks(ctx, projectID, id) }
+	}
+	// The same authoritative boundary is also what proves a task DID the work
+	// it was given, which is the fact the board needs to say "Completed"
+	// instead of "Idle" once the session goes quiet. It is decided from the
+	// raw signal for the same reasons the branch decision above is, and it is
+	// folded into rec here so every write path below carries it.
+	//
+	// Two directions, and both matter. A reported completion stamps the
+	// receipt. Work going back in flight clears it, so the receipt always
+	// describes the CURRENT quiet period: a task that was told to do more, or
+	// that has stopped to ask the user something, is not a finished task, and
+	// must not fall back to Completed if it later goes quiet without saying so
+	// again.
+	//
+	// Tasks only. An orchestrator is a standing conversation partner, not a unit
+	// of work: its turns end all day long and none of them is a task being
+	// finished, so "Completed" would be the wrong word for it and Idle —
+	// waiting for you — remains the right one. The test is against orchestrator
+	// rather than for worker because worker is what an unset kind means, in the
+	// column default and everywhere else.
+	completionChanged := false
+	switch {
+	case turnSucceeded(s) && rec.Kind != domain.KindOrchestrator:
+		if rec.TurnCompletedAt.IsZero() {
+			rec.TurnCompletedAt = timeOr(s.Timestamp, now)
+			completionChanged = true
+		}
+	case s.Valid && s.State.WorkInFlight():
+		if !rec.TurnCompletedAt.IsZero() {
+			rec.TurnCompletedAt = time.Time{}
+			completionChanged = true
+		}
+	}
 	// Event-tagged signals fold through the session's tool-flight state first:
 	// they may be suppressed (state write skipped) by the blocked-precedence
 	// rule, while their tracking side effects still land. Untagged signals
@@ -544,6 +745,11 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	}
 	if !s.Valid {
 		applyActivityMetadata(&rec.Metadata, s)
+		// A metadata-only callback (SessionStart handing over the native resume
+		// handle, say) carries no state, but it has already passed every
+		// generation fence above: it is the current launch reporting in, which
+		// is exactly what the liveness clock records.
+		markHeardFrom(&rec.Activity, timeOr(s.Timestamp, now))
 		rec.UpdatedAt = now
 		_, err := m.store.UpdateSessionFromActivitySignal(ctx, rec)
 		m.mu.Unlock()
@@ -556,7 +762,13 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	}
 	prevState := rec.Activity.State
 	prevAt := rec.Activity.LastActivityAt
-	act := domain.Activity{State: s.State, LastActivityAt: timeOr(s.Timestamp, now)}
+	heardAt := timeOr(s.Timestamp, now)
+	act := domain.Activity{
+		State:          s.State,
+		LastActivityAt: heardAt,
+		LastSignalAt:   rec.Activity.LastSignalAt,
+	}
+	markHeardFrom(&act, heardAt)
 	sameState := sameActivity(rec.Activity, act)
 	// A same-state repeat is still a write when it is the FIRST signal for
 	// this spawn: the receipt itself is a durable fact (it clears the
@@ -564,15 +776,33 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	// first to ARRIVE may match the seeded state — e.g. a turn's "active"
 	// POST is lost and its Stop hook lands idle on the idle-seeded row.
 	if sameState && !rec.FirstSignalAt.IsZero() {
-		if metadataChanged || s.Event == "user-prompt-submit" {
+		// completionChanged joins the list because a Stop that lands on an
+		// already-idle row is exactly how a finished task usually reports
+		// itself: the turn's "active" POST may never have arrived, or an
+		// untagged idle beat the Stop to the row. Dropping it here as a
+		// same-state repeat would throw away the only proof the work is done.
+		// The liveness clock is the one thing a same-state repeat DOES carry.
+		// It is coalesced so a hard-working agent cannot turn every tool call
+		// into a database write, and it never moves the transition clock:
+		// LastActivityAt keeps identifying the moment this state was entered,
+		// which is what every pause-scoped consumer downstream depends on.
+		livenessDue := heardAt.Sub(rec.Activity.LastSignalAt) >= livenessCoalesceWindow
+		if metadataChanged || completionChanged || s.Event == "user-prompt-submit" || livenessDue {
+			markHeardFrom(&rec.Activity, heardAt)
 			rec.UpdatedAt = now
 			applied, err := m.store.UpdateSessionFromActivitySignal(ctx, rec)
+			// Captured under the lock, emitted after it: the receipt is only
+			// news when this write is the one that stamped it.
+			completed := completionChanged && !rec.TurnCompletedAt.IsZero()
 			m.mu.Unlock()
 			if err != nil {
 				return err
 			}
 			if !applied {
 				return nil
+			}
+			if completed {
+				m.emitNotification(ctx, taskCompletionIntent(rec))
 			}
 			return m.acknowledgeAgentSwitchTarget(ctx, id, s, now)
 		}
@@ -613,6 +843,24 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 			SessionDisplayName: next.DisplayName,
 		}
 	}
+	// A task that just reported it finished the work it was given. The trigger
+	// is the completion receipt being stamped by THIS write — the same durable
+	// fact the Completed status reads — not a generic idle or stop event, and
+	// not a receipt that was already there. Because the receipt is cleared the
+	// moment work goes back in flight, each finished turn raises this once and
+	// a restart re-reading an unchanged row raises nothing.
+	if completionChanged && !next.TurnCompletedAt.IsZero() {
+		completionIntent = taskCompletionIntent(next)
+	}
+	// The session came to rest on a pending DECISION -- a tool-permission or
+	// approval dialog. That is the one state automation must never write into,
+	// so a person genuinely has to answer it, and it is reported however the
+	// session got there: directly from active or idle (the shape a
+	// permission-request hook produces) or by escalating in-family out of
+	// waiting_input. The needs-input intent above is untouched by this: it
+	// still fires exactly once on family ENTRY and stays silent in-family, so
+	// no extra legacy ping is introduced on either path.
+	questionFact := humanQuestionFact(rec, next)
 	// Leaving the needs-input family is the user answering: the notification
 	// that pinged them has nothing left to resolve.
 	resolutions := needsInputResolutions(rec, next, now)
@@ -625,8 +873,59 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		m.emitTelemetry(ctx, ev)
 	}
 	m.emitNotification(ctx, intent)
+	m.emitNotification(ctx, completionIntent)
+	if questionFact != nil {
+		m.recordSessionFact(ctx, *questionFact)
+	}
 	m.resolveNotifications(ctx, resolutions...)
 	return nil
+}
+
+// humanQuestionFact reports a genuine ENTRY into blocked -- any prior state to
+// blocked, which covers both the direct active/idle -> blocked move a
+// permission-request hook makes and the waiting_input -> blocked escalation.
+//
+// Restricting it to the escalation, as an earlier draft did, left the COMMON
+// path with no record at all: a permission prompt moves a session straight from
+// active or idle into blocked and never passes through waiting_input, so the
+// pending-decision notification was never raised for it.
+//
+// It is scoped to the pause by the activity timestamp the session row now
+// durably holds. Only an entry qualifies: a blocked -> blocked repeat is folded
+// upstream on the same state and, on the first signal for a spawn where it is
+// not, prev is already blocked and is rejected here. So one pause maps to one
+// notification, and a restart re-reading the same stored timestamp replays to
+// the row it already produced.
+func humanQuestionFact(prev, next domain.SessionRecord) *ports.SessionFact {
+	if next.IsTerminated ||
+		next.Activity.State != domain.ActivityBlocked ||
+		prev.Activity.State == domain.ActivityBlocked {
+		return nil
+	}
+	return &ports.SessionFact{
+		Kind:               ports.SessionFactHumanQuestion,
+		SessionID:          next.ID,
+		ProjectID:          next.ProjectID,
+		ScopeID:            ports.PauseScopeID(next.Activity.LastActivityAt),
+		SessionDisplayName: next.DisplayName,
+		ObservedAt:         next.Activity.LastActivityAt,
+	}
+}
+
+// taskCompletionIntent builds the "this task finished" notification from a
+// session row whose completion receipt was just stamped. The dedupe key is the
+// receipt timestamp itself, so the event it names is one specific finished
+// turn: a later turn on the same session gets its own notification, and a
+// replay of this one gets none.
+func taskCompletionIntent(rec domain.SessionRecord) *ports.NotificationIntent {
+	return &ports.NotificationIntent{
+		Type:               domain.NotificationTaskCompleted,
+		SessionID:          rec.ID,
+		ProjectID:          rec.ProjectID,
+		CreatedAt:          rec.TurnCompletedAt,
+		SessionDisplayName: rec.DisplayName,
+		DedupeKey:          string(rec.ID) + "@" + rec.TurnCompletedAt.UTC().Format(time.RFC3339Nano),
+	}
 }
 
 // stagePendingAgentSwitchNativeMetadata persists provider-assigned startup
@@ -751,6 +1050,60 @@ func isPostToolUseEvent(event string) bool {
 func isTurnBoundaryEvent(event string) bool {
 	return event == "user-prompt-submit" || event == "stop" || event == "session-end" ||
 		event == "process-exited" || event == "chat.controller.stopped"
+}
+
+// turnCompleted reports whether a signal is an agent telling AO that its turn
+// is over: a turn-boundary event that leaves no work in flight.
+//
+// Both halves are load-bearing (Checkpoint 8P-E.14A). The event half is what
+// makes this "the agent said it finished" rather than "the agent looks quiet":
+// an untagged idle signal from an old CLI, a runtime probe, or any state write
+// that is not a reported turn boundary is deliberately not a completion, and a
+// task that is merely between tool calls keeps its branch. The state half is
+// what keeps a turn that paused on the user (waiting_input / blocked) mid-turn:
+// a human owes it an answer, the task is still going, and its branch is still
+// its own.
+//
+// user-prompt-submit is a turn boundary too, but of the opposite kind — see
+// turnStarted.
+func turnCompleted(s ports.ActivitySignal) bool {
+	if !s.Valid || s.State.WorkInFlight() {
+		return false
+	}
+	return isTurnBoundaryEvent(s.Event) && s.Event != "user-prompt-submit"
+}
+
+// turnStarted reports whether a signal is an agent beginning a new turn — the
+// moment a task session needs its branch back.
+func turnStarted(s ports.ActivitySignal) bool {
+	return s.Valid && s.Event == "user-prompt-submit" && s.State == domain.ActivityActive
+}
+
+// turnSucceeded reports whether a signal is the agent stating that the work it
+// was given is finished: it answered, it has nothing in flight, and it is
+// waiting for whatever comes next. This is the durable evidence behind the
+// Completed status (SessionRecord.TurnCompletedAt).
+//
+// It is deliberately narrower than turnCompleted, which also covers the ways an
+// agent STOPS EXISTING. session-end, process-exited and chat.controller.stopped
+// are teardown: the process went away, which is a reason to hand the branch
+// back but says nothing about whether the work got done — and each of them
+// lands activity=exited, which the status derivation surfaces as Exited on its
+// own. What remains are the two events a harness emits to say "turn over, I am
+// still here": the Stop-class hook every TUI adapter installs, and the Chat
+// driver's turn-completed projection.
+//
+// The honest limit: a user interrupt also produces a Stop hook, and no harness
+// distinguishes the two on the wire. What AO can prove is that the agent
+// reported the end of its turn rather than merely going quiet, and that is the
+// line this draws. Everything that IS distinguishable — a crash, a kill, a
+// cancellation, a question back to the user, a failing check — is already a
+// different state before the derivation ever reaches Completed.
+func turnSucceeded(s ports.ActivitySignal) bool {
+	if !s.Valid || s.State != domain.ActivityIdle {
+		return false
+	}
+	return s.Event == "stop" || s.Event == "chat.turn.completed"
 }
 
 // applyToolPrecedenceLocked folds an event-tagged activity signal through the
@@ -934,6 +1287,22 @@ func (m *Manager) emitNotification(ctx context.Context, intent *ports.Notificati
 	}
 }
 
+// recordSessionFact hands one durable session-level fact to the notification
+// producer. Best-effort like emitNotification: the fact is already persisted by
+// its own authority, so failing to notify about it must never fail the
+// lifecycle write that observed it.
+func (m *Manager) recordSessionFact(ctx context.Context, fact ports.SessionFact) {
+	if m.sessionFacts == nil || fact.Kind == "" {
+		return
+	}
+	if err := m.sessionFacts.Record(ctx, fact); err != nil {
+		slog.Default().Warn(
+			"lifecycle: session fact notification failed",
+			"session", fact.SessionID, "fact", fact.Kind, "err", err,
+		)
+	}
+}
+
 // resolveNotifications closes notifications the just-written facts made stale.
 // Best-effort like emitNotification: a failed resolve must never fail the
 // lifecycle write that produced it.
@@ -1111,6 +1480,7 @@ func (m *Manager) MarkTerminated(ctx context.Context, id domain.SessionID) error
 			return err
 		}
 		if rec.IsTerminated {
+			m.releaseSessionBranchLocks(ctx, id, "task session terminated")
 			m.reapSessionContainers(ctx, id)
 			return nil
 		}
@@ -1152,6 +1522,7 @@ func (m *Manager) MarkTerminated(ctx context.Context, id domain.SessionID) error
 		}
 		switch outcome {
 		case terminationApplied, terminationAlreadyApplied:
+			m.releaseSessionBranchLocks(ctx, id, "task session terminated")
 			m.reapSessionContainers(ctx, id)
 			return nil
 		case terminationLaunchChanged:
@@ -1233,12 +1604,25 @@ func reactivateSessionUsage(
 }
 
 // sameActivity reports whether two activity signals describe the same state.
-// LastActivityAt is intentionally ignored: same-state repeats (e.g. a stream
-// of idle notifications) must not rewrite UpdatedAt or fan out a CDC event.
-// LastActivityAt now marks when this state was first entered since the last
-// transition, which is the timestamp a UI actually wants.
+// Both timestamps are intentionally ignored, for different reasons. Same-state
+// repeats (e.g. a stream of idle notifications) must not rewrite UpdatedAt or
+// fan out a CDC event, and LastActivityAt marks when this state was first
+// entered since the last transition — including it would make every repeat look
+// like a change. LastSignalAt moves on every signal by construction, so
+// including it would defeat the same-state fold entirely; the reducer advances
+// it explicitly instead, coalesced, on the paths that write.
 func sameActivity(a, b domain.Activity) bool {
 	return a.State == b.State
+}
+
+// markHeardFrom advances the liveness clock, never backwards. Hook deliveries
+// are best-effort and can arrive out of order, so an older callback overtaking
+// a newer one must not make a live session look staler than AO already proved
+// it to be.
+func markHeardFrom(a *domain.Activity, at time.Time) {
+	if at.After(a.LastSignalAt) {
+		a.LastSignalAt = at
+	}
 }
 
 func mergeMetadata(base, in domain.SessionMetadata) domain.SessionMetadata {
@@ -1252,6 +1636,23 @@ func mergeMetadata(base, in domain.SessionMetadata) domain.SessionMetadata {
 	set(&base.WorkspaceRepoPath, in.WorkspaceRepoPath)
 	set(&base.RuntimeHandleID, in.RuntimeHandleID)
 	base.RuntimeLaunchID = in.RuntimeLaunchID
+	// Assigned rather than set, and assigned TOGETHER with the launch id above,
+	// for the reason Runtime GC depends on: the incarnation and the ownership
+	// token describe ONE launch generation, and the token is only meaningful
+	// against the launch it was minted for (domain.RuntimeOwnedBySession). A
+	// `set`-style merge would carry a previous launch's incarnation forward
+	// past a relaunch, which is precisely the stale-handle adoption P1-D §C
+	// exists to prevent — and leaving them out altogether, as this function did
+	// until now, left every session row with an empty incarnation and an empty
+	// token however carefully spawn had computed them. Runtime GC reads exactly
+	// those two columns to prove a terminated worker's runtime is AO's own
+	// (runtimegc.Sweeper.sessionCandidates), so dropping them here made every
+	// worker and reviewer permanently unprovable and reclaimed nothing in
+	// production, while the sweeper's own tests passed against records built by
+	// hand. The seam is now covered by
+	// runtime_ownership_persistence_test.go, which carries the incident detail.
+	base.RuntimeInstanceID = in.RuntimeInstanceID
+	base.RuntimeOwnerToken = in.RuntimeOwnerToken
 	set(&base.AgentSessionID, in.AgentSessionID)
 	set(&base.Prompt, in.Prompt)
 	set(&base.LatestUserPrompt, in.LatestUserPrompt)

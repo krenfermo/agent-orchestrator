@@ -128,6 +128,7 @@ async function scanGitRepo(
 	repoPath: string,
 	rootPath: string,
 	options: ScanOptions = {},
+	skipPlainDirs = false,
 ): Promise<GitRepoScanResult | null> {
 	const relativePath = repoPath === rootPath ? "." : path.relative(rootPath, repoPath);
 	const name = path.basename(repoPath);
@@ -160,8 +161,16 @@ async function scanGitRepo(
 				};
 			}
 		} catch {
-			// Not a git repository — surface as needs-init.
+			// Not a git repository at all.
 		}
+		// A plain directory with no .git anywhere is not a workspace repo
+		// candidate (docs/, backend/, .claude/, etc. in a real monorepo) — skip
+		// it entirely rather than surfacing it as a fake needs-init repo. The
+		// caller still gitignores it via the same skip list so any gitlink
+		// buried inside is never staged. Project-mode root scans keep the old
+		// behavior: selecting a single plain folder should still offer to
+		// initialize it as a new project.
+		if (skipPlainDirs) return null;
 		return {
 			name,
 			path: repoPath,
@@ -258,7 +267,7 @@ export async function scanImportFolder(
 			.filter((entry) => entry.isDirectory() && !IMPORT_SCAN_SKIP_DIRS.has(entry.name))
 			.slice(0, IMPORT_SCAN_MAX_ENTRIES),
 		IMPORT_SCAN_CONCURRENCY,
-		(entry) => scanGitRepo(path.join(rootPath, entry.name), rootPath, options),
+		(entry) => scanGitRepo(path.join(rootPath, entry.name), rootPath, options, true),
 	);
 	return {
 		path: rootPath,

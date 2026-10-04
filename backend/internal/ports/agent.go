@@ -289,6 +289,32 @@ type BlockedActivitySignaler interface {
 	EmitsBlockedActivity() bool
 }
 
+// ConversationCompactor is an OPTIONAL capability an Agent adapter implements
+// when its harness can be asked, through an ordinary prompt, to REPLACE its own
+// accumulated conversation with a summary of it.
+//
+// This is the only lever AO has on the second cost lever. AO does not own the
+// model loop: it launches an interactive harness in a pane and writes prompts
+// into it, so it cannot prune a conversation it never held. What it can do is
+// ask the harness to prune its own, in the harness's own vocabulary -- and that
+// vocabulary is adapter knowledge, which is why it is expressed here as a
+// directive the adapter produces rather than as a string the workflow package
+// hard-codes.
+//
+// ok=false means this harness has no such vocabulary. That is the honest
+// default: an adapter that does not implement this interface at all, and one
+// that implements it and returns false, both mean "AO must not try", and the
+// caller proceeds exactly as it did before the capability existed.
+//
+// The focus text is a short, plain-language statement of what the next piece of
+// work needs kept. It is a HINT to the harness's own summarizer and never a
+// guarantee: AO's durable facts (the SessionContextPack) are what actually
+// carry the objective, the constraints and the unresolved findings across a
+// compaction, and they are sent separately and in full.
+type ConversationCompactor interface {
+	CompactionDirective(focus string) (directive string, ok bool)
+}
+
 // ActiveTurnSteerer is an OPTIONAL capability an Agent adapter implements when
 // submitting input while its harness is mid-turn STEERS the running turn rather
 // than being swallowed, queued, or applied to a dialog. AO uses it to decide
@@ -373,6 +399,16 @@ type LaunchConfig struct {
 	SystemPrompt     string
 	SystemPromptFile string
 	WorkspacePath    string
+	// Env is the fully-resolved environment the spawned subprocess will run
+	// with (HOME/CLAUDE_CONFIG_DIR/etc. — see runtimehome.Environment),
+	// wired through for adapters whose PreLaunch step must write into the
+	// same isolated per-user config location the launched process itself
+	// will read (Checkpoint 8P-E.3: writing trust records into the daemon's
+	// own os.UserHomeDir() instead of this env's CLAUDE_CONFIG_DIR left the
+	// record invisible to the actual worker, which blocked forever on
+	// Claude Code's interactive trust prompt). May be nil for callers that
+	// have no per-user isolated environment to offer.
+	Env map[string]string
 }
 
 // WorkspaceHookConfig carries inputs needed to install workspace-local agent hooks.

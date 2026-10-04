@@ -1,0 +1,324 @@
+package workflow
+
+import (
+	stdctx "context"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+)
+
+// Checkpoint 8M.1: master task git state propagation.
+//
+// dispatchMasterTask (master_coordinator.go) already gives task N+1 a
+// text-only SessionContextPack recap of its completed dependencies, but its
+// worker session got a brand-new worktree branched from the project's
+// default branch — task N's actual file changes were physically absent.
+// This file closes that gap: once a task passes the SAME gate that already
+// completes its execution run (review approved-or-skipped, verify passed,
+// fingerprint stable, no open question — see verify.go's maybeVerify), its
+// worktree content is captured into an AO-owned internal git commit under
+// refs/ao/workflows/<masterRunID>/integration, and every subsequent task's
+// worktree is based on that ref instead of the project's default branch
+// (see attemptWorkHarness in dispatch.go). No new table: promotions are
+// recorded as one more DurablePhase on the existing append-only
+// workflow_checkpoints ledger, the same convention
+// persistSessionLifecycleDecision (session_context_pack.go) already uses.
+//
+// V1 linearization: reconcileMasterTasks's dispatch loop already only ever
+// starts one eligible task at a time regardless of the declared dependency
+// graph shape (master_coordinator.go's loop returns immediately after the
+// first dispatchMasterTask call). Integration state matches that exact
+// execution order: one single integration ref per master run, advancing
+// monotonically in dispatch order. Every task after the first is based on
+// the integration state containing ALL previously completed tasks, not only
+// its own declared Dependencies — an explicit, documented V1 simplification,
+// not a silent DAG violation, since execution was already fully sequential
+// before this checkpoint.
+const (
+	masterIntegrationDurablePhase        = "master_integration_promotion"
+	masterIntegrationFailureDurablePhase = "master_integration_promotion_failed"
+	masterIntegrationPayloadVersion      = "v1"
+)
+
+// MasterIntegrationState is derived (never stored directly) by folding every
+// master_integration_promotion checkpoint recorded for a master run, in
+// order. CompletedTaskIDs is the natural-key idempotency ledger: a task
+// whose ID already appears here has already been promoted and must never be
+// materialized again.
+type MasterIntegrationState struct {
+	WorkflowRunID    string
+	RefName          string
+	BaseSHA          string
+	CurrentSHA       string
+	CompletedTaskIDs []string
+	// Mode is the execution mode of the most recent promotion (empty, i.e.
+	// isolated worktree, for every pre-8P-E.13B ledger). A direct-branch
+	// promotion advances CurrentSHA to a commit on the project's own branch,
+	// NOT to a head under RefName — the ref does not exist in that mode — so
+	// anything that dereferences RefName has to read this first.
+	Mode            string
+	LastErrorTaskID string
+	LastErrorClass  string
+	LastErrorReason string
+}
+
+// masterIntegrationPromotionPayload is master_integration_promotion's
+// RetryState JSON payload — the same field-repurposing convention
+// sessionLifecycleRecord already uses for session_lifecycle_decision.
+type masterIntegrationPromotionPayload struct {
+	TaskID  string `json:"taskId"`
+	TreeSHA string `json:"treeSha,omitempty"`
+	RefName string `json:"refName,omitempty"`
+	Reused  bool   `json:"reused,omitempty"`
+	// Mode records HOW this task was integrated (Checkpoint 8P-E.13B). Empty
+	// means the pre-8P-E.13B isolated-worktree materialization;
+	// masterIntegrationModeDirectBranch means the result was proven already
+	// present on the project's own branch rather than materialized into a ref.
+	Mode string `json:"mode,omitempty"`
+	// Branch is the target branch a direct-branch promotion proved. Empty for
+	// isolated-worktree promotions, which have no branch of the user's.
+	Branch string `json:"branch,omitempty"`
+}
+
+// masterIntegrationFailurePayload is master_integration_promotion_failed's
+// RetryState JSON payload.
+type masterIntegrationFailurePayload struct {
+	TaskID     string `json:"taskId"`
+	ErrorClass string `json:"errorClass"`
+	Reason     string `json:"reason"`
+}
+
+// masterTaskBaseRef returns the integration ref a master child task's worker
+// worktree should be based on (Checkpoint 8M.1 §8), or "" to keep the
+// existing project-default-branch behavior. Empty whenever run isn't a
+// master child task, or is the first task in its master run (nothing has
+// been promoted to integration state yet, so there is nothing to base on
+// beyond the project default). Read-only, best-effort: any lookup error
+// falls back to "" rather than blocking dispatch — a missing integration
+// state means no dependency's code needs to reach this worker yet.
+func (c *Coordinator) masterTaskBaseRef(ctx stdctx.Context, run domain.WorkflowRun) string {
+	if run.ParentWorkflowID == nil {
+		return ""
+	}
+	state, err := c.getMasterIntegrationState(ctx, *run.ParentWorkflowID)
+	if err != nil || state.CurrentSHA == "" {
+		return ""
+	}
+	// Checkpoint 8P-E.13B: a direct-branch master has no integration ref to
+	// base anything on — its tasks share the project's own branch, where the
+	// previous task's result already is. Returning RefName here would name a
+	// ref that does not exist. (The session manager independently ignores
+	// BaseRef in direct-branch mode; this makes the workflow side truthful too,
+	// rather than relying on the far end to discard a fiction.)
+	if state.Mode == masterIntegrationModeDirectBranch {
+		return ""
+	}
+	return state.RefName
+}
+
+func masterIntegrationRefName(masterRunID string) string {
+	return "refs/ao/workflows/" + masterRunID + "/integration"
+}
+
+// getMasterIntegrationState folds the master run's checkpoint ledger into
+// the current integration state. Read-only, no side effects — safe to call
+// as often as needed (e.g. once per reconcile pass).
+func (c *Coordinator) getMasterIntegrationState(ctx stdctx.Context, masterRunID string) (MasterIntegrationState, error) {
+	state := MasterIntegrationState{WorkflowRunID: masterRunID, RefName: masterIntegrationRefName(masterRunID)}
+	checkpoints, err := c.store.ListWorkflowCheckpoints(ctx, masterRunID)
+	if err != nil {
+		return state, err
+	}
+	for _, cp := range checkpoints {
+		switch cp.DurablePhase {
+		case masterIntegrationDurablePhase:
+			var payload masterIntegrationPromotionPayload
+			if json.Unmarshal([]byte(cp.RetryState), &payload) != nil {
+				continue
+			}
+			if state.BaseSHA == "" {
+				state.BaseSHA = cp.BaseSHA
+			}
+			state.CurrentSHA = cp.HeadSHA
+			state.Mode = payload.Mode
+			state.CompletedTaskIDs = append(state.CompletedTaskIDs, payload.TaskID)
+			state.LastErrorTaskID, state.LastErrorClass, state.LastErrorReason = "", "", ""
+		case masterIntegrationFailureDurablePhase:
+			var payload masterIntegrationFailurePayload
+			if json.Unmarshal([]byte(cp.RetryState), &payload) != nil || payload.TaskID == "" {
+				// An empty payload under this phase is the run-level attention
+				// stop recordAttentionStop writes alongside the promotion
+				// failure, not a promotion failure of its own. Folding it as one
+				// used to erase the real failure's task and reason from the
+				// derived state — which both hid the diagnosis and defeated
+				// recordIntegrationFailure's per-condition dedup (8P-E.13B).
+				continue
+			}
+			state.LastErrorTaskID = payload.TaskID
+			state.LastErrorClass = payload.ErrorClass
+			state.LastErrorReason = payload.Reason
+		}
+	}
+	return state, nil
+}
+
+// promoteTaskToIntegration materializes task's verified worktree content into
+// the master run's integration ref, once task has reached the SAME
+// completion gate maybeVerify already enforces for its own execution run
+// (review approved-or-skipped, verify passed, fingerprint stable, no open
+// question) — reconcileMasterTasks only calls this immediately before
+// marking the task Completed, so that gate is guaranteed to already hold.
+//
+// Idempotent: if task.ID is already in the integration state's
+// CompletedTaskIDs, this is a no-op. If a previous attempt updated the git
+// ref but crashed before this checkpoint write landed, MaterializeIntegrationCommit
+// itself is idempotent (write-tree is content-deterministic; identical
+// content reuses the existing commit rather than creating a new one), so a
+// retry here is always safe.
+func (c *Coordinator) promoteTaskToIntegration(ctx stdctx.Context, parent domain.WorkflowRun, task domain.WorkflowTask, child RunDetail) error {
+	if c.workspaceFacts == nil || c.projects == nil {
+		return errors.New("workflow: integration promotion requires workspaceFacts and projects")
+	}
+	state, err := c.getMasterIntegrationState(ctx, parent.ID)
+	if err != nil {
+		return err
+	}
+	for _, id := range state.CompletedTaskIDs {
+		if id == task.ID {
+			// The promotion is already a durable fact, so nothing may be
+			// integrated again -- but the cleanup that follows it may never
+			// have run. That is the crash window between the promotion
+			// checkpoint and the worktree record, and this early return used to
+			// be where it leaked: the task looked done to every later pass and
+			// its directory and ao/* branch stayed forever.
+			//
+			// The head is read back from the ledger row rather than from the
+			// ref, which may have moved several times since. Both calls below
+			// are idempotent, so a task already cleaned up costs one read.
+			c.finishTaskWorktree(ctx, parent, task, c.promotedHeadSHA(ctx, parent.ID, task.ID))
+			return nil
+		}
+	}
+
+	project, ok, err := c.projects.GetProject(ctx, parent.ProjectID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return c.recordIntegrationFailure(ctx, parent, task, "project not found")
+	}
+	if project.Kind.WithDefault() == domain.ProjectKindWorkspace {
+		// V1 scope guard (Checkpoint 8M.1 §8): multi-repo workspace-kind
+		// projects are explicitly out of scope, not silently degraded.
+		return c.recordIntegrationFailure(ctx, parent, task, "integration_unsupported_project_kind: multi-repo workspace projects are not supported in 8M.1")
+	}
+
+	var workStepID string
+	for _, s := range child.Steps {
+		if s.Step.Kind == domain.WorkflowStepWork {
+			workStepID = s.Step.ID
+			break
+		}
+	}
+	if workStepID == "" {
+		return c.recordIntegrationFailure(ctx, parent, task, "execution run has no work step")
+	}
+	workCP, hasCP, err := c.store.GetLatestWorkflowCheckpointByStep(ctx, workStepID)
+	if err != nil {
+		return err
+	}
+	if !hasCP || workCP.WorktreePath == "" || workCP.SessionID == nil {
+		return c.recordIntegrationFailure(ctx, parent, task, "worktree/session facts are missing")
+	}
+
+	// Checkpoint 8P-E.13B / Task 5: ONE authoritative integration point.
+	//
+	// Execution-mode semantics still differ — an isolated worktree's commits
+	// have to be moved onto the target, a direct-branch task's are already
+	// there — but the guarantees around them no longer do. Both modes go
+	// through integrateReadyTask into the Integration Coordinator, which takes
+	// the target lane, reads the head INSIDE it, gates on readiness, chooses a
+	// strategy, lands under compare-and-set and records the audit.
+	//
+	// What used to be here instead: a direct-branch early return, and a fork on
+	// taskBaseWasOvertaken computed from CACHED state that sent the "target has
+	// not moved" case straight to MaterializeIntegrationCommit with no lane, no
+	// gate and no record. That fork is the TOCTOU this replaces — the cached
+	// answer could be stale by the time the commit was made, and an integration
+	// that had never read the current head could revert a sibling that landed
+	// in between. "The target did not move" is now a strategy the Coordinator
+	// decides under the lock, not a shortcut past it.
+	return c.integrateReadyTask(ctx, parent, task, child, workCP, state, project)
+}
+
+// recordIntegrationFailure persists a diagnostic checkpoint (best-effort —
+// a failure to record the failure itself is swallowed, never masking the
+// original error) and returns a non-nil error so the caller never marks the
+// task completed or advances the integration state.
+//
+// Checkpoint 8P-E.13B: the write is idempotent per (task, reason). An
+// integration failure is usually deterministic — an unsupported operation, a
+// branch that moved, a project kind out of scope — and reconcileMasterTasks is
+// driven from the READ path (every GetRun, i.e. every ~2s of a board poll), so
+// the pre-8P-E.13B unconditional write turned one permanent condition into an
+// unbounded stream of identical durable checkpoints. Re-recording an unchanged
+// failure adds no information; the ledger keeps the first one, and a genuinely
+// NEW failure (different reason, or a failure after an intervening successful
+// promotion, which clears LastError* when the state is folded) still records.
+func (c *Coordinator) recordIntegrationFailure(ctx stdctx.Context, parent domain.WorkflowRun, task domain.WorkflowTask, reason string) error {
+	if state, err := c.getMasterIntegrationState(ctx, parent.ID); err == nil &&
+		state.LastErrorTaskID == task.ID && state.LastErrorReason == reason {
+		return fmt.Errorf("%w: %s", errIntegrationFailed, reason)
+	}
+	payload, _ := json.Marshal(masterIntegrationFailurePayload{TaskID: task.ID, ErrorClass: string(domain.WorkflowErrorIntegrationFailed), Reason: reason})
+	_, _ = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:             "wfc-" + c.newID(),
+		WorkflowRunID:  parent.ID,
+		ProjectID:      parent.ProjectID,
+		RetryState:     string(payload),
+		DurablePhase:   masterIntegrationFailureDurablePhase,
+		PayloadVersion: masterIntegrationPayloadVersion,
+		CreatedAt:      c.clock(),
+	})
+	return fmt.Errorf("%w: %s", errIntegrationFailed, reason)
+}
+
+var errIntegrationFailed = errors.New("workflow: integration promotion failed")
+
+// MasterIntegrationSummary is RunDetail's live-derived surface of the
+// integration state, following the same read-live-at-GetRun-time pattern
+// StepDetail.ReviewPolicy/Routing already use.
+type MasterIntegrationSummary struct {
+	RefName         string
+	CurrentSHA      string
+	TasksIntegrated int
+	LatestTaskID    string
+	Status          string // "ok" | "integration_failed" | "none"
+	ErrorClass      string
+}
+
+// buildIntegrationSummary derives MasterIntegrationSummary for a master run.
+// Only meaningful for runs with a plan (getMasterRun's caller guards this).
+func (c *Coordinator) buildIntegrationSummary(ctx stdctx.Context, masterRunID string) (*MasterIntegrationSummary, error) {
+	state, err := c.getMasterIntegrationState(ctx, masterRunID)
+	if err != nil {
+		return nil, err
+	}
+	summary := &MasterIntegrationSummary{
+		RefName:         state.RefName,
+		CurrentSHA:      state.CurrentSHA,
+		TasksIntegrated: len(state.CompletedTaskIDs),
+		Status:          "none",
+	}
+	if len(state.CompletedTaskIDs) > 0 {
+		summary.LatestTaskID = state.CompletedTaskIDs[len(state.CompletedTaskIDs)-1]
+		summary.Status = "ok"
+	}
+	if state.LastErrorClass != "" {
+		summary.Status = "integration_failed"
+		summary.ErrorClass = state.LastErrorClass
+	}
+	return summary, nil
+}

@@ -265,6 +265,8 @@
 	--color-success-bright: var(--color-success-bright);
 	--color-warning: var(--bridge-warning);
 	--color-error: var(--bridge-danger);
+	--color-provider-anthropic: var(--bridge-provider-anthropic);
+	--color-provider-openai: var(--bridge-provider-openai);
 	--color-status-working: var(--bridge-status-working);
 	--color-status-needs-you: var(--bridge-status-needs-you);
 	--color-status-in-review: var(--bridge-status-in-review);
@@ -1261,8 +1263,15 @@ body {
 	font-size: var(--font-size-md);
 	line-height: var(--line-height-normal);
 	-webkit-font-smoothing: antialiased;
-	-webkit-user-select: none;
-	user-select: none;
+	/* Checkpoint 8P-E.12: read-only text must be selectable and copyable.
+	   This used to be `user-select: none`, re-enabled only for inputs and
+	   contenteditable — which made every prompt, error message, branch name,
+	   review finding and log line in the app impossible to copy. The default
+	   is now text, and selection is turned back off only on the interactive
+	   chrome where a stray selection would fight the control (see the
+	   :is(button, …) rule below and the drag regions). */
+	-webkit-user-select: text;
+	user-select: text;
 }
 
 button,
@@ -1292,6 +1301,17 @@ textarea,
 		[data-sidebar="menu-sub-button"]
 	):not(:disabled):not([aria-disabled="true"]) {
 	cursor: pointer;
+	/* Controls opt out of the document-wide text selection: dragging across a
+	   button label should press the button, not paint a selection. Anything
+	   inside a control that is genuinely content (a copyable id, a path) opts
+	   back in with [data-selectable]. */
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+[data-selectable] {
+	-webkit-user-select: text;
+	user-select: text;
 }
 
 :is(
@@ -1327,6 +1347,13 @@ textarea,
    terminal's wheel handler. */
 .xterm .xterm-viewport {
 	scrollbar-width: none;
+	/* Never chain a wheel/trackpad gesture out of the terminal. XtermTerminal's
+	   custom wheel handler already cancels the gesture, but the viewport is a real
+	   overflow:scroll box and every ancestor up to the shell content row is
+	   `overflow-x-hidden` (which CSS resolves to `overflow-y: auto`, i.e. a scroll
+	   container). Without this, a wheel that bypasses the handler, or one that runs
+	   the viewport to its top/bottom, scrolls the page under the terminal. */
+	overscroll-behavior: contain;
 }
 
 .xterm .xterm-viewport::-webkit-scrollbar {

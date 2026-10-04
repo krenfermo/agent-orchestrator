@@ -128,6 +128,13 @@ type ReviewInvocation struct {
 	// files for this reviewer. Adapters use it when a long-lived reviewer needs
 	// permission to read request-scoped task files created after launch.
 	TaskPromptRoot string
+	// Env is the fully-resolved environment the spawned reviewer subprocess
+	// will run with (HOME/CLAUDE_CONFIG_DIR/etc. — see runtimehome.Environment),
+	// mirroring ports.LaunchConfig.Env (Checkpoint 8P-E.3.1). A reviewer
+	// PreLaunch step must write trust/config records into the same isolated
+	// per-user location the launched process itself reads; may be nil for
+	// callers with no per-user isolated environment to offer.
+	Env map[string]string
 }
 
 // ReviewTask is one PR/run in a multi-PR review trigger queue.

@@ -22,7 +22,7 @@ type fakeUsageSummaryService struct {
 	err       error
 }
 
-func (f *fakeUsageSummaryService) ListCompact(_ context.Context, projectID domain.ProjectID) ([]domain.CompactSessionUsage, error) {
+func (f *fakeUsageSummaryService) ListCompact(_ context.Context, projectID domain.ProjectID, _ *domain.UserID) ([]domain.CompactSessionUsage, error) {
 	f.projectID = projectID
 	return f.items, f.err
 }

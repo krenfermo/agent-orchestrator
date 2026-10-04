@@ -93,7 +93,8 @@ func (m *Manager) ApplyReviewBatch(ctx context.Context, workerID domain.SessionI
 	if err != nil {
 		return ReviewDeliveryNoop, err
 	}
-	if outcome == sendOnceSuppressed {
+	m.recordRepairOutcome(ctx, rec, anchorPR, key, reviewMaxNudge, outcome)
+	if !outcome.accounted() {
 		// The worker went terminated/exited/needs-input between the entry guard and the
 		// paste: nothing reached it, so do NOT let the caller stamp the run
 		// delivered — it must re-fire once the session is workable again.
@@ -280,9 +281,11 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	}
 
 	for _, n := range nudges {
-		if _, err := m.sendOnce(ctx, id, o.URL, n.key, n.sig, n.msg, n.maxAttempts); err != nil {
+		outcome, err := m.sendOnce(ctx, id, o.URL, n.key, n.sig, n.msg, n.maxAttempts)
+		if err != nil {
 			return err
 		}
+		m.recordRepairOutcome(ctx, rec, o.URL, n.key, n.maxAttempts, outcome)
 	}
 	// Surface deferred policy/parent-stack read errors only after independent
 	// nudges have been sent, so one failed lookup cannot hide another reaction.
@@ -821,7 +824,16 @@ const (
 	// message did NOT reach the worker; the caller must not mark it delivered so
 	// it re-fires on the next observation once the session is workable again.
 	sendOnceSuppressed
+	// sendOnceExhausted: accounted, and the automatic repair loop for this key
+	// has spent its attempt budget without fixing the problem. Delivery-wise it
+	// behaves exactly like sendOnceAccounted (see accounted); it is a distinct
+	// value only so the caller can report the session-level fact.
+	sendOnceExhausted
 )
+
+// accounted reports whether the caller may treat the nudge as delivered. Only a
+// guard suppression means the message never reached the worker.
+func (o sendOnceOutcome) accounted() bool { return o != sendOnceSuppressed }
 
 func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key, sig, msg string, maxAttempts int) (sendOnceOutcome, error) {
 	if m.guard == nil {
@@ -842,7 +854,11 @@ func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key,
 	}
 	attempts := m.react.attempts[key]
 	if maxAttempts > 0 && attempts >= maxAttempts {
-		return sendOnceAccounted, nil
+		// The repair budget for this problem is spent. Attempts are counted in
+		// the map persisted on the PR row, so this stays true across a daemon
+		// restart and every later observation reports the same exhaustion --
+		// which the producer's dedupe key collapses to one row.
+		return sendOnceExhausted, nil
 	}
 	// The guard re-reads the session immediately before pasting: the caller's
 	// NeedsInput() entry check ran before this function's dedup/persist I/O, so

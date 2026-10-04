@@ -57,6 +57,21 @@ type sessionDTO struct {
 type sessionActivity struct {
 	State          string    `json:"state"`
 	LastActivityAt time.Time `json:"lastActivityAt"`
+	// LastSignalAt is when a signal of any kind last arrived, as opposed to
+	// when the state last changed. Absent on a daemon older than the column.
+	LastSignalAt time.Time `json:"lastSignalAt,omitempty"`
+}
+
+// lastHeardFrom is the age the CLI reports next to a session. It is the newest
+// signal, not the newest state CHANGE: an agent that has been `active` for
+// twenty minutes changed state once, at the start, and reporting that as "(20m)"
+// says the exact opposite of what is true. Falls back to the transition clock
+// for a response from a daemon that predates the liveness one.
+func (a sessionActivity) lastHeardFrom() time.Time {
+	if a.LastSignalAt.After(a.LastActivityAt) {
+		return a.LastSignalAt
+	}
+	return a.LastActivityAt
 }
 
 type sessionListResponse struct {
@@ -633,9 +648,8 @@ func sessionListEntries(sessions []sessionDTO) []sessionListEntry {
 	entries := make([]sessionListEntry, 0, len(sessions))
 	for _, sess := range sessions {
 		var last *time.Time
-		if !sess.Activity.LastActivityAt.IsZero() {
-			activity := sess.Activity.LastActivityAt
-			last = &activity
+		if heard := sess.Activity.lastHeardFrom(); !heard.IsZero() {
+			last = &heard
 		}
 		entries = append(entries, sessionListEntry{
 			ID:             sess.ID,
@@ -724,8 +738,8 @@ func writeSessionList(cmd *cobra.Command, sessions []sessionDTO, hiddenTerminate
 
 func sessionLineParts(sess sessionDTO) []string {
 	parts := []string{}
-	if !sess.Activity.LastActivityAt.IsZero() {
-		parts = append(parts, "("+formatSessionAge(time.Since(sess.Activity.LastActivityAt))+")")
+	if heard := sess.Activity.lastHeardFrom(); !heard.IsZero() {
+		parts = append(parts, "("+formatSessionAge(time.Since(heard))+")")
 	}
 	if sess.Status != "" {
 		parts = append(parts, "["+sess.Status+"]")

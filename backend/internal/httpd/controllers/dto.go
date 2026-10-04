@@ -11,6 +11,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/legacyimport"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
+	environmentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/environment"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 )
@@ -43,6 +44,19 @@ type ListProjectsResponse struct {
 // ProjectResponse is the { project } body shared by POST /projects (201).
 type ProjectResponse struct {
 	Project projectsvc.Project `json:"project"`
+}
+
+// TestRepoConnectionRequest is the body of POST
+// /projects/{id}/repo-connection-test: Repo empty tests the project's own
+// root repo; a workspace project may instead name one of its registered
+// child repos.
+type TestRepoConnectionRequest struct {
+	Repo string `json:"repo,omitempty"`
+}
+
+// TestRepoConnectionResponse wraps the outcome of a single connectivity probe.
+type TestRepoConnectionResponse struct {
+	Result projectsvc.ConnectionTestResult `json:"result"`
 }
 
 // GetProjectResponse is the { status, project } body of GET /projects/{id},
@@ -172,8 +186,13 @@ type SpawnSessionRequest struct {
 	// interface-transition endpoint; the default never mutates existing sessions
 	// automatically. An unsupported explicit request fails rather than quietly
 	// producing the other kind of session.
-	Mode   domain.SessionMode `json:"mode,omitempty" enum:"chat,tui"`
-	Prompt string             `json:"prompt,omitempty" maxLength:"4096"`
+	Mode domain.SessionMode `json:"mode,omitempty" enum:"chat,tui"`
+	// Prompt is the session's task specification: multi-line,
+	// markdown-friendly, and stored exactly as sent. It is bounded at
+	// domain.MaxWorkflowObjectiveBytes (128 KiB of UTF-8) -- the same ceiling
+	// a workflow objective has -- and is NEVER truncated; an over-long prompt
+	// is refused with PROMPT_TOO_LONG naming both sizes.
+	Prompt string `json:"prompt,omitempty" maxLength:"131072" description:"The session's task specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long prompt is refused."`
 
 	// DisplayName is the sidebar label for the session, capped at 20 characters.
 	// `ao spawn --name` always sets it; other clients (e.g. the desktop new-task
@@ -583,10 +602,13 @@ type SendSessionMessageResponse struct {
 // DelegateTaskRequest is the body of POST /api/v1/orchestrators/delegate.
 // An omitted agent tells the orchestrator to use the project's worker default.
 type DelegateTaskRequest struct {
-	ProjectID domain.ProjectID    `json:"projectId"`
-	Brief     string              `json:"brief" maxLength:"4096"`
-	Agent     domain.AgentHarness `json:"agent,omitempty" enum:"claude-code,codex,aider,opencode,grok,droid,amp,agy,crush,cursor,qwen,copilot,goose,auggie,continue,devin,cline,kimi,muse,kiro,kilocode,vibe,pi,kimchi,prime-agent,autohand,fake"`
-	Model     string              `json:"model,omitempty" maxLength:"256"`
+	ProjectID domain.ProjectID `json:"projectId"`
+	// Brief is the task's full specification, bounded and preserved on the
+	// same terms as SpawnSessionRequest.Prompt: 128 KiB of UTF-8, verbatim,
+	// never truncated. Over the limit is refused with TASK_TOO_LONG.
+	Brief string              `json:"brief" maxLength:"131072" description:"The task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long brief is refused."`
+	Agent domain.AgentHarness `json:"agent,omitempty" enum:"claude-code,codex,aider,opencode,grok,droid,amp,agy,crush,cursor,qwen,copilot,goose,auggie,continue,devin,cline,kimi,muse,kiro,kilocode,vibe,pi,kimchi,prime-agent,autohand,fake"`
+	Model string              `json:"model,omitempty" maxLength:"256"`
 	// Mode is omitted for the daemon-owned default. The UI sends tui only when
 	// the user explicitly accepts the fallback after Chat preflight fails.
 	Mode domain.SessionMode `json:"mode,omitempty" enum:"tui,chat"`
@@ -906,6 +928,20 @@ type RefreshAgentsResponse = agentsvc.Inventory
 // ProbeAgentResponse is the body of POST /api/v1/agents/{agent}/probe.
 type ProbeAgentResponse = agentsvc.ProbeResult
 
+// EnvironmentStatusResponse is the body of GET /api/v1/environment/status.
+type EnvironmentStatusResponse = environmentsvc.Status
+
+// GitHubTestResponse is the body of POST /api/v1/environment/github/test.
+type GitHubTestResponse = environmentsvc.GitHubStatus
+
+// BrowseProjectRootResponse is the body of GET /api/v1/projects/browse.
+type BrowseProjectRootResponse = projectsvc.BrowseResult
+
+// BrowseProjectRootQuery is the query string accepted by GET /api/v1/projects/browse.
+type BrowseProjectRootQuery struct {
+	Path string `query:"path,omitempty" description:"Absolute directory path, previously returned as an entry's own path, to list. Empty lists the top level (the configured allowed roots, or their contents directly when only one root is configured)."`
+}
+
 // AgentModelsQuery scopes a model catalog to a project where providers may be
 // configured per workspace.
 type AgentModelsQuery struct {
@@ -996,27 +1032,52 @@ type NotificationIDParam struct {
 
 // NotificationTarget is the dashboard navigation target for a notification.
 type NotificationTarget struct {
-	Kind      string `json:"kind" enum:"session,pr"`
-	SessionID string `json:"sessionId"`
-	PRURL     string `json:"prUrl,omitempty"`
+	Kind          string `json:"kind" enum:"session,pr,workflow"`
+	SessionID     string `json:"sessionId"`
+	PRURL         string `json:"prUrl,omitempty"`
+	WorkflowRunID string `json:"workflowRunId,omitempty"`
 }
 
 // NotificationResponse is one stored notification returned by the API.
 type NotificationResponse struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"sessionId"`
-	ProjectID string    `json:"projectId"`
-	PRURL     string    `json:"prUrl"`
-	Type      string    `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	Status    string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
+	ID        string `json:"id"`
+	SessionID string `json:"sessionId"`
+	ProjectID string `json:"projectId"`
+	PRURL     string `json:"prUrl"`
+	// WorkflowRunID is set on run-level notifications (workflow_completed),
+	// which have no session behind them.
+	WorkflowRunID string `json:"workflowRunId,omitempty"`
+	// TaskID is the optional planned-task anchor, when the notification is
+	// about one.
+	TaskID string `json:"taskId,omitempty"`
+	Type   string `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,task_completed,workflow_completed,task_needs_attention,workflow_needs_attention,task_failed,workflow_failed,human_question_required,repair_exhausted,integration_failed"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Status string `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
+	// Severity is how loudly to surface this, independent of type, so a client
+	// can style or filter without enumerating every type.
+	Severity  string    `json:"severity" enum:"info,warning,critical"`
 	CreatedAt time.Time `json:"createdAt"`
+	// ReadAt is when the user acknowledged this. It carries the same fact as
+	// status ("read" <=> present) and exists because status records only that
+	// an acknowledgement happened, never when.
+	ReadAt *time.Time `json:"readAt,omitempty"`
 	// ResolvedAt is set by AO when the underlying issue goes away (the session
 	// received its input, the PR stopped waiting on a merge). Absent means the
 	// issue is still open. There is no user-facing action that sets it.
-	ResolvedAt *time.Time         `json:"resolvedAt,omitempty"`
-	Target     NotificationTarget `json:"target"`
+	ResolvedAt *time.Time `json:"resolvedAt,omitempty"`
+	// Source names the producer that raised this row. Provenance is exposed
+	// because it is what makes an unexpected notification explainable; the
+	// paired source event id stays server-side, as does the recipient, which
+	// would imply an identity model AO does not have until P4-B.
+	Source string             `json:"source,omitempty"`
+	Target NotificationTarget `json:"target"`
+}
+
+// NotificationUnreadCountResponse is the body of
+// GET /api/v1/notifications/unread-count.
+type NotificationUnreadCountResponse struct {
+	UnreadCount int `json:"unreadCount"`
 }
 
 // ListNotificationsResponse is one history page from GET /api/v1/notifications.
@@ -1784,11 +1845,82 @@ type SettingsResponse struct {
 	// ChatHarnesses are the agents that can run in chat mode today. Empty means
 	// chat cannot be used yet, which a client should say plainly.
 	ChatHarnesses []string `json:"chatHarnesses"`
+	// MemoryMode is the daemon's project-memory rollout stage. It is a daemon
+	// policy rather than a per-project or per-run one, and it is surfaced here
+	// because P3-A §12 requires a task's creation summary to state it: a person
+	// deciding whether to launch work should be able to see whether AO will
+	// bring remembered project knowledge to it. Empty when the daemon does not
+	// report one, which a client renders as unknown rather than as "off".
+	MemoryMode string `json:"memoryMode,omitempty" enum:"off,assisted,preferred"`
 }
 
 // UpdateSessionInterfaceRequest changes the default interface for new sessions.
 type UpdateSessionInterfaceRequest struct {
 	DefaultSessionMode string `json:"defaultSessionMode" enum:"chat,tui"`
+}
+
+// EmailNotificationSettingsResponse is the completion-email configuration.
+//
+// It has no password field, and deliberately never will. The stored SMTP
+// password is write-only across this API: PasswordSet reports that one exists,
+// which is everything a UI needs to render the field, and means the secret
+// cannot leak through a response body, a proxy log, or a support bundle.
+type EmailNotificationSettingsResponse struct {
+	Enabled   bool   `json:"enabled"`
+	Recipient string `json:"recipient"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Username  string `json:"username"`
+	TLS       string `json:"tls" enum:"starttls,implicit,none" description:"How the SMTP connection is protected. starttls is the port-587 default (and what Gmail app passwords expect)."`
+	// PasswordSet reports whether a password is stored. The password itself is
+	// never returned.
+	PasswordSet bool `json:"passwordSet"`
+	// Events selects which notification events may be emailed. Every one of them
+	// is subordinate to Enabled.
+	Events EmailNotificationEventsPayload `json:"events"`
+}
+
+// EmailNotificationEventsPayload selects which notification events the email
+// fan-out may send.
+//
+// Coarser than the notification types on purpose: each field covers both the
+// task and the workflow half of its event, because the distinction matters to
+// the Board and not to the person reading the mail.
+type EmailNotificationEventsPayload struct {
+	Completed      bool `json:"completed" description:"A task or workflow finished the work it was given."`
+	NeedsAttention bool `json:"needsAttention" description:"A task or workflow stopped and needs a decision."`
+	Failed         bool `json:"failed" description:"A task or workflow ended without completing."`
+}
+
+// UpdateEmailNotificationSettingsRequest changes the completion-email
+// configuration.
+type UpdateEmailNotificationSettingsRequest struct {
+	Enabled   bool   `json:"enabled"`
+	Recipient string `json:"recipient"`
+	Host      string `json:"host"`
+	Port      int    `json:"port" minimum:"1" maximum:"65535"`
+	Username  string `json:"username"`
+	TLS       string `json:"tls,omitempty" enum:"starttls,implicit,none"`
+	// Password sets a new SMTP password. Omit it to keep the stored one: the
+	// client never receives the current password and so cannot echo it back,
+	// and without this distinction every save from an untouched form would
+	// silently erase the credential. Send "" to clear it deliberately.
+	Password *string `json:"password,omitempty"`
+	// Events selects which notification events may be emailed. Omit it to keep
+	// the stored selection, for the same reason Password is omittable: a client
+	// that predates the setting must not silently clear all three.
+	Events *EmailNotificationEventsPayload `json:"events,omitempty"`
+}
+
+// EmailNotificationSettingsEnvelope is the { emailNotifications } response body.
+type EmailNotificationSettingsEnvelope struct {
+	EmailNotifications EmailNotificationSettingsResponse `json:"emailNotifications"`
+}
+
+// SendTestEmailResponse reports the outcome of a Send test email action.
+type SendTestEmailResponse struct {
+	Sent      bool   `json:"sent"`
+	Recipient string `json:"recipient"`
 }
 
 // capabilityNames lists the abilities a provider has, sorted so a client sees a
@@ -1849,4 +1981,107 @@ type MuteDeviceRequest struct {
 // routes.
 type InstallIDParam struct {
 	InstallID string `path:"installId" description:"The device's stable install id."`
+}
+
+// --- code graph (migration 0153) -----------------------------------------
+//
+// These mirror the controller-facing shapes one for one, which is why the
+// handlers can convert with a direct conversion rather than a field-by-field
+// copy: a drift between the two then fails the build instead of silently
+// dropping a field from the wire.
+
+// ListProjectMemoryGraphResponse is every repository's code-graph state.
+type ListProjectMemoryGraphResponse struct {
+	Repositories []ProjectMemoryGraphStatusResponse `json:"repositories"`
+}
+
+// ProjectMemoryGraphStatusResponse is one repository's code-graph state.
+type ProjectMemoryGraphStatusResponse struct {
+	RepoID   string `json:"repoId"`
+	RepoPath string `json:"repoPath"`
+	// Backend names the implementation serving this graph, by its real name.
+	Backend       string `json:"backend"`
+	Generation    int64  `json:"generation"`
+	Phase         string `json:"phase"`
+	IndexedCommit string `json:"indexedCommit,omitempty"`
+	RepoIdentity  string `json:"repoIdentity,omitempty"`
+	Files         int64  `json:"files"`
+	Symbols       int64  `json:"symbols"`
+	Edges         int64  `json:"edges"`
+	LastSyncKind  string `json:"lastSyncKind,omitempty"`
+	FilesParsed   int64  `json:"filesParsed"`
+	FilesReused   int64  `json:"filesReused"`
+	FilesRemoved  int64  `json:"filesRemoved"`
+	LastMillis    int64  `json:"lastMillis"`
+	LastError     string `json:"lastError,omitempty"`
+	Architecture  string `json:"architecture,omitempty"`
+	UpdatedAt     string `json:"updatedAt,omitempty"`
+	Healthy       bool   `json:"healthy"`
+	Drift         string `json:"drift,omitempty"`
+}
+
+// ProjectMemoryGraphSyncResponse is what one code-graph sync did.
+type ProjectMemoryGraphSyncResponse struct {
+	RepoID         string `json:"repoId"`
+	RepoPath       string `json:"repoPath"`
+	Kind           string `json:"kind"`
+	Generation     int64  `json:"generation"`
+	IndexedCommit  string `json:"indexedCommit,omitempty"`
+	FilesScanned   int    `json:"filesScanned"`
+	FilesParsed    int    `json:"filesParsed"`
+	FilesReused    int    `json:"filesReused"`
+	FilesRemoved   int    `json:"filesRemoved"`
+	SymbolsAdded   int    `json:"symbolsAdded"`
+	SymbolsRemoved int    `json:"symbolsRemoved"`
+	EdgesAdded     int    `json:"edgesAdded"`
+	EdgesRemoved   int    `json:"edgesRemoved"`
+	Files          int    `json:"files"`
+	Symbols        int    `json:"symbols"`
+	Edges          int    `json:"edges"`
+	Millis         int64  `json:"millis"`
+	Truncated      bool   `json:"truncated,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+// ProjectMemoryGraphAnswerResponse is what a bounded graph query found.
+type ProjectMemoryGraphAnswerResponse struct {
+	RepoID        string                             `json:"repoId"`
+	Generation    int64                              `json:"generation"`
+	IndexedCommit string                             `json:"indexedCommit,omitempty"`
+	Symbols       []ProjectMemoryGraphSymbolResponse `json:"symbols"`
+	Callers       []ProjectMemoryGraphEdgeResponse   `json:"callers"`
+	Callees       []ProjectMemoryGraphEdgeResponse   `json:"callees"`
+	Tests         []ProjectMemoryGraphSymbolResponse `json:"tests"`
+	Endpoints     []ProjectMemoryGraphSymbolResponse `json:"endpoints"`
+	Tables        []string                           `json:"tables"`
+	Files         []string                           `json:"files"`
+	// ConsideredSymbols and ConsideredEdges are everything the retrieval was
+	// allowed to choose from. With the returned counts they are what makes the
+	// bound visible rather than asserted.
+	ConsideredSymbols int    `json:"consideredSymbols"`
+	ConsideredEdges   int    `json:"consideredEdges"`
+	Truncated         bool   `json:"truncated,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+}
+
+// ProjectMemoryGraphSymbolResponse is one declaration in an answer.
+type ProjectMemoryGraphSymbolResponse struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Kind      string  `json:"kind"`
+	Path      string  `json:"path"`
+	Line      int     `json:"line"`
+	Signature string  `json:"signature,omitempty"`
+	Summary   string  `json:"summary,omitempty"`
+	Exported  bool    `json:"exported,omitempty"`
+	Score     float64 `json:"score,omitempty"`
+	Reason    string  `json:"reason,omitempty"`
+}
+
+// ProjectMemoryGraphEdgeResponse is one relation in an answer.
+type ProjectMemoryGraphEdgeResponse struct {
+	Kind string `json:"kind"`
+	From string `json:"from"`
+	To   string `json:"to"`
+	Line int    `json:"line,omitempty"`
 }

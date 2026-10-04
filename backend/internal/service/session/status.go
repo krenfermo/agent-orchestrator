@@ -35,6 +35,7 @@ func toContractSessionFacts(rec domain.SessionRecord, signalCapable bool) contra
 		Activity:       contract.ActivityState(rec.Activity.State),
 		LastActivityAt: rec.Activity.LastActivityAt,
 		HasSignal:      !rec.FirstSignalAt.IsZero(),
+		TurnCompleted:  !rec.TurnCompletedAt.IsZero(),
 		SignalExpected: signalCapable && rec.Mode != domain.SessionModeChat,
 		IsTerminated:   rec.IsTerminated,
 	}

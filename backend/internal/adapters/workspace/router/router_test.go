@@ -34,6 +34,19 @@ type recordingWorkspace struct {
 	lastPatterns       []string
 	lastProjectCreate  ports.WorkspaceProjectConfig
 	path               string
+	// commits counts CommitAll calls, so a test can assert WHICH adapter the
+	// router asked to write (P3-C §28).
+	commits int
+}
+
+// CommitAll makes the double a ports.WorkspaceCommitter. Both adapters
+// implement it here on purpose: the router must be shown choosing the
+// direct-branch one because that is the rule, not because the other one
+// happens to be incapable.
+func (w *recordingWorkspace) CommitAll(_ context.Context, info ports.WorkspaceInfo, _ string) (string, bool, error) {
+	w.commits++
+	w.lastInfo = info
+	return "sha-" + info.RepoPath, true, nil
 }
 
 func (w *recordingWorkspace) Create(_ context.Context, cfg ports.WorkspaceConfig) (ports.WorkspaceInfo, error) {
@@ -61,6 +74,9 @@ func (w *recordingWorkspace) ForceDestroy(_ context.Context, info ports.Workspac
 	w.forceDestroyCalls++
 	w.lastInfo = info
 	return nil
+}
+func (w *recordingWorkspace) MaterializeIntegrationCommit(_ context.Context, _ ports.WorkspaceInfo, _, _, _ string, _ []string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 func (w *recordingWorkspace) StashUncommitted(_ context.Context, info ports.WorkspaceInfo) (string, error) {
 	w.stashCalls++
@@ -198,5 +214,84 @@ func TestRouterPreservesWorkspaceProjectDelegation(t *testing.T) {
 	}
 	if scratch.createCalls != 0 {
 		t.Fatalf("scratch create calls = %d, want 0", scratch.createCalls)
+	}
+}
+
+// ---- Checkpoint 8P-E.11: direct-branch routing ----
+
+func TestRouterSendsDirectBranchProjectsToTheDirectBranchAdapter(t *testing.T) {
+	git := &recordingWorkspace{}
+	direct := &recordingWorkspace{path: "/repos/ao"}
+	scratch := &recordingWorkspace{}
+	router := workspacerouter.New(workspacerouter.Deps{
+		Git: git, DirectBranch: direct, Scratch: scratch,
+		Projects: projectStore{projects: map[string]domain.ProjectRecord{
+			"direct": {ID: "direct", Path: "/repos/ao", Config: domain.ProjectConfig{
+				DefaultBranch: "feat/engineering-control-center",
+				ExecutionMode: domain.ExecutionDirectBranch,
+			}},
+			"worktree": {ID: "worktree", Path: "/repos/other", Config: domain.ProjectConfig{DefaultBranch: "main"}},
+		}},
+	})
+	ctx := context.Background()
+
+	if _, err := router.Create(ctx, ports.WorkspaceConfig{ProjectID: "direct", SessionID: "s1", Branch: "feat/engineering-control-center"}); err != nil {
+		t.Fatalf("create direct: %v", err)
+	}
+	if direct.createCalls != 1 || git.createCalls != 0 {
+		t.Fatalf("direct=%d git=%d, want the direct-branch adapter to have handled it", direct.createCalls, git.createCalls)
+	}
+
+	// A project that never opted in still gets a worktree, unchanged.
+	if _, err := router.Create(ctx, ports.WorkspaceConfig{ProjectID: "worktree", SessionID: "s2", Branch: "ao/s2"}); err != nil {
+		t.Fatalf("create worktree: %v", err)
+	}
+	if git.createCalls != 1 {
+		t.Fatalf("git create calls = %d, want the worktree adapter to have handled it", git.createCalls)
+	}
+	if direct.createCalls != 1 {
+		t.Fatalf("direct-branch adapter handled a worktree-mode project")
+	}
+}
+
+// A project that opted into direct branch must never silently fall back to
+// creating the worktree the user opted out of.
+func TestRouterRefusesDirectBranchProjectWhenAdapterIsUnconfigured(t *testing.T) {
+	git := &recordingWorkspace{}
+	router := workspacerouter.New(workspacerouter.Deps{
+		Git: git,
+		Projects: projectStore{projects: map[string]domain.ProjectRecord{
+			"direct": {ID: "direct", Path: "/repos/ao", Config: domain.ProjectConfig{
+				DefaultBranch: "main", ExecutionMode: domain.ExecutionDirectBranch,
+			}},
+		}},
+	})
+
+	if _, err := router.Create(context.Background(), ports.WorkspaceConfig{ProjectID: "direct", SessionID: "s1"}); err == nil {
+		t.Fatal("create succeeded with no direct-branch adapter configured")
+	}
+	if git.createCalls != 0 {
+		t.Fatal("router fell back to the git worktree adapter for a direct-branch project")
+	}
+}
+
+// Scratch projects have no repository, so they stay on the scratch adapter even
+// if a direct-branch mode is somehow stored on them.
+func TestRouterKeepsScratchProjectsOnTheScratchAdapter(t *testing.T) {
+	git := &recordingWorkspace{}
+	direct := &recordingWorkspace{}
+	scratch := &recordingWorkspace{}
+	router := workspacerouter.New(workspacerouter.Deps{
+		Git: git, DirectBranch: direct, Scratch: scratch,
+		Projects: projectStore{projects: map[string]domain.ProjectRecord{
+			"scratch": {ID: "scratch", Kind: domain.ProjectKindScratch, Config: domain.ProjectConfig{ExecutionMode: domain.ExecutionDirectBranch}},
+		}},
+	})
+
+	if _, err := router.Create(context.Background(), ports.WorkspaceConfig{ProjectID: "scratch", SessionID: "s1"}); err != nil {
+		t.Fatalf("create scratch: %v", err)
+	}
+	if scratch.createCalls != 1 || direct.createCalls != 0 {
+		t.Fatalf("scratch=%d direct=%d, want the scratch adapter", scratch.createCalls, direct.createCalls)
 	}
 }

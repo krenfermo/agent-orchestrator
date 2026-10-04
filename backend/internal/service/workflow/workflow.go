@@ -1,0 +1,711 @@
+// Package workflow is the daemon's HTTP-facing workflow service boundary.
+// The core coordinator lives in internal/workflow; this layer is the thin
+// contract the API controller depends on.
+package workflow
+
+import (
+	"context"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
+)
+
+// ErrInvalid, ErrNotFound, and ErrAlreadyTerminal re-export the coordinator
+// sentinels so the HTTP controller maps service failures to the right status
+// without importing the core package.
+var (
+	ErrInvalid         = workflowcore.ErrInvalid
+	ErrNotFound        = workflowcore.ErrNotFound
+	ErrAlreadyTerminal = workflowcore.ErrAlreadyTerminal
+	ErrPlanLocked      = workflowcore.ErrPlanLocked
+	// ErrArchiveUnsupported surfaces a store that cannot archive.
+	ErrArchiveUnsupported = workflowcore.ErrArchiveUnsupported
+)
+
+// ListFilter narrows ListRuns. An empty ProjectID means every project.
+type ListFilter struct {
+	ProjectID string
+}
+
+// RunSummary is a workflow run without its step/attempt fan-out, for list views.
+type RunSummary = domain.WorkflowRun
+
+// Manager is the workflows surface the HTTP controller depends on.
+type Manager interface {
+	CreateRun(ctx context.Context, projectID, objective string, verification workflowcore.VerificationPlan) (workflowcore.RunDetail, error)
+	GetRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	ListRuns(ctx context.Context, filter ListFilter) ([]RunSummary, error)
+	CancelRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	StartRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	// ContinueRun is Checkpoint 8C's generic unblock-and-dispatch entry
+	// point. Today it dispatches the review step once the work step has
+	// completed; a future checkpoint can extend it (fix/verify automation)
+	// without a breaking API change.
+	ContinueRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	// ResumeTask releases one task parked in needs_attention (migration 0130)
+	// after a person has dealt with what parked it. Idempotent.
+	ResumeTask(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error)
+	// AuthorizeIntegrationFreshReviewException grants ONE additional
+	// integration fresh review to a task whose ordinary budget is spent, on a
+	// named person's explicit authority. See
+	// workflow/task_integration_fresh_review_exception.go.
+	AuthorizeIntegrationFreshReviewException(ctx context.Context, req workflowcore.IntegrationFreshReviewExceptionRequest) (workflowcore.IntegrationFreshReviewException, error)
+	// AmendTaskCriterion is the Plan / Acceptance Criteria Amendment action
+	// (migration 0132): a human-approved change to a criterion that stopped
+	// describing reality, followed by a fresh independent review.
+	AmendTaskCriterion(ctx context.Context, req TaskCriterionAmendment) (domain.WorkflowTaskCriterionAmendment, workflowcore.RunDetail, error)
+	// ResumeAmendedTaskReview re-applies an existing amendment's consequences
+	// when its fresh review never opened. It creates no second amendment.
+	ResumeAmendedTaskReview(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error)
+}
+
+// PlannerManager is the optional capability a Manager may also implement when
+// the deployment has a planner wired. Controllers type-assert for it, so a
+// build without one degrades to an unsupported-operation response.
+type PlannerManager interface {
+	Manager
+	CreateObjectiveRun(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (workflowcore.RunDetail, error)
+	GeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	ApprovePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	RejectPlan(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+}
+
+// OperatorRecoverer is the operator-only recovery surface: the two actions a
+// person may take on a run AO has deliberately fail-closed on, and that nothing
+// automatic is allowed to take on their behalf.
+//
+// It is an optional, type-asserted interface (mirroring ExecutionPolicyApplier)
+// so a Manager implementation or test double that predates it keeps compiling
+// unchanged, and a deployment without it answers 501 rather than doing
+// something weaker.
+//
+// Both are bounded, both write their authorization durably before they move
+// anything, and neither invents a fact AO could not prove:
+//
+//   - RecoverUnprovableApprovedHead discards an approval whose commit AO cannot
+//     locate and asks for one fresh review of the live workspace. It never
+//     attests a commit and never verifies unreviewed code.
+//   - ReopenAmbiguousPlan returns an objective whose planner was interrupted by
+//     a restart to ordinary, from-scratch planning. It adopts nothing from the
+//     discarded planner.
+type OperatorRecoverer interface {
+	RecoverUnprovableApprovedHead(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	ReopenAmbiguousPlan(ctx context.Context, runID string, observedUpdatedAt time.Time) (workflowcore.RunDetail, error)
+}
+
+// ExecutionPolicyApplier is Checkpoint 8P-C's optional post-creation step:
+// embed the caller's execution policy into a just-created run's policy
+// snapshot. Optional (type-asserted by the controller, mirroring
+// PlannerManager) so a Manager implementation/test double that predates
+// 8P-C keeps compiling unchanged.
+type ExecutionPolicyApplier interface {
+	ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID, autonomousOverride *bool) error
+}
+
+// StrategyManager is P1-A's execution-strategy surface: creating a run under
+// an explicitly chosen (or policy-selected) strategy, and reading back the
+// strategy a run is durably executing under.
+//
+// Optional and type-asserted, exactly like PlannerManager/BoardReader, so a
+// Manager implementation or test double that predates P1-A keeps compiling and
+// simply degrades to the pre-P1-A create paths.
+type StrategyManager interface {
+	// CreateTaskRun creates a bounded TASK run: no objective planner, no
+	// decomposition, ordinary review/verify.
+	CreateTaskRun(ctx context.Context, req workflowcore.TaskRunRequest) (workflowcore.RunDetail, error)
+	// CreateObjectiveRunWithStrategy creates an AUTONOMOUS or MASTER
+	// objective, freezing the selection into the run at creation.
+	CreateObjectiveRunWithStrategy(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode, strategy domain.ExecutionStrategySelection) (workflowcore.RunDetail, error)
+	// EffectiveStrategy answers "which strategy is this run using", mapping a
+	// pre-P1-A run from its own durable facts rather than guessing.
+	EffectiveStrategy(ctx context.Context, runID string) (domain.ExecutionStrategySelection, error)
+}
+
+// RecoveryManager is P1-B's recovery surface: assessing a stopped run,
+// discharging its outstanding obligation, deciding what happens to its plan,
+// and launching a bounded Repair Agent.
+//
+// Optional and type-asserted, exactly like PlannerManager/StrategyManager, so
+// a Manager implementation or test double that predates P1-B keeps compiling
+// and its deployment answers 501 rather than doing something weaker.
+type RecoveryManager interface {
+	// AssessRecovery is the deterministic "what should I do about this run".
+	// It writes nothing.
+	AssessRecovery(ctx context.Context, runID string) (workflowcore.RecoveryAssessment, error)
+	// RecoveryStatusFor is the companion question: "how is AO trying to recover
+	// this run" -- which of its own mechanisms is in play, and what it is
+	// waiting for. Also a strict read.
+	RecoveryStatusFor(ctx context.Context, runID string) (workflowcore.RecoveryStatus, error)
+	// ResumeRun states the durable obligation and discharges only that one.
+	ResumeRun(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.ResumeReport, error)
+	// ReusePlan executes an existing plan revision, refusing anything but an
+	// exact match.
+	ReusePlan(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.PlanReuseAssessment, error)
+	// RegeneratePlan mints a new durable plan revision.
+	RegeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.PlanReuseAssessment, error)
+	// PlanRepair computes what a repair would do, without doing it.
+	PlanRepair(ctx context.Context, runID string) (workflowcore.RepairPlan, error)
+	// LaunchRepair creates the bounded repair run on a named authority.
+	LaunchRepair(ctx context.Context, runID, authorizedBy string) (domain.RepairIntent, error)
+	// ApplyRepairPolicy freezes a just-created run's auto-repair mode.
+	ApplyRepairPolicy(ctx context.Context, runID string, mode domain.RepairMode) error
+}
+
+// AdvisorManager is P3-C's Incident Advisor surface: the single deterministic
+// answer to "what do I do now", the automatic-recovery dispatcher that is
+// allowed to act on it, and the authority revalidation a late click needs.
+//
+// The read half and the write half are deliberately separate methods on one
+// interface rather than one method that does both. AdviceFor writes nothing, so
+// a board poll and a page load may call it freely; DispatchAutomaticRecovery is
+// the only thing that carries an automatic action out, and it re-derives its own
+// authority when it does (P3-C §16).
+//
+// Optional and type-asserted, exactly like RecoveryManager, so an
+// implementation or test double that predates P3-C keeps compiling and its
+// deployment answers 501 rather than doing something weaker.
+type AdvisorManager interface {
+	// AdviceFor is the deterministic "what do I do now" for one run. It writes
+	// nothing.
+	AdviceFor(ctx context.Context, runID string) (workflowcore.Advice, error)
+	// AdviceForDetail is AdviceFor for a caller that already loaded the run
+	// detail, so the most-polled route in the product does not read it twice.
+	AdviceForDetail(ctx context.Context, detail workflowcore.RunDetail) (workflowcore.Advice, error)
+	// DispatchAutomaticRecovery performs whatever AO is authorized to do about
+	// a run by itself, and nothing else.
+	DispatchAutomaticRecovery(ctx context.Context, runID string) (workflowcore.AutomaticRecoveryOutcome, error)
+	// RevalidateActionAuthority answers "is this action still the action AO
+	// offered", for a click computed against an earlier reading.
+	RevalidateActionAuthority(ctx context.Context, runID string, action workflowcore.ActionID, expected workflowcore.AdviceAuthority) (workflowcore.ActionAuthorityMismatch, error)
+	// ApplyAutonomyPolicy freezes a just-created run's question-autonomy mode.
+	ApplyAutonomyPolicy(ctx context.Context, runID string, mode domain.QuestionAutonomyMode) error
+}
+
+// ReviewDepthManager is P5-A's review-depth surface: freezing how much scrutiny
+// a just-created run asks for, and reading that request back.
+//
+// Optional and type-asserted, exactly like RecoveryManager and AdvisorManager,
+// so an implementation or test double that predates P5-A keeps compiling and a
+// deployment without the capability simply leaves the run on its strategy's
+// frozen default rather than failing the create.
+//
+// There is deliberately no method here for lowering a running review's depth.
+// The depth a review actually runs at is resolved per review step against that
+// change's own risk tier, and nothing outside that resolution may make a review
+// shallower.
+type ReviewDepthManager interface {
+	// ApplyReviewDepthPolicy freezes a just-created run's review-depth request.
+	ApplyReviewDepthPolicy(ctx context.Context, runID string, depth domain.ReviewDepth) error
+	// RunReviewDepthPolicy reads a run's frozen review-depth request back.
+	RunReviewDepthPolicy(ctx context.Context, runID string) (domain.ReviewDepthPolicySnapshot, error)
+}
+
+// ContextEconomyManager is the optional capability a workflow service carries
+// when it can freeze a run's P7 context-economy choices: whether the run may
+// compact a session's conversation before a fix cycle, and the conversation
+// size at which AO considers a session to be under pressure.
+//
+// Separate from ReviewDepthManager rather than folded into it because the two
+// answer different questions and a daemon could plausibly support one without
+// the other; discovered by type assertion at the controller, exactly as every
+// other Apply*Policy capability is.
+type ContextEconomyManager interface {
+	// ApplySessionCompactionPolicy freezes a just-created run's explicit
+	// session-compaction choice, true or false, and who asked for it.
+	ApplySessionCompactionPolicy(ctx context.Context, runID string, enabled bool, requestedBy string) error
+	// ApplyContextPerCallWarnTokens freezes a per-run override of the
+	// context-per-call threshold. It refuses a value outside
+	// domain.ValidContextPerCallWarnTokens rather than clamping one.
+	ApplyContextPerCallWarnTokens(ctx context.Context, runID string, tokens int64) error
+}
+
+// WorkReportManager is P5-A phase 2B's worker-declaration surface: a worker
+// records what it says it did, addressed by its own session.
+//
+// Optional and type-asserted like every other manager here, so a deployment
+// without the capability simply has no worker reports — which is exactly the
+// state every run was in before this existed, and one the review policy already
+// handles: a report that is absent is neither credited nor penalised.
+type WorkReportManager interface {
+	SubmitWorkReportForSession(ctx context.Context, sessionID string, report domain.WorkReport) (workflowcore.WorkReportReceipt, error)
+}
+
+// BoardReader is Checkpoint 8P-E.12's project Board projection. Optional
+// (type-asserted by the controller, mirroring PlannerManager) so a Manager
+// implementation or test double that predates it keeps compiling unchanged.
+type BoardReader interface {
+	ProjectBoard(ctx context.Context, projectID string, retention time.Duration) ([]workflowcore.BoardEntry, error)
+}
+
+// BoardViewReader is P3-B's Board: the same projection with hierarchy, counts,
+// server-side filtering, stable ordering and paging. Separate from BoardReader
+// rather than a widening of it for this package's usual reason — a double that
+// predates it keeps compiling — and the controller falls back to BoardReader
+// when it is absent.
+type BoardViewReader interface {
+	ProjectBoardView(ctx context.Context, projectID string, q workflowcore.BoardQuery) (workflowcore.BoardView, error)
+}
+
+// RepairOriginReader reports whether a run is an automatic repair of another
+// run, and of which. Optional, like every other read surface here.
+type RepairOriginReader interface {
+	RepairRunOrigin(ctx context.Context, runID string) (string, int, bool)
+}
+
+// RunSummaryLister is P3-B §3: the workflow list projected onto the same human
+// status model the Board and the run detail page use, so the three cannot
+// contradict each other about what a run is doing.
+type RunSummaryLister interface {
+	ListRunSummaries(ctx context.Context, f workflowcore.ListRunSummariesFilter) ([]workflowcore.RunSummary, int, error)
+}
+
+// BoardPageLimit is the default page size of one Board request, and the ceiling
+// a caller may ask for. It exists because a project with several hundred runs
+// should not have to project all of them to draw the cards that fit on a
+// screen.
+const BoardPageLimit = 50
+
+// BoardPageLimitMax bounds an explicit `limit` query parameter.
+const BoardPageLimitMax = 200
+
+// ListPageLimit is the default page size of GET /api/v1/workflows, which had no
+// bound at all before its rows started carrying a derived stage.
+const ListPageLimit = 200
+
+// RunArchiver is the cancel-and-archive surface. Optional (type-asserted by
+// the controller, mirroring PlannerManager/BoardReader) so a Manager
+// implementation or test double that predates archiving keeps compiling.
+type RunArchiver interface {
+	CancelAndArchiveRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	ProjectBoardHistory(ctx context.Context, projectID string, limit int) ([]workflowcore.BoardEntry, error)
+}
+
+// BoardHistoryLimit caps one page of the archived view. Archiving is a manual,
+// per-workflow action, so this is a sanity bound on the response size rather
+// than a paging scheme.
+const BoardHistoryLimit = 100
+
+// BoardTerminalRetention is how long a finished run stays on the Board. A run
+// that vanishes the instant it succeeds is indistinguishable from one that
+// never ran, so completion is worth showing for a while.
+const BoardTerminalRetention = 30 * time.Minute
+
+// Service is the API-facing workflow service. It delegates to the core coordinator.
+type Service struct {
+	coordinator *workflowcore.Coordinator
+}
+
+var _ Manager = (*Service)(nil)
+
+// New wraps a core workflow coordinator as the API-facing service.
+func New(coordinator *workflowcore.Coordinator) *Service {
+	return &Service{coordinator: coordinator}
+}
+
+// CreateRun creates a new workflow run and seeds its initial steps.
+func (s *Service) CreateRun(ctx context.Context, projectID, objective string, verification workflowcore.VerificationPlan) (workflowcore.RunDetail, error) {
+	return s.coordinator.CreateRun(ctx, projectID, objective, verification)
+}
+
+// CreateObjectiveRun creates a run for an objective under the given approval
+// mode.
+func (s *Service) CreateObjectiveRun(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (workflowcore.RunDetail, error) {
+	return s.coordinator.CreateObjectiveRun(ctx, projectID, objective, mode)
+}
+
+// ApplyExecutionPolicySnapshot implements ExecutionPolicyApplier.
+func (s *Service) ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID, autonomousOverride *bool) error {
+	return s.coordinator.ApplyExecutionPolicySnapshot(ctx, runID, userID, autonomousOverride)
+}
+
+// CreateTaskRun implements StrategyManager.
+func (s *Service) CreateTaskRun(ctx context.Context, req workflowcore.TaskRunRequest) (workflowcore.RunDetail, error) {
+	return s.coordinator.CreateTaskRun(ctx, req)
+}
+
+// PlacementManager is P1-D's observability surface: the frozen execution
+// placement, the durable provider-attempt ledger, and the one admission answer
+// to "why has this not launched".
+//
+// Optional and type-asserted, exactly like RecoveryManager above, so a Manager
+// implementation or test double that predates P1-D keeps compiling and its
+// deployment answers 501 rather than showing a placement it does not have.
+//
+// Read-only by construction. There is deliberately no method here that freezes,
+// replaces or retires a placement: those happen on the dispatch path, where the
+// generation and the capacity claim that authorize them exist. An API that
+// could move a placement would be an API that could point a running agent at a
+// different checkout.
+type PlacementManager interface {
+	// ListPlacements returns every placement recorded for a run, with the
+	// current generation per obligation flagged.
+	ListPlacements(ctx context.Context, runID string) ([]workflowcore.PlacementView, error)
+	// ListProviderAttempts returns the run's provider-attempt chain.
+	ListProviderAttempts(ctx context.Context, runID string) ([]workflowcore.ProviderAttemptView, error)
+	// AdmissionState answers why the run has not launched.
+	AdmissionState(ctx context.Context, runID string) (workflowcore.AdmissionStateView, error)
+}
+
+// PlacementOverrideManager is P1-E's operator WRITE surface over the same
+// frozen placement: the per-task override request, and the explicit generation
+// transition.
+//
+// It is a separate interface from PlacementManager on purpose, and the split is
+// not stylistic. PlacementManager's contract is that nothing behind it can move
+// a placement, which is what lets a deployment expose the diagnostic view
+// without exposing the ability to re-point a running obligation. Folding two
+// writes into it would silently retire that guarantee for every existing
+// implementation.
+//
+// Optional and type-asserted, exactly like PlacementManager, so an
+// implementation predating P1-E keeps compiling and answers 501.
+type PlacementOverrideManager interface {
+	// RequestPlacementOverride records what an operator wants this
+	// obligation's placement to be. Before the freeze it is an input to
+	// selection; after it, it is recorded and inert until a transition
+	// consumes it, and the outcome says which of the two happened.
+	RequestPlacementOverride(ctx context.Context, req workflowcore.PlacementOverrideRequestInput) (workflowcore.PlacementOverrideOutcome, error)
+	// TransitionPlacement replaces one frozen placement generation with
+	// another, after proving no authority still owns the old one. A refusal is
+	// a normal outcome with a named authority, never an error.
+	TransitionPlacement(ctx context.Context, req workflowcore.PlacementTransitionInput) (workflowcore.PlacementTransitionOutcome, error)
+	// ListPlacementOverrides and ListPlacementTransitions are the audit trail:
+	// what was asked, what was applied, and what AO refused and why.
+	ListPlacementOverrides(ctx context.Context, runID string) ([]workflowcore.PlacementOverrideView, error)
+	ListPlacementTransitions(ctx context.Context, runID string) ([]workflowcore.PlacementTransitionView, error)
+}
+
+// CreateObjectiveRunWithStrategy implements StrategyManager.
+func (s *Service) CreateObjectiveRunWithStrategy(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode, strategy domain.ExecutionStrategySelection) (workflowcore.RunDetail, error) {
+	return s.coordinator.CreateObjectiveRunWithStrategy(ctx, projectID, objective, mode, strategy)
+}
+
+// EffectiveStrategy implements StrategyManager.
+func (s *Service) EffectiveStrategy(ctx context.Context, runID string) (domain.ExecutionStrategySelection, error) {
+	return s.coordinator.EffectiveStrategy(ctx, runID)
+}
+
+// AdviceFor implements AdvisorManager.
+func (s *Service) AdviceFor(ctx context.Context, runID string) (workflowcore.Advice, error) {
+	return s.coordinator.AdviceFor(ctx, runID)
+}
+
+// AdviceForDetail implements AdvisorManager.
+func (s *Service) AdviceForDetail(ctx context.Context, detail workflowcore.RunDetail) (workflowcore.Advice, error) {
+	return s.coordinator.AdviceForDetail(ctx, detail)
+}
+
+// DispatchAutomaticRecovery implements AdvisorManager.
+func (s *Service) DispatchAutomaticRecovery(ctx context.Context, runID string) (workflowcore.AutomaticRecoveryOutcome, error) {
+	return s.coordinator.DispatchAutomaticRecovery(ctx, runID)
+}
+
+// RevalidateActionAuthority implements AdvisorManager.
+func (s *Service) RevalidateActionAuthority(ctx context.Context, runID string, action workflowcore.ActionID, expected workflowcore.AdviceAuthority) (workflowcore.ActionAuthorityMismatch, error) {
+	return s.coordinator.RevalidateActionAuthority(ctx, runID, action, expected)
+}
+
+// SubmitWorkReportForSession implements WorkReportManager.
+func (s *Service) SubmitWorkReportForSession(ctx context.Context, sessionID string, report domain.WorkReport) (workflowcore.WorkReportReceipt, error) {
+	return s.coordinator.SubmitWorkReportForSession(ctx, sessionID, report)
+}
+
+// ApplyReviewDepthPolicy implements ReviewDepthManager.
+func (s *Service) ApplyReviewDepthPolicy(ctx context.Context, runID string, depth domain.ReviewDepth) error {
+	return s.coordinator.ApplyReviewDepthPolicy(ctx, runID, depth)
+}
+
+// RunReviewDepthPolicy implements ReviewDepthManager.
+func (s *Service) RunReviewDepthPolicy(ctx context.Context, runID string) (domain.ReviewDepthPolicySnapshot, error) {
+	return s.coordinator.RunReviewDepthPolicy(ctx, runID)
+}
+
+// ApplyAutonomyPolicy implements AdvisorManager.
+func (s *Service) ApplyAutonomyPolicy(ctx context.Context, runID string, mode domain.QuestionAutonomyMode) error {
+	return s.coordinator.ApplyAutonomyPolicy(ctx, runID, mode)
+}
+
+// The create route reaches every per-run policy freeze through a TYPE
+// ASSERTION on this Service, so an interface the Service does not satisfy is
+// not a compile error anywhere -- it is a capability that silently disappears
+// at runtime. P7 shipped exactly that: ContextEconomyManager existed, the
+// Coordinator implemented it, and the daemon wires workflowsvc.New(coordinator)
+// rather than the Coordinator itself, so every explicit sessionCompaction
+// request reached a daemon that reported it could not honour one. These
+// assertions make the next such omission a build failure.
+var (
+	_ AdvisorManager           = (*Service)(nil)
+	_ ContextEconomyManager    = (*Service)(nil)
+	_ PlacementOverrideManager = (*Service)(nil)
+	_ PlannerManager           = (*Service)(nil)
+	_ RecoveryManager          = (*Service)(nil)
+	_ ReviewDepthManager       = (*Service)(nil)
+	_ StrategyManager          = (*Service)(nil)
+)
+
+// ApplySessionCompactionPolicy implements ContextEconomyManager.
+func (s *Service) ApplySessionCompactionPolicy(ctx context.Context, runID string, enabled bool, requestedBy string) error {
+	return s.coordinator.ApplySessionCompactionPolicy(ctx, runID, enabled, requestedBy)
+}
+
+// ApplyContextPerCallWarnTokens implements ContextEconomyManager.
+func (s *Service) ApplyContextPerCallWarnTokens(ctx context.Context, runID string, tokens int64) error {
+	return s.coordinator.ApplyContextPerCallWarnTokens(ctx, runID, tokens)
+}
+
+// RecoveryStatusFor implements RecoveryManager: "how is AO trying to recover
+// this run". A strict read, like its neighbour.
+func (s *Service) RecoveryStatusFor(ctx context.Context, runID string) (workflowcore.RecoveryStatus, error) {
+	return s.coordinator.RecoveryStatusFor(ctx, runID)
+}
+
+// WorkerOwnershipFor is P9's ownership readback: per worker step, whether AO can
+// prove it owns the runtime and what recovery would decide. A strict read.
+func (s *Service) WorkerOwnershipFor(ctx context.Context, runID string) ([]workflowcore.WorkerOwnershipReadback, error) {
+	return s.coordinator.WorkerOwnershipFor(ctx, runID)
+}
+
+// AssessRecovery implements RecoveryManager.
+func (s *Service) AssessRecovery(ctx context.Context, runID string) (workflowcore.RecoveryAssessment, error) {
+	return s.coordinator.AssessRecovery(ctx, runID)
+}
+
+// ResumeRun implements RecoveryManager.
+func (s *Service) ResumeRun(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.ResumeReport, error) {
+	return s.coordinator.ResumeRun(ctx, runID)
+}
+
+// ReusePlan implements RecoveryManager.
+func (s *Service) ReusePlan(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.PlanReuseAssessment, error) {
+	return s.coordinator.ReusePlan(ctx, runID)
+}
+
+// RegeneratePlan implements RecoveryManager.
+func (s *Service) RegeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.PlanReuseAssessment, error) {
+	return s.coordinator.RegeneratePlan(ctx, runID)
+}
+
+// PlanRepair implements RecoveryManager.
+func (s *Service) PlanRepair(ctx context.Context, runID string) (workflowcore.RepairPlan, error) {
+	return s.coordinator.PlanRepair(ctx, runID)
+}
+
+// LaunchRepair implements RecoveryManager.
+func (s *Service) LaunchRepair(ctx context.Context, runID, authorizedBy string) (domain.RepairIntent, error) {
+	return s.coordinator.LaunchRepair(ctx, runID, authorizedBy)
+}
+
+// ApplyRepairPolicy implements RecoveryManager.
+func (s *Service) ApplyRepairPolicy(ctx context.Context, runID string, mode domain.RepairMode) error {
+	return s.coordinator.ApplyRepairPolicy(ctx, runID, mode)
+}
+
+// GeneratePlan invokes the planner for a run and persists the plan it returns.
+func (s *Service) GeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.GeneratePlan(ctx, runID)
+}
+
+// ApprovePlan approves a run's validated plan so its tasks may be dispatched.
+func (s *Service) ApprovePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.ApprovePlan(ctx, runID)
+}
+
+// RejectPlan refuses a run's plan, ending it without dispatching any work.
+func (s *Service) RejectPlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.RejectPlan(ctx, runID)
+}
+
+// GetRun returns one workflow run with its steps and attempts.
+func (s *Service) GetRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.GetRun(ctx, runID)
+}
+
+// ListRuns lists workflow run summaries, optionally filtered by project id.
+func (s *Service) ListRuns(ctx context.Context, filter ListFilter) ([]RunSummary, error) {
+	return s.coordinator.ListRuns(ctx, filter.ProjectID)
+}
+
+// CancelRun cancels a workflow run and cascades cancellation to its non-terminal steps.
+func (s *Service) CancelRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.CancelRun(ctx, runID)
+}
+
+// StartRun transitions a pending run to running, runs its plan step, and
+// dispatches its work step's Codex worker (idempotently).
+func (s *Service) StartRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.StartRun(ctx, runID)
+}
+
+// ProjectBoard implements BoardReader.
+func (s *Service) ProjectBoard(ctx context.Context, projectID string, retention time.Duration) ([]workflowcore.BoardEntry, error) {
+	return s.coordinator.ProjectBoard(ctx, projectID, retention)
+}
+
+// ProjectBoardView implements BoardViewReader.
+func (s *Service) ProjectBoardView(ctx context.Context, projectID string, q workflowcore.BoardQuery) (workflowcore.BoardView, error) {
+	return s.coordinator.ProjectBoardView(ctx, projectID, q)
+}
+
+// RepairRunOrigin implements RepairOriginReader.
+func (s *Service) RepairRunOrigin(ctx context.Context, runID string) (string, int, bool) {
+	return s.coordinator.RepairRunOrigin(ctx, runID)
+}
+
+// ListRunSummaries implements RunSummaryLister.
+func (s *Service) ListRunSummaries(ctx context.Context, f workflowcore.ListRunSummariesFilter) ([]workflowcore.RunSummary, int, error) {
+	return s.coordinator.ListRunSummaries(ctx, f)
+}
+
+// CancelAndArchiveRun implements RunArchiver: it cancels the run and its
+// non-terminal children through the canonical cancellation lifecycle, then
+// marks the run archived so the active Board stops showing it. Deletes nothing.
+func (s *Service) CancelAndArchiveRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.CancelAndArchiveRun(ctx, runID)
+}
+
+// ProjectBoardHistory implements RunArchiver: the archived ("Mostrar
+// archivados") projection of a project's workflows.
+func (s *Service) ProjectBoardHistory(ctx context.Context, projectID string, limit int) ([]workflowcore.BoardEntry, error) {
+	return s.coordinator.ProjectBoardHistory(ctx, projectID, limit)
+}
+
+// ContinueRun dispatches the review step's real Claude reviewer once the
+// work step has completed (idempotently); a no-op otherwise.
+func (s *Service) ContinueRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.ContinueRun(ctx, runID)
+}
+
+// RecoverUnprovableApprovedHead implements OperatorRecoverer: the explicit,
+// human-only recovery for a run parked because AO cannot prove which commit its
+// approved review target was read at.
+func (s *Service) RecoverUnprovableApprovedHead(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.RecoverUnprovableApprovedHead(ctx, runID)
+}
+
+// ReopenAmbiguousPlan implements OperatorRecoverer: CP7's human-only, bounded,
+// observed-version reopen of an objective whose planner was in flight across a
+// daemon restart. observedUpdatedAt is the plan row version the caller's own
+// view was rendered from, and a stale one is refused rather than accepted.
+func (s *Service) ReopenAmbiguousPlan(ctx context.Context, runID string, observedUpdatedAt time.Time) (workflowcore.RunDetail, error) {
+	return s.coordinator.ReopenAmbiguousPlan(ctx, runID, observedUpdatedAt)
+}
+
+// TaskCriterionAmendment is one human-approved amendment, at the service
+// boundary. It mirrors workflowcore.TaskCriterionAmendmentRequest rather than
+// importing that vocabulary into the transport layer.
+type TaskCriterionAmendment struct {
+	RunID             string
+	TaskID            string
+	CriterionIndex    int
+	OriginalCriterion string
+	AmendedCriterion  string
+	Reason            string
+	Evidence          []string
+	ApprovedBy        string
+}
+
+// AmendTaskCriterion records the amendment, applies it, and returns the run
+// with its review re-opened. It never approves the work.
+func (s *Service) AmendTaskCriterion(ctx context.Context, req TaskCriterionAmendment) (domain.WorkflowTaskCriterionAmendment, workflowcore.RunDetail, error) {
+	amendment, err := s.coordinator.AmendTaskAcceptanceCriterion(ctx, workflowcore.TaskCriterionAmendmentRequest{
+		RunID: req.RunID, TaskID: req.TaskID, CriterionIndex: req.CriterionIndex,
+		OriginalCriterion: req.OriginalCriterion, AmendedCriterion: req.AmendedCriterion,
+		Reason: req.Reason, Evidence: req.Evidence, ApprovedBy: req.ApprovedBy,
+	})
+	if err != nil {
+		return domain.WorkflowTaskCriterionAmendment{}, workflowcore.RunDetail{}, err
+	}
+	detail, err := s.coordinator.GetRun(ctx, req.RunID)
+	return amendment, detail, err
+}
+
+// ResumeAmendedTaskReview finishes an amendment whose fresh review never got
+// opened. Idempotent: a task already moving is left alone.
+func (s *Service) ResumeAmendedTaskReview(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error) {
+	if err := s.coordinator.ResumeAmendedTaskReview(ctx, runID, taskID); err != nil {
+		return workflowcore.RunDetail{}, err
+	}
+	return s.coordinator.GetRun(ctx, runID)
+}
+
+// AuthorizeIntegrationFreshReviewException grants one additional integration
+// fresh review for a parked task, on a named person's authority. The bound
+// itself is unchanged; this widens it for exactly this task and exactly this
+// workspace state.
+func (s *Service) AuthorizeIntegrationFreshReviewException(ctx context.Context, req workflowcore.IntegrationFreshReviewExceptionRequest) (workflowcore.IntegrationFreshReviewException, error) {
+	return s.coordinator.AuthorizeIntegrationFreshReviewException(ctx, req)
+}
+
+// ResumeTask releases one task parked in needs_attention after a person has
+// dealt with what parked it, and returns the run as it then is.
+//
+// Idempotent: resuming a task that is not parked changes nothing and is not an
+// error, so a repeated request cannot produce a second integration attempt.
+func (s *Service) ResumeTask(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error) {
+	if err := s.coordinator.ResumeTaskAfterAttention(ctx, runID, taskID); err != nil {
+		return workflowcore.RunDetail{}, err
+	}
+	return s.coordinator.GetRun(ctx, runID)
+}
+
+// ListPlacements implements PlacementManager.
+func (s *Service) ListPlacements(ctx context.Context, runID string) ([]workflowcore.PlacementView, error) {
+	return s.coordinator.ListPlacements(ctx, runID)
+}
+
+// ListProviderAttempts implements PlacementManager.
+func (s *Service) ListProviderAttempts(ctx context.Context, runID string) ([]workflowcore.ProviderAttemptView, error) {
+	return s.coordinator.ListProviderAttempts(ctx, runID)
+}
+
+// AdmissionState implements PlacementManager.
+func (s *Service) AdmissionState(ctx context.Context, runID string) (workflowcore.AdmissionStateView, error) {
+	return s.coordinator.AdmissionState(ctx, runID)
+}
+
+// RequestPlacementOverride implements PlacementOverrideManager.
+func (s *Service) RequestPlacementOverride(ctx context.Context, req workflowcore.PlacementOverrideRequestInput) (workflowcore.PlacementOverrideOutcome, error) {
+	return s.coordinator.RequestPlacementOverride(ctx, req)
+}
+
+// TransitionPlacement implements PlacementOverrideManager.
+func (s *Service) TransitionPlacement(ctx context.Context, req workflowcore.PlacementTransitionInput) (workflowcore.PlacementTransitionOutcome, error) {
+	return s.coordinator.TransitionPlacement(ctx, req)
+}
+
+// ListPlacementOverrides implements PlacementOverrideManager.
+func (s *Service) ListPlacementOverrides(ctx context.Context, runID string) ([]workflowcore.PlacementOverrideView, error) {
+	return s.coordinator.ListPlacementOverrides(ctx, runID)
+}
+
+// ListPlacementTransitions implements PlacementOverrideManager.
+func (s *Service) ListPlacementTransitions(ctx context.Context, runID string) ([]workflowcore.PlacementTransitionView, error) {
+	return s.coordinator.ListPlacementTransitions(ctx, runID)
+}
+
+// PendingChangesManager is P3-A §17's commit-and-continue surface.
+//
+// It is a separate, type-asserted interface for the same reason
+// PlacementOverrideManager is: it can WRITE to a person's repository, and a
+// deployment that exposes the read-only workflow API must not acquire that
+// ability by implementing an unrelated method.
+type PendingChangesManager interface {
+	// PendingChanges is read-only: it reports what is uncommitted in the
+	// repository this run works in, and proposes a message the caller edits.
+	PendingChanges(ctx context.Context, runID string) (workflowcore.PendingChanges, error)
+	// CommitPendingChanges commits what the caller was shown, under the message
+	// they approved, re-probes, and resumes the run only if the tree is
+	// provably clean.
+	CommitPendingChanges(ctx context.Context, runID, message string) (workflowcore.CommitOutcome, error)
+}
+
+// PendingChanges implements PendingChangesManager.
+func (s *Service) PendingChanges(ctx context.Context, runID string) (workflowcore.PendingChanges, error) {
+	return s.coordinator.PendingChanges(ctx, runID)
+}
+
+// CommitPendingChanges implements PendingChangesManager.
+func (s *Service) CommitPendingChanges(ctx context.Context, runID, message string) (workflowcore.CommitOutcome, error) {
+	return s.coordinator.CommitPendingChanges(ctx, runID, message)
+}

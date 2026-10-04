@@ -992,6 +992,52 @@ func TestSessionsAPI_SetAutoInjectCIValidatesBody(t *testing.T) {
 	}
 }
 
+// constantReader yields the same byte forever. It is how an oversized body is
+// streamed into a handler instead of being built in memory first: the point of
+// the caps below is that the server stops reading, so the test should not have
+// to allocate tens of megabytes to prove it.
+type constantReader byte
+
+func (c constantReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(c)
+	}
+	return len(p), nil
+}
+
+// doOversizedRequest serves one request whose body runs far past a route's
+// MaxBytesReader cap, directly against the router rather than over the
+// loopback connection doRequest uses.
+//
+// The transport is deliberately out of the picture. A body this size is
+// rejected mid-upload: the handler answers and the server closes the
+// connection while the client is still writing tens of megabytes, so the
+// client can end up observing its own failed write ("no buffer space
+// available" on macOS under parallel test load) instead of the response that
+// was already sent to it. That race is a property of pushing a rejected
+// upload through a socket, not of the cap being tested — the cap lives in the
+// handler and is transport-independent — so these tests pin it by serving the
+// request in process, deterministically.
+//
+// head and tail bracket a run of filler bytes: the body is
+// head + filler*'A' + tail, streamed rather than materialised.
+func doOversizedRequest(t *testing.T, srv *httptest.Server, method, path, head string, filler int64, tail string) ([]byte, int) {
+	t.Helper()
+	body := io.MultiReader(
+		strings.NewReader(head),
+		io.LimitReader(constantReader('A'), filler),
+		strings.NewReader(tail),
+	)
+	req := httptest.NewRequest(method, path, body)
+	req.Header.Set("Content-Type", "application/json")
+	// Mirror the loopback server these tests otherwise use, so any
+	// remote-address-sensitive middleware sees what it would normally see.
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+	srv.Config.Handler.ServeHTTP(rec, req)
+	return rec.Body.Bytes(), rec.Code
+}
+
 func TestSessionsAPI_SpawnRejectsOversizedBody(t *testing.T) {
 	svc := newFakeSessionService()
 	srv := newSessionTestServer(t, svc)
@@ -1004,9 +1050,8 @@ func TestSessionsAPI_SpawnRejectsOversizedBody(t *testing.T) {
 	// INVALID_JSON. If that line were removed the body would decode fully and be
 	// rejected later with an attachment-specific code (ATTACHMENT_TOO_LARGE),
 	// failing this test. 40 MiB of base64 comfortably exceeds the ~35 MiB cap.
-	oversized := `{"projectId":"ao","attachments":[{"mimeType":"image/png","data":"` +
-		strings.Repeat("A", 40<<20) + `"}]}`
-	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions", oversized)
+	body, status := doOversizedRequest(t, srv, "POST", "/api/v1/sessions",
+		`{"projectId":"ao","attachments":[{"mimeType":"image/png","data":"`, 40<<20, `"}]}`)
 	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_JSON")
 }
 
@@ -2208,9 +2253,8 @@ func TestSessionsAPI_DelegateTaskRejectsOversizedBody(t *testing.T) {
 	// A body past the spawn attachment cap is rejected while decoding
 	// (MaxBytesReader), before attachment size validation and without
 	// materializing the whole body.
-	oversized := `{"projectId":"ao","brief":"Fix it","attachments":[{"mimeType":"image/png","data":"` +
-		strings.Repeat("A", 40<<20) + `"}]}`
-	body, status, _ := doRequest(t, srv, "POST", "/api/v1/orchestrators/delegate", oversized)
+	body, status := doOversizedRequest(t, srv, "POST", "/api/v1/orchestrators/delegate",
+		`{"projectId":"ao","brief":"Fix it","attachments":[{"mimeType":"image/png","data":"`, 40<<20, `"}]}`)
 	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_JSON")
 	if svc.delegationInput.ProjectID != "" {
 		t.Fatalf("delegate service called with oversized body: %#v", svc.delegationInput)
@@ -2252,9 +2296,8 @@ func TestSessionsAPI_SendRejectsOversizedBody(t *testing.T) {
 	// A body past the send attachment cap is rejected while decoding
 	// (MaxBytesReader), before attachment size validation and without
 	// materializing the whole body.
-	oversized := `{"message":"Make the button blue.","attachment":{"mimeType":"image/png","data":"` +
-		strings.Repeat("A", 20<<20) + `"}}`
-	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/send", oversized)
+	body, status := doOversizedRequest(t, srv, "POST", "/api/v1/sessions/ao-1/send",
+		`{"message":"Make the button blue.","attachment":{"mimeType":"image/png","data":"`, 20<<20, `"}}`)
 	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_JSON")
 	if svc.sent != "" {
 		t.Fatalf("send service called with oversized body: %q", svc.sent)

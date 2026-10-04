@@ -6,6 +6,8 @@ import {
 	ProjectSettingsSection,
 	ProjectWorkflowSettingsView,
 	validateProjectSettings,
+	type RepoConnectivityRow,
+	type RepoConnectivityTestState,
 } from "@aoagents/product-ui";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -31,18 +33,30 @@ import { buildIntake, deriveGitHubRepo, IntakeFields, type IntakeForm } from "./
 import { ProductExternalLink } from "./ProductExternalLink";
 import { ReviewerSelect, reviewerTrustWarning } from "./ReviewerSelect";
 import { AgentModelCombobox } from "./settings/AgentModelCombobox";
+import { ProjectAccessSettingsSection } from "./settings/ProjectAccessSettingsSection";
+import { ProjectSkillsSettingsSection } from "./settings/ProjectSkillsSettingsSection";
+import { WorkItemsSettingsSection } from "./settings/WorkItemsSettingsSection";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 import { SettingsRow } from "./settings/SettingsRow";
 
 type Project = components["schemas"]["Project"];
 type ProjectConfig = components["schemas"]["ProjectConfig"];
 type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
+type ExecutionMode = NonNullable<ProjectConfig["executionMode"]>;
+type GitActionPolicy = NonNullable<NonNullable<ProjectConfig["git"]>["localCommit"]>;
 
 const PERMISSION_MODE_VALUES = ["default", "accept-edits", "auto", "bypass-permissions"] as const;
 
 const projectQueryKey = (id: string) => ["project", id] as const;
 
-export type ProjectSettingsSection = "general" | "agents" | "workflow" | "intake";
+export type ProjectSettingsSection =
+	| "general"
+	| "agents"
+	| "workflow"
+	| "intake"
+	| "planning"
+	| "skills"
+	| "access";
 export interface ProjectSettingsSaveState {
 	isPending: boolean;
 	showSaving: boolean;
@@ -131,6 +145,10 @@ function SettingsBody({
 		orchestratorMode: config.orchestrator?.agentConfig?.mode ?? config.agentConfig?.mode ?? "",
 		permissions: config.agentConfig?.permissions ?? "",
 		reviewerHarness: config.reviewers?.[0]?.harness ?? "",
+		executionMode: (config.executionMode ?? "isolated_worktree") as ExecutionMode,
+		gitLocalCommit: (config.git?.localCommit ?? "automatic") as GitActionPolicy,
+		gitPush: (config.git?.push ?? "never") as GitActionPolicy,
+		gitMerge: (config.git?.merge ?? "never") as GitActionPolicy,
 		intakeEnabled: intake.enabled ?? false,
 		intakeRepo: intake.repo ?? "",
 		intakeAssignee: intake.assignee ?? "",
@@ -162,6 +180,62 @@ function SettingsBody({
 		}));
 	const effectiveIntakeRepo = form.intakeRepo.trim() || deriveGitHubRepo(project.repo);
 	const reviewerWarning = reviewerTrustWarning(form.reviewerHarness);
+
+	const [connectivityResults, setConnectivityResults] = useState<
+		Record<string, { state: RepoConnectivityTestState; message?: string }>
+	>({});
+	const testConnectionMutation = useMutation({
+		mutationFn: async (repo: string) => {
+			const { data, error } = await apiClient.POST("/api/v1/projects/{id}/repo-connection-test", {
+				params: { path: { id: projectId } },
+				body: { repo },
+			});
+			if (error) throw new Error(apiErrorMessage(error));
+			return { repo, result: data.result };
+		},
+		onMutate: (repo) => {
+			setConnectivityResults((prev) => ({ ...prev, [repo]: { state: "testing" } }));
+		},
+		onSuccess: ({ repo, result }) => {
+			setConnectivityResults((prev) => ({
+				...prev,
+				[repo]: { state: result.status === "ok" ? "ok" : "error", message: result.message },
+			}));
+		},
+		onError: (err, repo) => {
+			setConnectivityResults((prev) => ({
+				...prev,
+				[repo]: { state: "error", message: err instanceof Error ? err.message : String(err) },
+			}));
+		},
+	});
+	const repoConnectivity: RepoConnectivityRow[] =
+		project.kind === "workspace"
+			? [
+					{
+						key: "",
+						name: project.name || project.id,
+						branch: form.defaultBranch,
+						remote: project.repo || undefined,
+						transport: project.transport,
+						testState: connectivityResults[""]?.state ?? "idle",
+						testMessage: connectivityResults[""]?.message,
+						onTest: () => testConnectionMutation.mutate(""),
+					},
+					...(project.workspaceRepos ?? [])
+						.filter((repo) => repo.gitStatus !== "needs_init")
+						.map((repo) => ({
+							key: repo.name,
+							name: repo.name,
+							branch: repo.defaultBranch || form.defaultBranch,
+							remote: repo.repo || undefined,
+							transport: repo.transport,
+							testState: connectivityResults[repo.name]?.state ?? "idle",
+							testMessage: connectivityResults[repo.name]?.message,
+							onTest: () => testConnectionMutation.mutate(repo.name),
+						})),
+				]
+			: [];
 
 	const mutation = useMutation({
 		mutationFn: async () => {
@@ -218,6 +292,15 @@ function SettingsBody({
 						}),
 						reviewers: form.reviewerHarness ? [{ harness: form.reviewerHarness }] : undefined,
 						trackerIntake: buildIntake(intakeForm),
+						executionMode: form.executionMode,
+						git: {
+							localCommit: form.gitLocalCommit,
+							push: form.gitPush,
+							// Direct branch has no AO-created work branch to merge, so the
+							// stored value stays "never" rather than pretending a merge
+							// setting is in effect.
+							merge: form.executionMode === "direct_branch" ? "never" : form.gitMerge,
+						},
 					};
 			const { error } = await apiClient.PUT("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
@@ -449,6 +532,12 @@ function SettingsBody({
 							missingRequiredAgent ? t("settings.project.agentsRequired") : null
 						}
 					/>
+					<p className="px-1 text-xs leading-row text-settings-muted">
+						{t(
+							"settings.project.reviewerRoutingNote",
+							"Reviewer routing is selected automatically according to policy and provider availability.",
+						)}
+					</p>
 				</>
 			)}
 
@@ -458,14 +547,88 @@ function SettingsBody({
 						<>
 							<ProjectWorkflowSettingsView
 								branch={form.defaultBranch}
+								executionMode={form.executionMode}
+								executionModeControl={
+									<SettingsOptionMenu<ExecutionMode>
+										value={form.executionMode}
+										onChange={(executionMode) => setForm((f) => ({ ...f, executionMode }))}
+										options={[
+											{ value: "direct_branch", label: t("settings.project.executionDirectBranch") },
+											{ value: "isolated_worktree", label: t("settings.project.executionIsolatedWorktree") },
+											{
+												value: "smart_parallel_worktrees",
+												label: t("settings.project.executionSmartParallelWorktrees"),
+											},
+										]}
+										aria-label={t("settings.project.executionMode")}
+									/>
+								}
+								gitPolicyControls={{
+									localCommit: (
+										<GitPolicySelect
+											value={form.gitLocalCommit}
+											onChange={(gitLocalCommit) => setForm((f) => ({ ...f, gitLocalCommit }))}
+											ariaLabel={t("settings.project.gitLocalCommit")}
+											t={t}
+										/>
+									),
+									push: (
+										<GitPolicySelect
+											value={form.gitPush}
+											onChange={(gitPush) => setForm((f) => ({ ...f, gitPush }))}
+											ariaLabel={t("settings.project.gitPush")}
+											t={t}
+										/>
+									),
+									merge: (
+										<GitPolicySelect
+											value={form.gitMerge}
+											onChange={(gitMerge) => setForm((f) => ({ ...f, gitMerge }))}
+											ariaLabel={t("settings.project.gitMerge")}
+											t={t}
+										/>
+									),
+								}}
+								repositories={(project.repositories ?? []).map((repo) => ({
+									key: repo.name,
+									name: repo.name === "__root__" ? project.name || project.id : repo.name,
+									path: repo.path,
+									branch: repo.branch,
+									mode: repo.executionMode,
+									lock: repo.lock
+										? { workflowRunId: repo.lock.workflowRunId, sessionId: repo.lock.sessionId }
+										: undefined,
+								}))}
 								icons={{
 									edit: <Pencil className="settings-inline-edit-icon" aria-hidden="true" />,
 								}}
 								prefix={form.sessionPrefix}
 								onBranchChange={(defaultBranch) => setForm((f) => ({ ...f, defaultBranch }))}
 								onPrefixChange={(sessionPrefix) => setForm((f) => ({ ...f, sessionPrefix }))}
+								repoConnectivity={repoConnectivity}
 								labels={{
-									worktrees: t("settings.project.worktrees"),
+									execution: t("settings.project.execution"),
+									executionMode: t("settings.project.executionMode"),
+									directBranchNote: t("settings.project.directBranchNote"),
+									sessionPrefixNoGitNote:
+										form.executionMode === "direct_branch"
+											? t("settings.project.sessionPrefixNoGitNote")
+											: undefined,
+									repositories: t("settings.project.repositories"),
+									repositoryFree: t("settings.project.repositoryFree"),
+									repositoryBusy: t("settings.project.repositoryBusy"),
+									gitPolicy: t("settings.project.gitPolicy"),
+									localCommit: t("settings.project.gitLocalCommit"),
+									push: t("settings.project.gitPush"),
+									merge: t("settings.project.gitMerge"),
+									mergeNotApplicable: t("settings.project.gitMergeNotApplicable"),
+									// "Worktrees" is the wrong word in direct-branch mode: the
+									// section holds the branch and the session prefix, and that
+									// mode creates no worktree at all.
+									worktrees:
+										form.executionMode === "direct_branch"
+											? t("settings.project.branchSection")
+											: t("settings.project.worktrees"),
 									defaultBranch: t("settings.project.defaultBranch"),
 									sessionPrefix: t("settings.project.sessionPrefix"),
 									reviewers: t("settings.project.reviewers"),
@@ -476,6 +639,13 @@ function SettingsBody({
 									editSessionPrefix: t("settings.field.edit", {
 										label: t("settings.project.sessionPrefix"),
 									}),
+									repositoryConnectivity: t("settings.project.repositoryConnectivity"),
+									repositoryConnectivityNote: t("settings.project.repositoryConnectivityNote"),
+									testConnection: t("settings.project.testConnection"),
+									testing: t("settings.project.testingConnection"),
+									connectionOk: t("settings.project.connectionOk"),
+									connectionError: t("settings.project.connectionError"),
+									noRemote: t("settings.project.noRemote"),
 								}}
 								reviewerControl={
 									<ReviewerSelect
@@ -498,6 +668,11 @@ function SettingsBody({
 					)}
 				</>
 			)}
+
+			{section === "planning" && <WorkItemsSettingsSection projectId={projectId} />}
+
+			{section === "skills" && <ProjectSkillsSettingsSection projectId={projectId} />}
+			{section === "access" && <ProjectAccessSettingsSection projectId={projectId} />}
 
 			{section === "intake" && (
 				<>
@@ -783,4 +958,34 @@ function buildRoleAgentConfig(
 	if (mode) next.mode = mode;
 	else delete next.mode;
 	return Object.keys(next).length > 0 ? next : undefined;
+}
+
+/**
+ * The three-value autonomy control shared by every git action. A dedicated
+ * component rather than three inline menus so "automatic / ask me / never"
+ * always reads the same way for local commits, pushes, and merges.
+ */
+function GitPolicySelect({
+	ariaLabel,
+	onChange,
+	t,
+	value,
+}: {
+	ariaLabel: string;
+	onChange: (value: GitActionPolicy) => void;
+	t: TFunction;
+	value: GitActionPolicy;
+}) {
+	return (
+		<SettingsOptionMenu<GitActionPolicy>
+			value={value}
+			onChange={onChange}
+			options={[
+				{ value: "automatic", label: t("settings.project.gitPolicyAutomatic") },
+				{ value: "require_approval", label: t("settings.project.gitPolicyRequireApproval") },
+				{ value: "never", label: t("settings.project.gitPolicyNever") },
+			]}
+			aria-label={ariaLabel}
+		/>
+	);
 }

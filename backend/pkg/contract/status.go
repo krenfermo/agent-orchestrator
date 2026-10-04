@@ -31,6 +31,7 @@ const (
 	StatusNeedsInput       SessionStatus = "needs_input"
 	StatusExited           SessionStatus = "exited"
 	StatusIdle             SessionStatus = "idle"
+	StatusCompleted        SessionStatus = "completed"
 	StatusTerminated       SessionStatus = "terminated"
 	StatusNoSignal         SessionStatus = "no_signal"
 )
@@ -42,6 +43,14 @@ type SessionFacts struct {
 	HasSignal      bool
 	SignalExpected bool
 	IsTerminated   bool
+	// TurnCompleted is the durable proof that the agent itself reported the
+	// end of the work it was given, and that nothing has started a new turn
+	// since. It is written from a reported turn-completion boundary and
+	// cleared when the next turn starts; it is never inferred from quietness,
+	// from a stopped runtime, or from the passage of time. Without it, a task
+	// that finished is indistinguishable from one that merely went quiet, and
+	// both read Idle.
+	TurnCompleted bool
 }
 
 // CIState is the aggregate CI state of a pull request.
@@ -125,6 +134,19 @@ func DeriveStatus(
 		return scmStatus
 	}
 
+	// A finished task outranks both no_signal and idle, and only those two.
+	// Every failure, teardown and attention state above has already returned:
+	// terminated/merged, exited, needs_input, and the whole pull-request
+	// pipeline (a failing CI or a requested change is what the operator must
+	// see, not the fact that the agent stopped typing). What is left here is a
+	// session with no work in flight and no open complaint, so the completion
+	// receipt is the only thing that separates "it did the work" from "it is
+	// sitting there". It carries no timestamp comparison on purpose: a durable
+	// fact does not decay, so the status survives any amount of inactivity and
+	// any number of restarts until a new turn replaces it.
+	if session.TurnCompleted {
+		return StatusCompleted
+	}
 	if session.SignalExpected && !session.HasSignal &&
 		now.Sub(session.LastActivityAt) > noSignalGrace {
 		return StatusNoSignal

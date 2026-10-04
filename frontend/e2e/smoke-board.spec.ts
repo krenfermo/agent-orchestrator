@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { installFakeAgent } from "./support/fake-bridge";
+import { installFakeAgent, installFakeIdentity } from "./support/fake-bridge";
 
 // BRD-* RENDERER SMOKE (issue #2483, renderer slice). dev:web + fake bridge —
 // does NOT hit the real daemon/storage/API/preload/PTY/FS. Those boundaries are
@@ -13,6 +13,19 @@ const columnCard = (column: string, id: string) =>
 	`[data-testid="board-column"][data-column="${column}"] [data-session-id="${id}"]`;
 
 // #2483 BRD-002.
+
+// Every renderer spec boots past identity resolution first.
+//
+// The renderer resolves the current user on mount and renders the sign-in
+// screen IN PLACE OF the shell for any answer it cannot read as a user — and
+// these specs run with no daemon, so an unstubbed identity turns every
+// assertion in this file into "element not found" against a login form. The
+// hook is here rather than inside each test because a spec that forgets it does
+// not fail loudly; it fails describing the wrong thing.
+test.beforeEach(async ({ page }) => {
+	await installFakeIdentity(page);
+});
+
 test("renderer: card moves columns when its status changes @T0 @BRD", async ({ page }) => {
 	await installFakeAgent(page, { workers: [{ id: "mover", title: "Wandering worker", status: "working" }] });
 	await page.goto("/#/");

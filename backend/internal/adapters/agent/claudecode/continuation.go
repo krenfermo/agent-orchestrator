@@ -125,3 +125,25 @@ func canonicalClaudeNativeSessionID(value string) (string, error) {
 	}
 	return parsed.String(), nil
 }
+
+// CompactionDirective implements ports.ConversationCompactor.
+//
+// Claude Code replaces the live conversation with a summary of it when the
+// prompt is the `/compact` command, and takes free text after it as guidance
+// for what that summary must keep. So the directive is a prompt like any other
+// -- it goes through the same guarded send path, the same submission
+// confirmation and the same activity signals as a fix prompt does, and needs
+// no new transport.
+//
+// The focus is trimmed and flattened to a single line. A directive is a
+// command line: a newline in it would submit the first line as the command and
+// leave the rest sitting in the composer, which is exactly the
+// loaded-not-submitted shape AO spends a lot of code refusing to mistake for a
+// delivery.
+func (p *Plugin) CompactionDirective(focus string) (string, bool) {
+	trimmed := strings.Join(strings.Fields(focus), " ")
+	if trimmed == "" {
+		return "/compact", true
+	}
+	return "/compact " + trimmed, true
+}

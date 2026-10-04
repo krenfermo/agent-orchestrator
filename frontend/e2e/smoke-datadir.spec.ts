@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { installFakeAgent, installFakeBridge } from "./support/fake-bridge";
+import { installFakeAgent, installFakeBridge, installFakeIdentity } from "./support/fake-bridge";
 
 // Data-directory invariant (issue #2483, RENDERER SLICE). dev:web + fake
 // bridge — this asserts only the renderer's readiness reflection, NOT the on-disk
@@ -16,6 +16,19 @@ import { installFakeAgent, installFakeBridge } from "./support/fake-bridge";
 // config skeleton are initialized, and the renderer reflects that as a ready
 // status and a hydrated board. This locks the renderer side of the invariant;
 // the ~/.ao filesystem assertions stay in the pod data-dir script.
+
+
+// Every renderer spec boots past identity resolution first.
+//
+// The renderer resolves the current user on mount and renders the sign-in
+// screen IN PLACE OF the shell for any answer it cannot read as a user — and
+// these specs run with no daemon, so an unstubbed identity turns every
+// assertion in this file into "element not found" against a login form. The
+// hook is here rather than inside each test because a spec that forgets it does
+// not fail loudly; it fails describing the wrong thing.
+test.beforeEach(async ({ page }) => {
+	await installFakeIdentity(page);
+});
 
 test("renderer: reflects daemon data-dir readiness @P0 @DATADIR", async ({ page }) => {
 	// Use installFakeAgent so the board card is served through the

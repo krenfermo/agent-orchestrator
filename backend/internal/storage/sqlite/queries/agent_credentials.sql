@@ -1,0 +1,285 @@
+-- P4-I: agent_credentials. No trailing ORDER BY/LIMIT -- see users.sql's note
+-- on the sqlc v1.31.1 SQLite codegen bug; sort/limit in Go.
+
+-- name: InsertAgentCredential :one
+INSERT INTO agent_credentials (
+    id, token_hash, role, user_id, project_id, session_id,
+    workflow_run_id, workflow_step_id, review_run_id,
+    runtime_handle, runtime_instance_id, generation, permissions,
+    created_at, expires_at, last_seen_at, revoked_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, token_hash, role, user_id, project_id, session_id,
+    workflow_run_id, workflow_step_id, review_run_id,
+    runtime_handle, runtime_instance_id, generation, permissions,
+    created_at, expires_at, last_seen_at, revoked_at;
+
+-- name: GetAgentCredentialByTokenHash :one
+SELECT id, token_hash, role, user_id, project_id, session_id,
+    workflow_run_id, workflow_step_id, review_run_id,
+    runtime_handle, runtime_instance_id, generation, permissions,
+    created_at, expires_at, last_seen_at, revoked_at
+FROM agent_credentials WHERE token_hash = ?;
+
+-- name: ListAgentCredentialsForReviewRun :many
+SELECT id, token_hash, role, user_id, project_id, session_id,
+    workflow_run_id, workflow_step_id, review_run_id,
+    runtime_handle, runtime_instance_id, generation, permissions,
+    created_at, expires_at, last_seen_at, revoked_at
+FROM agent_credentials WHERE review_run_id = ?;
+
+-- name: TouchAgentCredentialLastSeen :execrows
+UPDATE agent_credentials SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL;
+
+-- name: RevokeAgentCredentialsForReviewRun :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE review_run_id = ? AND review_run_id != '' AND revoked_at IS NULL;
+
+-- name: RevokeAgentCredentialsForSession :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE session_id = ? AND session_id != '' AND revoked_at IS NULL;
+
+-- The two queries below derive a credential lifetime from the review run it was
+-- minted for, which is what makes revocation recoverable: the obligation is not
+-- a queue entry that can be lost, it is re-derivable from durable rows on every
+-- pass. NOT EXISTS rather than a status comparison so a review run whose row is
+-- gone also counts as closed -- only a run AO still considers RUNNING keeps its
+-- reviewer able to speak, and nothing else ever does.
+--
+-- The predicate deliberately never anticipates closure. A reviewer whose run is
+-- still running keeps its credential however long it takes, because taking it
+-- away early recreates the exact failure this credential exists to prevent: a
+-- finished review that cannot be recorded.
+
+-- name: ListRevocableAgentCredentials :many
+SELECT id, review_run_id, runtime_handle
+FROM agent_credentials
+WHERE revoked_at IS NULL
+  AND review_run_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run r
+    WHERE r.id = agent_credentials.review_run_id AND r.status = 'running'
+  );
+
+-- name: RevokeClosedReviewRunAgentCredentials :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE revoked_at IS NULL
+  AND review_run_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run r
+    WHERE r.id = agent_credentials.review_run_id AND r.status = 'running'
+  );
+
+-- name: RevokeAgentCredentialsForClosedReviewRun :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE review_run_id = ?
+  AND review_run_id != ''
+  AND revoked_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run r
+    WHERE r.id = agent_credentials.review_run_id AND r.status = 'running'
+  );
+
+-- P5-A phase 2C: worker credentials.
+--
+-- A worker's session does not exist until the spawn that creates it returns,
+-- and the credential has to be in that spawn's environment. So a worker
+-- credential is minted UNBOUND and bound exactly once, by the statement below,
+-- when the launch confirms which session it produced.
+--
+-- The guard is what keeps "a binding is not a hint" true. session_id = ''
+-- means the credential has never been bound and AgentAuthority.MayReachSession
+-- already refuses every session route for it, so an unbound credential is inert
+-- rather than permissive. The WHERE clause can therefore only ever move it from
+-- unbound to bound, once: a second attempt matches no row, and a revoked
+-- credential can never be resurrected into a binding.
+--
+-- name: BindAgentCredentialSession :execrows
+UPDATE agent_credentials SET session_id = ?
+WHERE id = ?
+  AND session_id = ''
+  AND revoked_at IS NULL;
+
+-- name: RevokeAgentCredential :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE id = ? AND revoked_at IS NULL;
+
+-- The worker half of the derived-lifetime rule the two review-run queries above
+-- implement, and deliberately the same shape:
+--
+--     a worker credential may live exactly as long as its work step is running.
+--
+-- NOT EXISTS rather than a state comparison so a step whose row is gone also
+-- counts as finished. `pending` is excluded from the live set on purpose: a step
+-- that has gone back to pending is not the launch this credential was minted
+-- for, and a credential outliving its own launch is the whole failure mode.
+--
+-- name: ListRevocableWorkerAgentCredentials :many
+SELECT id, workflow_step_id, runtime_handle
+FROM agent_credentials
+WHERE revoked_at IS NULL
+  AND role = 'worker'
+  AND workflow_step_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM workflow_steps s
+    WHERE s.id = agent_credentials.workflow_step_id
+      AND s.state IN ('ready', 'running', 'waiting')
+  );
+
+-- name: RevokeStaleWorkerAgentCredentials :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE revoked_at IS NULL
+  AND role = 'worker'
+  AND workflow_step_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM workflow_steps s
+    WHERE s.id = agent_credentials.workflow_step_id
+      AND s.state IN ('ready', 'running', 'waiting')
+  );
+
+-- REPLACEMENT. The sweep above cannot discharge this one: when a step is
+-- re-dispatched, the step is still running, so its predecessor's credential
+-- still satisfies the "may live" predicate even though the launch it was minted
+-- for is over.
+--
+-- So a replacement ends its predecessors explicitly, and the discriminator is
+-- the ATTEMPT rather than the step: every worker credential for this step that
+-- belongs to a DIFFERENT attempt is, by definition, one whose launch has been
+-- superseded. Called from exactly one place -- the launcher, as it mints the new
+-- one -- which is what keeps this from becoming the "remember to revoke at every
+-- transition" design the reconciler exists to avoid.
+--
+-- REPLACEMENT. The sweep above cannot discharge this one: when a step is
+-- re-dispatched, the step is still running, so its predecessor's credential
+-- still satisfies the "may live" predicate even though the launch it was minted
+-- for is over.
+--
+-- So a replacement ends its predecessors explicitly, and the discriminator is
+-- the ATTEMPT rather than the step: every worker credential for this step that
+-- belongs to a DIFFERENT attempt is one whose launch has been superseded.
+-- Called from exactly one place, the launcher, as it mints the new one, which
+-- is what keeps this from becoming the "remember to revoke at every transition"
+-- design the reconciler exists to avoid.
+--
+-- KEEP THIS FILE PURE ASCII. sqlc v1.31.1 slices these statements by rune index
+-- against a byte offset, so a single non-ASCII character anywhere above -- an
+-- em dash in a comment is enough -- silently truncates a later statement
+-- mid-token and produces SQL that fails at runtime with "incomplete input".
+--
+-- name: RevokeSupersededWorkerAgentCredentials :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE workflow_step_id = ?
+  AND workflow_step_id != ''
+  AND role = 'worker'
+  AND runtime_instance_id != ?
+  AND revoked_at IS NULL;
+
+-- P5-A phase 2C, the central authority fence.
+--
+-- Answers, from durable rows and at the moment of the request, whether one
+-- worker credential is STILL the authorized one. It is a read rather than a
+-- reliance on revocation having already run, which is the whole point: a sweep
+-- that has not happened yet must not leave an interval in which a finished
+-- attempt can still act.
+--
+-- Four conditions, and each closes a different way authority ends:
+--   * not revoked -- the eager close and the sweep still do their work, this
+--     simply does not depend on them having done it yet;
+--   * bound, and bound to the session the step is CURRENTLY dispatched into --
+--     so a credential whose session was replaced cannot act on the new one;
+--   * the step is live -- so a completed, failed, cancelled or reopened-to-
+--     pending step's credential is refused with no window at all;
+--   * the attempt is the step's LATEST -- so a superseded launch, or one whose
+--     step was reopened into a new generation, cannot act even while the step
+--     is running again.
+--
+-- MAX(attempt_number) rather than ORDER BY/LIMIT: see this file's header on the
+-- sqlc SQLite codegen bug. KEEP THIS FILE PURE ASCII.
+--
+-- name: IsWorkerCredentialAuthorized :one
+SELECT EXISTS (
+  SELECT 1
+  FROM agent_credentials c
+  JOIN workflow_steps s ON s.id = c.workflow_step_id
+  WHERE c.id = ?
+    AND c.role = 'worker'
+    AND c.revoked_at IS NULL
+    AND c.session_id != ''
+    AND c.session_id = COALESCE(s.session_id, '')
+    AND s.state IN ('ready', 'running', 'waiting')
+    AND c.runtime_instance_id != ''
+    AND c.runtime_instance_id = (
+      SELECT a.id FROM workflow_attempts a
+      WHERE a.workflow_step_id = s.id
+        AND a.attempt_number = (
+          SELECT MAX(a2.attempt_number) FROM workflow_attempts a2
+          WHERE a2.workflow_step_id = s.id
+        )
+    )
+) AS authorized;
+
+-- P5: ADOPTION, for the window between Spawn and bind.
+--
+-- A worker credential is minted unbound because the session it will speak for
+-- does not exist until the spawn returns. The daemon can die in that window,
+-- and what it leaves behind is a real worker running in a real pane, holding a
+-- credential file, with a row that names no session -- so MayReachSession
+-- refuses every session route and that worker can never report on its own work.
+-- Recovery adopted the SESSION and left the credential exactly as it was, which
+-- is why the state was terminal.
+--
+-- Adoption is allowed only on proof, never on a guess, and the two queries below
+-- are the two halves of that proof.
+--
+-- The first lists what could be adopted. A row qualifies only if it is a worker
+-- credential for THIS step that has never been bound and has not been revoked.
+-- The revocation check is what makes this generation-safe without a second
+-- fence: a replacement launch revokes its predecessors as it mints its own
+-- credential, so a superseded launch's row is already gone from this result and
+-- an old attempt can never adopt its way back into authority. A step with more
+-- than one adoptable row is one AO cannot tell apart, and the caller refuses.
+--
+-- name: ListAdoptableWorkerAgentCredentials :many
+SELECT id, workflow_run_id, workflow_step_id, project_id, runtime_handle, runtime_instance_id
+FROM agent_credentials
+WHERE role = 'worker'
+  AND revoked_at IS NULL
+  AND session_id = ''
+  AND workflow_step_id = ?
+  AND workflow_step_id != '';
+
+-- The second is the adoption itself: one guarded write that binds the session
+-- AND re-points the attempt fence, because both are needed and neither is
+-- sufficient.
+--
+-- Binding alone is not enough. IsWorkerCredentialAuthorized requires a worker
+-- credential to name the step's NEWEST attempt, and an adoption opens a new
+-- attempt for the launch it adopts -- so a credential bound but still fenced to
+-- the crashed launch's attempt is refused by the very next request. Re-pointing
+-- it is truthful rather than a loosening: the attempt being adopted onto
+-- describes the same physical worker the credential was minted for.
+--
+-- The guard is the same one BindAgentCredentialSession uses, for the same
+-- reason: session_id = '' can only ever move to bound, once. A second adopter,
+-- a racing bind, or a revocation that landed first all match zero rows, and the
+-- caller reads that as "somebody else decided this" rather than as success.
+--
+-- name: AdoptWorkerAgentCredential :execrows
+UPDATE agent_credentials SET session_id = ?, runtime_instance_id = ?
+WHERE id = ?
+  AND role = 'worker'
+  AND session_id = ''
+  AND revoked_at IS NULL;
+
+-- The other half of "prove it": a session that ALREADY has a live worker
+-- credential must not be given a second one. Two live credentials for one pane
+-- is two identities AO cannot tell apart, which is the state adoption exists to
+-- avoid rather than to create.
+--
+-- name: CountLiveWorkerAgentCredentialsForSession :one
+SELECT COUNT(*) AS live
+FROM agent_credentials
+WHERE role = 'worker'
+  AND revoked_at IS NULL
+  AND session_id = ?
+  AND session_id != '';

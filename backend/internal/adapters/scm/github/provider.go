@@ -35,7 +35,21 @@ type ProviderOptions struct {
 	GraphQLURL         string
 	UserAgent          string
 	Logger             *slog.Logger
+	// HostAliases resolves SSH host aliases (git@github-nuevo:owner/repo) to
+	// the hostname ssh would actually connect to, so a second-account remote
+	// is recognized as GitHub instead of being dropped as an unsupported
+	// origin. Nil installs the standard ssh-config resolver; tests that want
+	// no filesystem or subprocess access inject a fake or NoHostAliases.
+	HostAliases HostAliasResolver
 }
+
+// NoHostAliases is the resolver that resolves nothing. It exists so a test can
+// state "no alias resolution" explicitly rather than by leaving a field nil,
+// which means the opposite.
+type NoHostAliases struct{}
+
+// ResolveHost always reports that the name is not an alias.
+func (NoHostAliases) ResolveHost(string) (string, bool) { return "", false }
 
 // Provider observes one GitHub pull request and returns a normalized
 // ports.PRObservation for the PR Manager to persist. There is no polling
@@ -44,6 +58,7 @@ type ProviderOptions struct {
 type Provider struct {
 	client           *Client
 	logger           *slog.Logger
+	aliases          HostAliasResolver
 	identityMu       sync.Mutex
 	identity         ports.SCMIdentity
 	identityResolved bool
@@ -75,7 +90,11 @@ func NewProvider(opts ProviderOptions) (*Provider, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Provider{client: c, logger: logger}, nil
+	aliases := opts.HostAliases
+	if aliases == nil {
+		aliases = NewSSHHostAliases()
+	}
+	return &Provider{client: c, logger: logger, aliases: aliases}, nil
 }
 
 // SCMCredentialsAvailable checks whether this provider can obtain a token. The

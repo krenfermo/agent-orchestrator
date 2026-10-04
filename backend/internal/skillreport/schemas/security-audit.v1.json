@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-orchestrator.dev/schemas/security-audit/audit.v1.json",
+  "title": "Consolidated security audit report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "projectId", "skillId", "skillVersion", "auditRunId", "startedAt", "endedAt", "completeness", "summary", "modes", "findings", "limitations"],
+  "properties": {
+    "schemaVersion": { "const": "ao.security-audit/v1" },
+    "projectId": { "type": "string" },
+    "skillId": { "type": "string" },
+    "skillVersion": { "type": "string" },
+    "auditRunId": { "type": "string", "pattern": "^skr-[0-9a-f]{24}$" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "endedAt": { "type": "string", "format": "date-time" },
+    "completeness": { "enum": ["complete", "partial"] },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modesPlanned", "modesVerified", "findings", "bySeverity", "byMode", "statements"],
+      "properties": {
+        "modesPlanned": { "type": "integer", "minimum": 0 },
+        "modesVerified": { "type": "integer", "minimum": 0 },
+        "findings": { "type": "integer", "minimum": 0 },
+        "bySeverity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["critical", "high", "medium", "low", "info"],
+          "properties": {
+            "critical": { "type": "integer", "minimum": 0 },
+            "high": { "type": "integer", "minimum": 0 },
+            "medium": { "type": "integer", "minimum": 0 },
+            "low": { "type": "integer", "minimum": 0 },
+            "info": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "byMode": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode", "findings"],
+            "properties": {
+              "mode": { "type": "string" },
+              "findings": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "statements": { "type": "array", "items": { "type": "string", "maxLength": 400 } }
+      }
+    },
+    "modes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mode", "executor", "status", "verified"],
+        "properties": {
+          "mode": { "type": "string" },
+          "executor": { "enum": ["tool", "agent"] },
+          "tool": { "type": "string" },
+          "status": { "enum": ["succeeded", "failed", "refused", "cancelled", "not_started", "refused_before_start", "busy"] },
+          "verified": { "type": "boolean" },
+          "runId": { "type": "string", "pattern": "^skr-[0-9a-f]{24}$" },
+          "reportSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "errorCode": { "type": "string" },
+          "errorMessage": { "type": "string", "maxLength": 2000 },
+          "findingCount": { "type": "integer", "minimum": 0 },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["statement"],
+            "properties": {
+              "statement": { "type": "string", "maxLength": 400 },
+              "filesStaged": { "type": "integer", "minimum": 0 },
+              "filesExamined": { "type": "integer", "minimum": 0 },
+              "filesSkipped": { "type": "integer", "minimum": 0 },
+              "reconciled": { "type": "boolean" },
+              "dependencies": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "limitations": { "type": "array", "items": { "type": "string" } },
+          "usage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source"],
+            "properties": {
+              "source": { "enum": ["provider-reported", "wall-clock-only"] },
+              "durationMs": { "type": "integer", "minimum": 0 },
+              "inputTokens": { "type": "integer", "minimum": 0 },
+              "outputTokens": { "type": "integer", "minimum": 0 },
+              "costUsd": { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "confidence", "category", "title", "path", "recommendation", "sources"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^AUD-[0-9]+$" },
+          "severity": { "enum": ["info", "low", "medium", "high", "critical"] },
+          "confidence": { "enum": ["confirmed", "probable", "possible"] },
+          "category": { "type": "string" },
+          "title": { "type": "string", "maxLength": 300 },
+          "path": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "recommendation": { "type": "string" },
+          "sources": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mode", "runId", "ruleId", "severity"],
+              "properties": {
+                "mode": { "type": "string" },
+                "runId": { "type": "string", "pattern": "^skr-[0-9a-f]{24}$" },
+                "ruleId": { "type": "string" },
+                "severity": { "enum": ["info", "low", "medium", "high", "critical"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

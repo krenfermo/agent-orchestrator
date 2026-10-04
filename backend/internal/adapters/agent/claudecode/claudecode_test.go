@@ -581,7 +581,7 @@ func countClaudeHookCommand(groups []hooksjson.MatcherGroup, command string) int
 	count := 0
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
-			if hook.Command == command {
+			if claudeHooks.Matches(hook.Command, command) {
 				count++
 			}
 		}
@@ -594,7 +594,7 @@ func countClaudeHookCommand(groups []hooksjson.MatcherGroup, command string) int
 func matcherForCommand(groups []hooksjson.MatcherGroup, command string) *string {
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
-			if hook.Command == command {
+			if claudeHooks.Matches(hook.Command, command) {
 				return group.Matcher
 			}
 		}
@@ -922,6 +922,40 @@ func TestEnsureWorkspaceTrustedIsIdempotentAndNoWriteWhenAlreadyTrusted(t *testi
 	}
 	if !info1.ModTime().Equal(info2.ModTime()) {
 		t.Fatal("expected no rewrite when already trusted")
+	}
+}
+
+// TestResolveClaudeConfigPathPrefersIsolatedEnv is Checkpoint 8P-E.3's
+// regression: PreLaunch must write the trust record into the same
+// CLAUDE_CONFIG_DIR the spawned subprocess will itself read, not the
+// daemon's own os.UserHomeDir(). A real autonomous run reproduced a worker
+// stuck forever at Claude Code's interactive trust prompt because the
+// record landed in the wrong file.
+func TestResolveClaudeConfigPathPrefersIsolatedEnv(t *testing.T) {
+	got, err := resolveClaudeConfigPath(map[string]string{"CLAUDE_CONFIG_DIR": "/isolated/users/u1/providers/claude-code"})
+	if err != nil {
+		t.Fatalf("resolveClaudeConfigPath: %v", err)
+	}
+	want := filepath.Join("/isolated/users/u1/providers/claude-code", ".claude.json")
+	if got != want {
+		t.Fatalf("resolveClaudeConfigPath = %q, want %q", got, want)
+	}
+}
+
+func TestResolveClaudeConfigPathFallsBackWithoutIsolatedEnv(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir: %v", err)
+	}
+	for _, env := range []map[string]string{nil, {}, {"CLAUDE_CONFIG_DIR": "  "}} {
+		got, err := resolveClaudeConfigPath(env)
+		if err != nil {
+			t.Fatalf("resolveClaudeConfigPath(%#v): %v", env, err)
+		}
+		want := filepath.Join(home, ".claude.json")
+		if got != want {
+			t.Fatalf("resolveClaudeConfigPath(%#v) = %q, want %q", env, got, want)
+		}
 	}
 }
 

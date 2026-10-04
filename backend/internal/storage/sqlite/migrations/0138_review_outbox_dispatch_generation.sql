@@ -1,0 +1,41 @@
+-- 0138: the outbox row remembers WHICH dispatch currently owns it.
+--
+-- 0137 made the failed -> pending reopen name the failure it was resuming. The
+-- same reuse problem exists one step earlier, on the write that creates a
+-- failure at all.
+--
+-- A dispatch claims the row pending -> dispatched, then does its work. If it
+-- pauses after writing its abandon evidence and its reviewer_launch_error F1 but
+-- before failing the row, recovery can release the claim (dispatched ->
+-- pending) and a second dispatch can take it (pending -> dispatched again). The
+-- stale first dispatch then wakes up and fails the row -- and a predicate of
+-- id + status = dispatched matches, because the row IS dispatched. It is simply
+-- dispatched to somebody else.
+--
+-- The damage is worse than a lost update: F1 is stamped onto a generation that
+-- never failed, whose reviewer may be alive, and a human resume of F1 would then
+-- reopen it and start yet another dispatch over a live one.
+--
+-- dispatch_generation is the claim token. It is the id of the
+-- review_dispatch_authorized checkpoint that authorised the claim -- durable,
+-- written BEFORE the claim, and already the artifact the whole launch protocol
+-- reconstructs ownership from. The claim stamps it in the same statement that
+-- takes the row, and every ownership-dependent transition off `dispatched`
+-- names it in its own WHERE clause. A dispatch that no longer owns the row
+-- updates zero rows.
+--
+-- Empty string means no claim token is recorded: a pending row, an
+-- acknowledged/failed one, a row claimed by a path that does not use this
+-- protocol, or one claimed before this column existed. Every transition that is
+-- not a claim clears it back to empty, so a token can never outlive the claim
+-- it names.
+
+-- +goose Up
+-- +goose StatementBegin
+ALTER TABLE workflow_outbox ADD COLUMN dispatch_generation TEXT NOT NULL DEFAULT '';
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+ALTER TABLE workflow_outbox DROP COLUMN dispatch_generation;
+-- +goose StatementEnd

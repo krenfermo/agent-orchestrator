@@ -175,16 +175,28 @@ func TestPollLeavesOtherHarnessesUntouched(t *testing.T) {
 	}
 }
 
-func TestPollSkipsFreshActiveAndOutputFailures(t *testing.T) {
+// staleGatedAgent is a TerminalActivityDetector that has NOT opted into
+// continuous detection, so the observer only re-reads its panes once an
+// `active` reading has gone stale. Codex used to be this test's stand-in for
+// that branch; it opts into continuous detection now (its hook set cannot clear
+// a latched waiting_input on its own), so the branch needs an agent of its own
+// rather than losing its coverage.
+type staleGatedAgent struct{ ports.Agent }
+
+func (staleGatedAgent) DetectTerminalActivity(string) (domain.ActivityState, bool) {
+	return domain.ActivityIdle, true
+}
+
+func TestPollSkipsFreshActiveForNonContinuousDetectors(t *testing.T) {
 	now := time.Unix(500, 0).UTC()
-	fresh := activeSession(now, domain.HarnessCodex)
+	fresh := activeSession(now, domain.HarnessClaudeCode)
 	fresh.Activity.LastActivityAt = now.Add(-time.Minute)
-	runtime := &fakeRuntime{err: errors.New("capture failed")}
+	runtime := &fakeRuntime{output: "anything"}
 	observer := New(
 		fakeSessions{rows: []domain.SessionRecord{fresh}},
 		&fakeSink{},
 		runtime,
-		fakeAgents{domain.HarnessCodex: codex.New()},
+		fakeAgents{domain.HarnessClaudeCode: staleGatedAgent{claudecode.New()}},
 		Config{Clock: func() time.Time { return now }, Logger: testLogger()},
 	)
 	if err := observer.Poll(context.Background()); err != nil {
@@ -194,10 +206,62 @@ func TestPollSkipsFreshActiveAndOutputFailures(t *testing.T) {
 		t.Fatalf("fresh session output calls = %d, want 0", runtime.calls)
 	}
 
-	stale := activeSession(now, domain.HarnessCodex)
+	stale := activeSession(now, domain.HarnessClaudeCode)
 	observer.sessions = fakeSessions{rows: []domain.SessionRecord{stale}}
 	if err := observer.Poll(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if runtime.calls != 1 {
+		t.Fatalf("stale session output calls = %d, want 1", runtime.calls)
+	}
+}
+
+// A capture failure is never fatal and never produces a signal: the next tick
+// simply tries again.
+func TestPollToleratesOutputFailures(t *testing.T) {
+	now := time.Unix(500, 0).UTC()
+	sink := &fakeSink{}
+	runtime := &fakeRuntime{err: errors.New("capture failed")}
+	observer := New(
+		fakeSessions{rows: []domain.SessionRecord{activeSession(now, domain.HarnessCodex)}},
+		sink,
+		runtime,
+		fakeAgents{domain.HarnessCodex: codex.New()},
+		Config{Clock: func() time.Time { return now }, Logger: testLogger()},
+	)
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.signals) != 0 {
+		t.Fatalf("signals = %+v, want none after a failed capture", sink.signals)
+	}
+}
+
+// The incident's session shape: Codex latched at waiting_input by its
+// PermissionRequest hook while the agent goes on working. The observer must
+// look (waiting_input is not a state Codex can leave on its own) and must
+// re-assert `active` from Codex's own in-flight marker.
+func TestPollClearsLatchedCodexWaitingInputWhileTheAgentWorks(t *testing.T) {
+	now := time.Unix(500, 0).UTC()
+	latched := activeSession(now, domain.HarnessCodex)
+	latched.Activity.State = domain.ActivityWaitingInput
+	sink := &fakeSink{}
+	runtime := &fakeRuntime{output: "• Working (2m 10s • esc to interrupt)\n› Add tests\n\ngpt-5.6-sol low · ~/project\n"}
+	observer := New(
+		fakeSessions{rows: []domain.SessionRecord{latched}},
+		sink,
+		runtime,
+		fakeAgents{domain.HarnessCodex: codex.New()},
+		Config{Clock: func() time.Time { return now }, Logger: testLogger()},
+	)
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.signals) != 1 {
+		t.Fatalf("signals = %+v, want exactly 1", sink.signals)
+	}
+	if got := sink.signals[0].State; got != domain.ActivityActive {
+		t.Fatalf("reconciled state = %q, want active", got)
 	}
 }
 

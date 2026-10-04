@@ -87,6 +87,15 @@ type collectorStore interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
 	ListAllSessions(context.Context) ([]domain.SessionRecord, error)
 	UpsertUsageBinding(context.Context, domain.UsageBindingRecord) (domain.UsageBindingRecord, error)
+	// GetUsageBindingBySubject and FinalizeUsageBindingsForSubject are the
+	// non-session half of the contract (P3-E). They exist so a runtime pane can
+	// bind and finalize ITSELF without the session-shaped calls above, which
+	// would end a worker's collection on a reviewer's exit.
+	GetUsageBindingBySubject(context.Context, domain.UsageSubject, domain.AgentHarness, string) (domain.UsageBindingRecord, bool, error)
+	FinalizeUsageBindingsForSubject(context.Context, domain.UsageSubject, time.Time) (int64, error)
+	// RecordDirectUsageEvent stores a usage fact that arrived in a provider
+	// RESPONSE rather than in a transcript — the planner's only shape.
+	RecordDirectUsageEvent(context.Context, int64, domain.ModelUsageEvent, time.Time) error
 	GetUsageBinding(context.Context, domain.SessionID, domain.AgentHarness, string) (domain.UsageBindingRecord, bool, error)
 	ListUsageBindingsForSession(context.Context, domain.SessionID) ([]domain.UsageBindingRecord, error)
 	FinalizeUsageBindingsForSessionLaunch(context.Context, domain.SessionID, string, time.Time, time.Time) ([]domain.UsageBindingRecord, error)

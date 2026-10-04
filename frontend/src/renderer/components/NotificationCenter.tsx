@@ -7,6 +7,8 @@ import {
 	BellRing,
 	CheckCheck,
 	CircleAlert,
+	CircleCheckBig,
+	CircleX,
 	GitMerge,
 	GitPullRequestArrow,
 	GitPullRequestClosed,
@@ -14,6 +16,10 @@ import {
 	LoaderCircle,
 	MessageSquareDot,
 	RotateCcw,
+	ShieldAlert,
+	Wrench,
+	TriangleAlert,
+	Workflow,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMarkAllNotificationsReadMutation, useNotificationsQuery } from "../hooks/useNotificationsQuery";
@@ -643,6 +649,26 @@ function notificationIcon(type: string) {
 			return GitMerge;
 		case "pr_closed_unmerged":
 			return GitPullRequestClosed;
+		case "task_completed":
+			return CircleCheckBig;
+		case "workflow_completed":
+			return Workflow;
+		case "task_needs_attention":
+		case "workflow_needs_attention":
+			return TriangleAlert;
+		case "task_failed":
+		case "workflow_failed":
+			return CircleX;
+		// A pending decision is the same shape as needs_input because it is the
+		// same situation to the person reading it: the agent is stopped and
+		// only they can unstick it.
+		case "human_question_required":
+			return MessageSquareDot;
+		// AO tried to fix this by itself and ran out of attempts.
+		case "repair_exhausted":
+			return Wrench;
+		case "integration_failed":
+			return ShieldAlert;
 		default:
 			return Bell;
 	}
@@ -659,7 +685,29 @@ function notificationIconClass(type: string): string {
 			return "text-success";
 		case "pr_merged":
 			return "text-[#a371f7]";
+		// Both completions read as success. They share the token with
+		// ready_to_merge rather than inventing a colour: the shapes already tell
+		// a finished task from a mergeable PR, and a fifth hue in one list would
+		// stop meaning anything.
 		case "pr_closed_unmerged":
+			return "text-error";
+		case "task_completed":
+		case "workflow_completed":
+			return "text-success";
+		// A stop is amber like needs_input — someone has to act — and a failure
+		// is red like a closed PR: an outcome, and not the one anyone wanted.
+		case "task_needs_attention":
+		case "workflow_needs_attention":
+			return "text-warning";
+		case "task_failed":
+		case "workflow_failed":
+			return "text-error";
+		// Same two-colour rule as above: something waiting on a person is
+		// amber, something that went wrong is red.
+		case "human_question_required":
+		case "repair_exhausted":
+			return "text-warning";
+		case "integration_failed":
 			return "text-error";
 		default:
 			return "text-muted-foreground";

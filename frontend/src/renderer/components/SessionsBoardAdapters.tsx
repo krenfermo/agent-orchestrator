@@ -49,9 +49,14 @@ export function sessionsBoardLabels(t: TFunction): BoardSplitLaneLabels {
 		columnAria: (label) => t("shell.sessionsAria", { label }),
 		countSessions: (count, label) => t("shell.countSessionsAria", { count, label }),
 		idleWorkingAria: t("shell.idleWorkingSessions"),
-		laneSummary: (primary, secondary) => t("shell.laneSummaryAria", { primary, secondary }),
+		laneSummary: (laneLabels) => t("shell.laneSummaryAria", { labels: laneLabels.join(" / ") }),
 		readyMergedAria: t("shell.readyMergedSessions"),
 		tones: {
+			completed: {
+				label: t("status.completed"),
+				countLabel: t("shell.countLabel.completed"),
+				regionLabel: t("shell.completedSessions"),
+			},
 			idle: {
 				label: t("status.idle"),
 				countLabel: t("shell.countLabel.idle"),

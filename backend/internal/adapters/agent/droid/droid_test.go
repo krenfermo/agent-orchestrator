@@ -339,6 +339,13 @@ func TestSessionInfoFalseWhenNoHookMetadata(t *testing.T) {
 	}
 }
 
+// droidHookArgs is the installed form of a canonical `ao hooks droid ...`
+// command minus its executable: installs resolve the leading `ao` to an
+// absolute launcher path, so only the argument tail is a stable substring.
+func droidHookArgs(command string) string {
+	return strings.TrimPrefix(command, "ao ")
+}
+
 func TestGetAgentHooksInstallsIntoFactoryHooksJSON(t *testing.T) {
 	plugin := &Plugin{resolvedBinary: "droid"}
 	ws := t.TempDir()
@@ -355,7 +362,7 @@ func TestGetAgentHooksInstallsIntoFactoryHooksJSON(t *testing.T) {
 	}
 	body := string(data)
 	for _, spec := range droidManagedHooks {
-		if !strings.Contains(body, spec.Command) {
+		if !strings.Contains(body, droidHookArgs(spec.Command)) {
 			t.Fatalf("hooks.json missing managed command %q:\n%s", spec.Command, body)
 		}
 	}
@@ -399,7 +406,7 @@ func TestGetAgentHooksIdempotentAndPreservesUserHooks(t *testing.T) {
 		t.Fatalf("user hook dropped:\n%s", body)
 	}
 	// The AO stop command must appear exactly once despite two installs.
-	if n := strings.Count(body, droidHookCommandPrefix+"stop"); n != 1 {
+	if n := strings.Count(body, droidHookArgs(droidHookCommandPrefix+"stop")); n != 1 {
 		t.Fatalf("AO stop command count = %d, want 1 (idempotent):\n%s", n, body)
 	}
 }
@@ -427,7 +434,7 @@ func TestUninstallHooksRemovesAOHooksLeavesUserHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(data)
-	if strings.Contains(body, droidHookCommandPrefix) {
+	if strings.Contains(body, droidHookArgs(droidHookCommandPrefix)) {
 		t.Fatalf("AO hooks not removed:\n%s", body)
 	}
 	if !strings.Contains(body, "echo mine") {

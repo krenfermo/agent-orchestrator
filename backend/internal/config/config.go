@@ -6,6 +6,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -14,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerauth"
 )
 
 const (
@@ -113,6 +117,20 @@ type Config struct {
 	// DataDir is the directory holding durable SQLite state: DB and WAL files.
 	// It is created on first use by the storage layer.
 	DataDir string
+	// DataDirExplicit is true when the data dir was named explicitly
+	// (AO_DATA_DIR, or `ao server --data-dir`) rather than defaulted. The
+	// default is the operator's real state; see AuthorizeDefaultDataDir.
+	DataDirExplicit bool
+	// SkillStagingRoot optionally overrides where a skill run stages its
+	// inputs (AO_SKILL_STAGING_ROOT). Empty means the runner's own default:
+	// the project's parent directory, which is the one place AO can reason
+	// about when the container runtime is a VM sharing only certain host paths.
+	// An operator whose layout differs sets this; nothing else does.
+	SkillStagingRoot string
+	// WebRoot is an optional directory containing the compiled React renderer.
+	// Empty keeps the daemon API-only (the Electron desktop default); ao server
+	// sets it for headless browser mode.
+	WebRoot string
 	// Agent is the compatibility agent adapter id selected by AO_AGENT;
 	// startSession fails fast if no adapter with this id is registered.
 	Agent string
@@ -125,6 +143,14 @@ type Config struct {
 	// fresh id per boot, which correctly makes any surviving shell terminals
 	// from an earlier run look like orphans and get cleaned up.
 	AppRunID string
+	// InstallationID and DaemonInstanceID are P9's identities, resolved by the
+	// daemon at startup (never from the environment): the installation is a
+	// file inside DataDir created once, the daemon instance is minted per
+	// process. Both are published in running.json and the probes so discovery
+	// can prove a daemon belongs to THIS data dir, and stamped into runtimes so
+	// recovery can prove a worker belongs to this installation.
+	InstallationID   string
+	DaemonInstanceID string
 	// AllowedOrigins are the browser origins granted CORS read access (see
 	// DefaultAllowedOrigins). Overridden by AO_ALLOWED_ORIGINS.
 	AllowedOrigins []string
@@ -137,6 +163,83 @@ type Config struct {
 	// GitLab carries the self-managed GitLab host allowlist and per-host
 	// token overrides, loaded once at boot from environment variables.
 	GitLab GitLabConfig
+	// AllowedProjectRoots confines server-side project registration/browsing/
+	// cloning (the web Setup UX) to these absolute directories. Empty means no
+	// restriction — the historical desktop behavior, where the user's own OS
+	// file picker is the trust boundary. Once set, any project-registration
+	// path outside these roots (after symlink resolution) is rejected; this is
+	// the boundary that makes registering-from-a-browser safe to expose on a
+	// future networked deployment. It does not sandbox anything else: a
+	// process spawned inside a registered project's worktree can still read
+	// wherever the OS lets it.
+	AllowedProjectRoots []string
+	// TrustedLocalMode gates Checkpoint 8P-A's application-identity layer.
+	// Default true preserves today's zero-friction single-user desktop UX: a
+	// request with no session cookie resolves automatically to the bootstrap
+	// admin identity, and no login screen appears. Set to false (the
+	// staging/multi-user target) to require a real login: a request with no
+	// valid session then resolves to no user, and owner-scoped endpoints
+	// return 401. This never affects the primary loopback listener's network
+	// trust (still unauthenticated by design, see AGENTS.md) — it only
+	// controls how the non-rejecting identity middleware resolves an
+	// application-level "current user".
+	TrustedLocalMode bool
+	// ProviderAuthMode pins HOW provider CLI subprocesses obtain credentials.
+	// Empty (AO_PROVIDER_AUTH_MODE unset or "auto") resolves in preference
+	// order; see internal/providerauth. Setting it is how an unattended
+	// deployment declares "credentials come from the environment" and gets a
+	// refusal, rather than a silent fall-through onto somebody's OS keychain,
+	// when that is not true.
+	ProviderAuthMode providerauth.Mode
+	// ProviderRuntimeIsolation decides whether provider subprocesses run
+	// against an AO-owned per-user runtime home (a substituted HOME,
+	// CLAUDE_CONFIG_DIR, CODEX_HOME) or keep the desktop user's own.
+	//
+	// It exists because that decision used to be a SIDE EFFECT of the identity
+	// mode: turning on OIDC set TrustedLocalMode=false, which silently moved
+	// every provider launch onto an isolated HOME -- and on macOS a
+	// substituted HOME also substitutes the keychain domain, so a single-user
+	// desktop that merely enabled Google sign-in lost access to the Claude
+	// credential it had been using and started hanging on an unanswerable
+	// keychain dialog. Signing in to AO and where AO's provider CLIs keep
+	// their credentials are two different decisions, and this makes the second
+	// one sayable on its own.
+	ProviderRuntimeIsolation domain.ProviderRuntimeIsolation
+	// AuthMode is P4-A's explicit identity posture, domain.AuthModeTrustedLocal
+	// (the default, today's behavior) or domain.AuthModeOIDC. It is derived
+	// alongside OIDC below, never set independently: see loadOIDC for why the
+	// two cannot be separate switches.
+	AuthMode domain.AuthMode
+	// SessionCookieCrossSite selects SameSite=None; Secure for the session
+	// cookie (AO_SESSION_COOKIE_SAMESITE=none). Default false keeps 8P-A's
+	// SameSite=Lax. The Electron supervisor sets it, because its renderer
+	// (app://) and the daemon (http://127.0.0.1) are different origins and a
+	// Lax cookie is never sent between them. See
+	// httpd/controllers.SessionCookiePolicy.
+	SessionCookieCrossSite bool
+	// OIDC is P4-A's backend-owned provider configuration. Zero-valued (and
+	// OIDC.Enabled false) on every install that configures no provider, which
+	// is every install that exists today.
+	OIDC OIDCConfig
+	// CapacityLimits is P1-C's runtime scheduler bound: how many agent
+	// runtimes AO may have running at once, globally, per execution kind, and
+	// per workflow. Zero-valued fields normalize to the shipped defaults
+	// (domain.DefaultCapacityLimits), so a partial configuration reads as a
+	// default rather than as "no slots, nothing may ever run".
+	//
+	// Overridable per field: AO_CAPACITY_GLOBAL, AO_CAPACITY_WORKERS,
+	// AO_CAPACITY_REVIEWERS, AO_CAPACITY_PLANNERS, AO_CAPACITY_REPAIRS,
+	// AO_CAPACITY_PER_WORKFLOW.
+	CapacityLimits domain.CapacityLimits
+	// TmuxSocket names the isolated tmux server (`tmux -L <TmuxSocket>`) the
+	// tmux runtime (Darwin/Linux) issues every session command against, so AO
+	// never shares — and never touches — the operator's own default tmux
+	// server. An explicit AO_TMUX_SOCKET wins; otherwise it is derived from
+	// DataDir so it stays stable across daemon restarts (recovery needs to
+	// reconnect to the same server) while remaining distinct per AO instance
+	// (distinct AO_DATA_DIR, e.g. two profiles or a test sandbox, never share
+	// a server). Unused on Windows (the conpty runtime has no tmux server).
+	TmuxSocket string
 }
 
 // Addr returns the host:port the HTTP server binds. It uses net.JoinHostPort so
@@ -167,16 +270,60 @@ func (c Config) Addr() string {
 //	AO_TELEMETRY_POSTHOG_HOST  PostHog host (default DefaultTelemetryPostHogHost)
 //	AO_GITLAB_ALLOWED_HOSTS    comma-separated self-managed GitLab hosts (each may include :port)
 //	AO_GITLAB_HOST_TOKENS      host=token,host=token per-host token overrides
+//	AO_PROJECT_ROOTS     comma-separated absolute directories that confine web
+//	                     project registration/browsing/cloning (default: unrestricted)
+//	AO_TMUX_SOCKET       isolated tmux server name (Darwin/Linux only)
+//	                     (default: derived from DataDir, e.g. "ao-<hash>")
+//	AO_TRUSTED_LOCAL_MODE  application-identity trust mode off|on (default on)
+//	AO_PROVIDER_AUTH_MODE  how provider CLIs get credentials:
+//	                       auto|environment|helper|cloud_provider|keychain
+//	                       (default auto)
+//	AO_PROVIDER_RUNTIME_ISOLATION  whether provider subprocesses run in an
+//	                       AO-owned per-user runtime home: auto|host|strict
+//	                       (default auto = derived from the identity mode)
+//	AO_SESSION_COOKIE_SAMESITE  session cookie SameSite lax|none (default lax;
+//	                       `none` implies Secure and is what the desktop uses)
+//	AO_AUTH_MODE           trusted_local|oidc (default: oidc when a provider is
+//	                       configured, trusted_local otherwise)
+//	AO_OIDC_ISSUER         OIDC provider issuer identifier
+//	AO_OIDC_CLIENT_ID      OIDC client id
+//	AO_OIDC_CLIENT_SECRET  OIDC client secret (omit for a PKCE-only public client)
+//	AO_OIDC_REDIRECT_URL   OIDC callback (default http://127.0.0.1:<port>/api/v1/auth/oidc/callback)
+//	AO_OIDC_SCOPES         requested scopes (default "openid profile email")
+//	AO_OIDC_DISPLAY_NAME   sign-in button label
+//	AO_OIDC_ALLOWED_DOMAINS  comma-separated email domains permitted to sign in
+//	AO_OIDC_REQUIRED_CLAIM   claim=value a signing-in identity must carry
+//	AO_OIDC_LINK_VERIFIED_EMAIL  link a first federated login to an existing local
+//	                       account on a verified email match off|on (default on)
 //
 // The bind host is not configurable: the daemon is loopback-only by design.
+// envPositiveInt reads a positive integer from the environment, returning 0
+// for anything unset, unparseable or non-positive. Callers normalize 0 to
+// their own default, so a misconfiguration degrades to the default rather than
+// to a bound nobody chose.
+func envPositiveInt(name string) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// Load reads the daemon's configuration from the environment, applying the
+// documented defaults for everything unset.
 func Load() (Config, error) {
 	cfg := Config{
-		Host:            LoopbackHost,
-		Port:            DefaultPort,
-		RequestTimeout:  DefaultRequestTimeout,
-		ShutdownTimeout: DefaultShutdownTimeout,
-		Agent:           DefaultAgent,
-		AllowedOrigins:  DefaultAllowedOrigins,
+		Host:             LoopbackHost,
+		Port:             DefaultPort,
+		RequestTimeout:   DefaultRequestTimeout,
+		ShutdownTimeout:  DefaultShutdownTimeout,
+		Agent:            DefaultAgent,
+		AllowedOrigins:   DefaultAllowedOrigins,
+		TrustedLocalMode: true,
 		Telemetry: TelemetryConfig{
 			Remote:      TelemetryRemoteOff,
 			PostHogHost: DefaultTelemetryPostHogHost,
@@ -210,6 +357,9 @@ func Load() (Config, error) {
 		cfg.ShutdownTimeout = d
 	}
 
+	if raw := os.Getenv("AO_SKILL_STAGING_ROOT"); raw != "" {
+		cfg.SkillStagingRoot = raw
+	}
 	if raw := os.Getenv("AO_AGENT"); raw != "" {
 		cfg.Agent = raw
 	}
@@ -276,6 +426,21 @@ func Load() (Config, error) {
 		cfg.Telemetry.AppVersion = strings.TrimSpace(raw)
 	}
 
+	// P1-C runtime capacity. Every bound is read the same way: an unset or
+	// unparseable value leaves the field zero, and domain.CapacityLimits
+	// .Normalize turns zero into the shipped default. A typo can therefore
+	// never produce a zero-slot scheduler that deadlocks the daemon.
+	cfg.CapacityLimits = domain.CapacityLimits{
+		Global:      envPositiveInt("AO_CAPACITY_GLOBAL"),
+		PerWorkflow: envPositiveInt("AO_CAPACITY_PER_WORKFLOW"),
+		PerKind: map[domain.ExecutionKind]int{
+			domain.ExecutionKindWorker:   envPositiveInt("AO_CAPACITY_WORKERS"),
+			domain.ExecutionKindReviewer: envPositiveInt("AO_CAPACITY_REVIEWERS"),
+			domain.ExecutionKindPlanner:  envPositiveInt("AO_CAPACITY_PLANNERS"),
+			domain.ExecutionKindRepair:   envPositiveInt("AO_CAPACITY_REPAIRS"),
+		},
+	}.Normalize()
+
 	if raw, ok := os.LookupEnv("AO_GITLAB_ALLOWED_HOSTS"); ok && raw != "" {
 		hosts := make([]string, 0, 4)
 		for _, h := range strings.Split(raw, ",") {
@@ -296,6 +461,56 @@ func Load() (Config, error) {
 		cfg.GitLab.HostTokens = tokens
 	}
 
+	if raw, ok := os.LookupEnv("AO_PROJECT_ROOTS"); ok && raw != "" {
+		roots, err := parseProjectRoots(raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.AllowedProjectRoots = roots
+	}
+
+	if raw := os.Getenv("AO_TRUSTED_LOCAL_MODE"); raw != "" {
+		v, err := parseToggleEnv("AO_TRUSTED_LOCAL_MODE", raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.TrustedLocalMode = v
+	}
+
+	if raw := os.Getenv("AO_PROVIDER_AUTH_MODE"); strings.TrimSpace(raw) != "" {
+		mode, err := providerauth.ParseMode(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid AO_PROVIDER_AUTH_MODE: %w", err)
+		}
+		cfg.ProviderAuthMode = mode
+	}
+
+	if raw := os.Getenv("AO_PROVIDER_RUNTIME_ISOLATION"); strings.TrimSpace(raw) != "" {
+		isolation, err := domain.ParseProviderRuntimeIsolation(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid AO_PROVIDER_RUNTIME_ISOLATION: %w", err)
+		}
+		cfg.ProviderRuntimeIsolation = isolation
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("AO_SESSION_COOKIE_SAMESITE")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "lax":
+			cfg.SessionCookieCrossSite = false
+		case "none":
+			cfg.SessionCookieCrossSite = true
+		default:
+			return Config{}, fmt.Errorf("invalid AO_SESSION_COOKIE_SAMESITE %q: must be lax or none", raw)
+		}
+	}
+
+	// P4-A. Runs after AO_TRUSTED_LOCAL_MODE and after AO_PORT: it may
+	// override the former (an OIDC installation never synthesizes an
+	// identity) and it derives the default redirect URL from the latter.
+	if err := loadOIDC(&cfg); err != nil {
+		return Config{}, err
+	}
+
 	runFile, err := resolveRunFilePath()
 	if err != nil {
 		return Config{}, err
@@ -307,6 +522,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.DataDir = dataDir
+	if v, ok := os.LookupEnv("AO_DATA_DIR"); ok && v != "" {
+		cfg.DataDirExplicit = true
+	}
+
+	cfg.TmuxSocket = resolveTmuxSocket(dataDir)
 
 	return cfg, nil
 }
@@ -379,6 +599,26 @@ func parseHostTokenMap(name, raw string) (map[string]string, error) {
 	return tokens, nil
 }
 
+// parseProjectRoots splits AO_PROJECT_ROOTS on commas and absolutizes each
+// entry against the process's launch cwd (see absOverride's double-nesting
+// note — the same daemon chdir applies here). Relative entries are rejected
+// outright rather than silently resolved against a cwd that may not be what
+// the operator expects for a security boundary.
+func parseProjectRoots(raw string) ([]string, error) {
+	roots := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			return nil, fmt.Errorf("invalid AO_PROJECT_ROOTS entry %q: must be an absolute path", p)
+		}
+		roots = append(roots, filepath.Clean(p))
+	}
+	return roots, nil
+}
+
 // parsePositiveDuration rejects zero and negative durations: a zero
 // RequestTimeout would expire every request instantly, and a non-positive
 // ShutdownTimeout would defeat graceful shutdown.
@@ -406,6 +646,12 @@ func newAppRunID() string {
 	return "apprun-" + hex.EncodeToString(buf)
 }
 
+// DefaultRunFilePath is where running.json lives for a caller that did not name
+// one: AO_RUN_FILE when set, otherwise ~/.ao/running.json (P9: the daemon's
+// startup guard also checks it, so an `ao server --data-dir` start cannot miss a
+// daemon published under the default convention).
+func DefaultRunFilePath() (string, error) { return resolveRunFilePath() }
+
 // resolveRunFilePath picks where running.json lives. An explicit AO_RUN_FILE
 // wins; otherwise it sits under the canonical AO home directory so the CLI and
 // Electron supervisor share one handshake location.
@@ -432,6 +678,28 @@ func resolveDataDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(stateDir, "data"), nil
+}
+
+// resolveTmuxSocket picks the tmux server name AO's tmux runtime (Darwin/
+// Linux) isolates itself onto. An explicit AO_TMUX_SOCKET always wins —
+// operators who need several independent AO instances to still share one
+// tmux server (or want a recognizable name for manual `tmux -L` debugging)
+// can set it directly.
+//
+// Otherwise the name is derived from dataDir: `tmux -L <name>` starts a
+// brand-new, empty server the first time that name is used and reconnects to
+// the same one on every later call, so hashing a value that is itself stable
+// across daemon restarts (DataDir) is what lets Destroy/IsAlive/Attach after
+// a restart find the sessions a prior boot created (recovery), while two AO
+// instances pointed at different AO_DATA_DIR (distinct profiles, or a test
+// sandboxed via AO_DATA_DIR) land on distinct servers and can never observe
+// or kill each other's sessions.
+func resolveTmuxSocket(dataDir string) string {
+	if raw, ok := os.LookupEnv("AO_TMUX_SOCKET"); ok && strings.TrimSpace(raw) != "" {
+		return strings.TrimSpace(raw)
+	}
+	sum := sha256.Sum256([]byte(dataDir))
+	return "ao-" + hex.EncodeToString(sum[:6])
 }
 
 func defaultStateDir() (string, error) {

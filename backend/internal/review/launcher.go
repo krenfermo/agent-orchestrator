@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -105,6 +104,12 @@ type agentLauncher struct {
 	runFile    string
 	auth       agentAuthResolver
 	executable func() (string, error)
+	// owners and runtimeIsolation back Checkpoint 8P-E.3.1's per-user
+	// isolated reviewer env. Both nil is a permanent no-op (env stays
+	// unresolved, matching every pre-8P-E.3.1 build) -- see
+	// resolveOwnerRuntimeEnv.
+	owners           sessionOwnerLookup
+	runtimeIsolation runtimeEnvResolver
 }
 
 type preLaunchReviewer interface {
@@ -117,6 +122,23 @@ type preflightReviewer interface {
 
 type agentAuthResolver interface {
 	AuthStatus(ctx context.Context, harness domain.ReviewerHarness) (ports.AgentAuthStatus, bool, error)
+}
+
+// sessionOwnerLookup resolves a session's durably persisted owner.
+// Satisfied by storage/sqlite/store.Store (GetSessionOwner, Checkpoint
+// 8P-A) -- the same lookup session_manager's own relaunch path uses
+// (providerruntime.Resolver's doc comment), reused here rather than
+// re-derived from a workflow run this launcher has no notion of.
+type sessionOwnerLookup interface {
+	GetSessionOwner(ctx context.Context, id domain.SessionID) (*domain.UserID, error)
+}
+
+// runtimeEnvResolver resolves an owning user's isolated provider subprocess
+// env. Satisfied by *providerruntime.Resolver's ResolveForOwner, which is
+// this package's canonical single implementation (see providerruntime's own
+// doc comment) -- deliberately not re-implemented here.
+type runtimeEnvResolver interface {
+	ResolveForOwner(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, domain.ProviderProfileID, error)
 }
 
 // LauncherOption configures reviewer launcher behavior.
@@ -146,6 +168,21 @@ func WithExecutable(executable func() (string, error)) LauncherOption {
 func WithRunFilePath(path string) LauncherOption {
 	return func(l *agentLauncher) {
 		l.runFile = path
+	}
+}
+
+// WithOwnerRuntimeEnv wires this launcher into Checkpoint 8P-B.1's per-user
+// isolated provider subprocess env, resolved from the worker session's own
+// persisted owner (this launcher has no workflow run to derive an owner
+// from -- unlike workflow's own reviewer launcher, which already gets a
+// pre-resolved RuntimeEnv from Coordinator.resolveRuntimeEnv). Leaving this
+// option unset makes resolution a permanent no-op, preserving every
+// pre-8P-E.3.1 build's behavior exactly (same convention as
+// providerruntime.Resolver's own nil-Owners no-op).
+func WithOwnerRuntimeEnv(owners sessionOwnerLookup, resolver runtimeEnvResolver) LauncherOption {
+	return func(l *agentLauncher) {
+		l.owners = owners
+		l.runtimeIsolation = resolver
 	}
 }
 
@@ -235,6 +272,29 @@ func reviewerHandleID(workerID domain.SessionID) string {
 	return "review-" + string(workerID)
 }
 
+// resolveOwnerRuntimeEnv is Checkpoint 8P-E.3.1's per-user isolation lookup
+// for this launcher (which, unlike workflow's own reviewer launcher, has no
+// workflow run to derive an owner from -- only the worker session id).
+// Returns nil (no-op) when either dependency is unset, matching
+// providerruntime.Resolver's own nil-Owners convention, and degrades to nil
+// on any resolution error rather than blocking a review launch: this
+// launcher predates 8P-B's multi-user enforcement and trusted-local desktop
+// installs (the common case) have no profile to fail to match anyway.
+func (l *agentLauncher) resolveOwnerRuntimeEnv(ctx context.Context, workerID domain.SessionID, harness domain.ReviewerHarness) map[string]string {
+	if l.owners == nil || l.runtimeIsolation == nil {
+		return nil
+	}
+	owner, err := l.owners.GetSessionOwner(ctx, workerID)
+	if err != nil || owner == nil {
+		return nil
+	}
+	env, _, err := l.runtimeIsolation.ResolveForOwner(ctx, *owner, domain.AgentHarness(harness))
+	if err != nil {
+		return nil
+	}
+	return env
+}
+
 func (l *agentLauncher) invocation(spec LaunchSpec) ports.ReviewInvocation {
 	prompt, systemPrompt := reviewTexts(spec)
 	return ports.ReviewInvocation{
@@ -265,6 +325,7 @@ func (l *agentLauncher) prepareInvocation(ctx context.Context, spec LaunchSpec) 
 		return ports.ReviewInvocation{}, err
 	}
 	inv := l.invocation(spec)
+	inv.Env = l.resolveOwnerRuntimeEnv(ctx, spec.WorkerID, spec.Harness)
 	if strings.TrimSpace(l.dataDir) == "" {
 		return ports.ReviewInvocation{}, fmt.Errorf("reviewer prompt data directory is required")
 	}
@@ -304,7 +365,7 @@ func (l *agentLauncher) prepareInvocation(ctx context.Context, spec LaunchSpec) 
 	return inv, nil
 }
 
-func (l *agentLauncher) prepareIdleInvocation(spec LaunchSpec) (ports.ReviewInvocation, error) {
+func (l *agentLauncher) prepareIdleInvocation(ctx context.Context, spec LaunchSpec) (ports.ReviewInvocation, error) {
 	promptRoot := filepath.Join(l.dataDir, "prompts", string(spec.WorkerID), "reviewer")
 	systemPath := filepath.Join(promptRoot, "system.md")
 	systemPrompt := reviewSystemPrompt() + "\n\n" +
@@ -327,6 +388,7 @@ func (l *agentLauncher) prepareIdleInvocation(spec LaunchSpec) (ports.ReviewInvo
 		SystemPrompt:     "",
 		SystemPromptFile: systemPath,
 		TaskPromptRoot:   promptRoot,
+		Env:              l.resolveOwnerRuntimeEnv(ctx, spec.WorkerID, spec.Harness),
 	}, nil
 }
 
@@ -379,7 +441,7 @@ func (l *agentLauncher) Spawn(ctx context.Context, spec LaunchSpec) (LaunchResul
 }
 
 func (l *agentLauncher) RestoreTerminal(ctx context.Context, spec LaunchSpec) (LaunchResult, error) {
-	inv, err := l.prepareIdleInvocation(spec)
+	inv, err := l.prepareIdleInvocation(ctx, spec)
 	if err != nil {
 		return LaunchResult{}, err
 	}
@@ -531,65 +593,43 @@ func (l *agentLauncher) runtimeEnv(ctx context.Context, spec LaunchSpec, argv []
 	if strings.TrimSpace(l.runFile) != "" {
 		env[EnvRunFile] = l.runFile
 	}
-	path, err := sessionmanager.HookPATH(l.executable, os.Getenv, env)
-	if err == nil {
-		env["PATH"] = path
-	} else if shimDir, shimErr := l.ensureAOShimDir(); shimErr == nil {
-		env["PATH"] = prependPathDir(shimDir, env["PATH"])
-	} else {
-		env[EnvAOCommandWarning] = fmt.Sprintf("PATH pin failed: %v; AO shim fallback failed: %v", err, shimErr)
-	}
-	sessionmanager.AugmentRuntimePATHForLaunchBinary(ctx, env, argv, exec.LookPath)
-	return env
-}
-
-func (l *agentLauncher) ensureAOShimDir() (string, error) {
-	if strings.TrimSpace(l.dataDir) == "" {
-		return "", fmt.Errorf("reviewer AO shim data directory is required")
-	}
-	exe, err := l.executable()
+	path, pinned, err := sessionmanager.HookPATH(l.executable, os.Getenv, env)
 	if err != nil {
-		return "", fmt.Errorf("resolve AO executable: %w", err)
-	}
-	if !filepath.IsAbs(exe) {
-		exe, err = filepath.Abs(exe)
-		if err != nil {
-			return "", fmt.Errorf("make AO executable absolute: %w", err)
+		// HookPATH itself failed (the daemon's own executable path could not be
+		// resolved at all) — extremely rare. Keep whatever PATH the base env
+		// already had rather than losing it, but still guarantee system dirs so
+		// the reviewer's own agent CLI (Claude/Codex) keeps working.
+		env["PATH"] = sessionmanager.EnsureSystemPathDirs(env["PATH"])
+		env[EnvAOCommandWarning] = fmt.Sprintf("PATH pin failed: %v", err)
+	} else {
+		env["PATH"] = path
+		if !pinned {
+			// The daemon binary isn't named "ao", so HookPATH's prepended
+			// directory doesn't make the bare `ao` in review guidance resolve to
+			// it. Add a real `ao` shim on top of the already-good PATH (which
+			// still has the base/system dirs) rather than replacing PATH with
+			// just the shim dir — that replacement is what previously collapsed
+			// reviewer PATH down to nothing but one narrow directory and broke
+			// Claude Code's own keychain/auth lookup (Checkpoint 8I.1).
+			if shimDir, shimErr := sessionmanager.EnsureAOShim(l.dataDir, l.executable); shimErr == nil {
+				env["PATH"] = sessionmanager.PrependPathDir(shimDir, env["PATH"])
+			} else {
+				env[EnvAOCommandWarning] = fmt.Sprintf("AO shim fallback failed: %v", shimErr)
+			}
 		}
 	}
-	shimDir := filepath.Join(l.dataDir, "reviewer-runtime", "bin")
-	if err := os.MkdirAll(shimDir, 0o700); err != nil {
-		return "", fmt.Errorf("create reviewer AO shim directory: %w", err)
+	sessionmanager.AugmentRuntimePATHForLaunchBinary(ctx, env, argv, exec.LookPath)
+	// Checkpoint 8P-E.3.1: applied last, after every other env source
+	// (PATH pin/shim included), so the worker's owning user's isolated
+	// runtime-home always wins — mirrors workflow's own reviewer launcher
+	// applying req.RuntimeEnv last (Checkpoint 8P-B.1). This must land in
+	// the actual runtime process env, not just PreLaunch's trust write
+	// target, or the trust record and the subprocess that reads it disagree
+	// on which config file is real (the exact bug 8P-E.3 fixed for workers).
+	for k, v := range l.resolveOwnerRuntimeEnv(ctx, spec.WorkerID, spec.Harness) {
+		env[k] = v
 	}
-	shimPath := filepath.Join(shimDir, "ao")
-	if runtime.GOOS == "windows" {
-		shimPath += ".cmd"
-	}
-	if err := os.WriteFile(shimPath, []byte(aoShimScript(exe)), 0o600); err != nil {
-		return "", fmt.Errorf("write reviewer AO shim: %w", err)
-	}
-	if err := os.Chmod(shimPath, 0o700); err != nil { // #nosec G302 -- the reviewer shim must be executable by the AO user.
-		return "", fmt.Errorf("mark reviewer AO shim executable: %w", err)
-	}
-	return shimDir, nil
-}
-
-func aoShimScript(executable string) string {
-	if runtime.GOOS == "windows" {
-		return "@echo off\r\n\"" + executable + "\" %*\r\n"
-	}
-	return "#!/bin/sh\nexec " + shellQuote(executable) + ` "$@"` + "\n"
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
-}
-
-func prependPathDir(dir, path string) string {
-	if strings.TrimSpace(path) == "" {
-		return dir
-	}
-	return dir + string(os.PathListSeparator) + path
+	return env
 }
 
 func (l *agentLauncher) Notify(ctx context.Context, handleID string, spec LaunchSpec) error {

@@ -18,6 +18,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
 
 // Build reflects the Go contract types and the operation registry below into
@@ -81,6 +82,10 @@ func Build() ([]byte, error) {
 			"Connect Mobile LAN bridge control (loopback/desktop only)"),
 		*(&openapi31.Tag{Name: "browser"}).WithDescription(
 			"Target-isolated desktop browser runtime (loopback only)"),
+		*(&openapi31.Tag{Name: "workflows"}).WithDescription(
+			"Durable workflow runs (Checkpoint 8A structure only — no execution)"),
+		*(&openapi31.Tag{Name: "auth"}).WithDescription(
+			"User identity, login/logout sessions, and current-user resolution (Checkpoint 8P-A)"),
 	}
 
 	for _, op := range operations() {
@@ -138,6 +143,128 @@ func schemaName(_ reflect.Type, defaultName string) string {
 // by projectOperations(). Add an entry when a new contract type is introduced;
 // the drift test fails until the spec is regenerated, which flags the gap.
 var schemaNames = map[string]string{
+	"ControllersWorkflowExplorationResponse":          "WorkflowExplorationResponse",
+	"ControllersAgentExplorationResponse":             "AgentExplorationResponse",
+	"ControllersRunQualitySignalsResponse":            "RunQualitySignalsResponse",
+	"ControllersExplorationMetricResponse":            "ExplorationMetricResponse",
+	"ControllersExplorationRatioResponse":             "ExplorationRatioResponse",
+	"ControllersExplorationFileCountResponse":         "ExplorationFileCountResponse",
+	"ControllersExplorationPathScopeCountResponse":    "ExplorationPathScopeCountResponse",
+	"ControllersAdminUserView":                        "AdminUserView",
+	"ControllersListUsersResponse":                    "ListUsersResponse",
+	"ControllersUserResponse":                         "UserResponse",
+	"ControllersCreateUserRequest":                    "CreateUserRequest",
+	"ControllersSetUserRoleRequest":                   "SetUserRoleRequest",
+	"ControllersSetUserStatusRequest":                 "SetUserStatusRequest",
+	"ControllersProjectIntelligenceOverview":          "ProjectIntelligenceOverview",
+	"ControllersProjectIntelligenceRepoStatus":        "ProjectIntelligenceRepoStatus",
+	"ControllersProjectIntelligenceArchitecture":      "ProjectIntelligenceArchitecture",
+	"ControllersProjectIntelligenceSubgraph":          "ProjectIntelligenceSubgraph",
+	"ControllersProjectIntelligenceSubgraphNode":      "ProjectIntelligenceSubgraphNode",
+	"ControllersProjectIntelligenceSubgraphEdge":      "ProjectIntelligenceSubgraphEdge",
+	"ControllersProjectIntelligenceSearchResult":      "ProjectIntelligenceSearchResult",
+	"ControllersProjectIntelligenceSearchHit":         "ProjectIntelligenceSearchHit",
+	"ControllersProjectIntelligenceContextPreview":    "ProjectIntelligenceContextPreview",
+	"ControllersProjectIntelligenceContextSection":    "ProjectIntelligenceContextSection",
+	"ControllersProjectIntelligenceContextItem":       "ProjectIntelligenceContextItem",
+	"ControllersProjectIntelligenceContextGraph":      "ProjectIntelligenceContextGraph",
+	"ControllersProjectIntelligenceSyncResponse":      "ProjectIntelligenceSyncResponse",
+	"ControllersWorkItemsConfigResponse":              "WorkItemsConfigResponse",
+	"ControllersWorkItemsConfigUpdate":                "WorkItemsConfigUpdate",
+	"ControllersWorkItemsConnectionResponse":          "WorkItemsConnectionResponse",
+	"ControllersWorkItemsProviderProject":             "WorkItemsProviderProject",
+	"ControllersWorkItemsProviderProjectsResponse":    "WorkItemsProviderProjectsResponse",
+	"ControllersWorkItemLinkRequest":                  "WorkItemLinkRequest",
+	"ControllersWorkItemLinkResponse":                 "WorkItemLinkResponse",
+	"ControllersWorkItemLinksResponse":                "WorkItemLinksResponse",
+	"ControllersWorkItemLinkSyncRequest":              "WorkItemLinkSyncRequest",
+	"ControllersWorkItemsHealthResponse":              "WorkItemsHealthResponse",
+	"ControllersWorkItemsSyncResponse":                "WorkItemsSyncResponse",
+	"ControllersWorkItemsAuditEntry":                  "WorkItemsAuditEntry",
+	"ControllersWorkItemsAuditResponse":               "WorkItemsAuditResponse",
+	"ControllersProjectIntelligenceMemorySync":        "ProjectIntelligenceMemorySync",
+	"ControllersProjectGitHubIntelligence":            "ProjectGitHubIntelligence",
+	"ControllersProjectGitHubRepository":              "ProjectGitHubRepository",
+	"ControllersProjectGitHubCommit":                  "ProjectGitHubCommit",
+	"ControllersProjectGitHubPullRequest":             "ProjectGitHubPullRequest",
+	"ControllersProjectGitHubReview":                  "ProjectGitHubReview",
+	"ControllersProjectGitHubIssue":                   "ProjectGitHubIssue",
+	"ControllersProjectGitHubLinkedPR":                "ProjectGitHubLinkedPR",
+	"ControllersProjectGitHubComment":                 "ProjectGitHubComment",
+	"ControllersTenantView":                           "TenantView",
+	"ControllersTenantMemberView":                     "TenantMemberView",
+	"ControllersListTenantsResponse":                  "ListTenantsResponse",
+	"ControllersTenantResponse":                       "TenantResponse",
+	"ControllersListTenantMembersResponse":            "ListTenantMembersResponse",
+	"ControllersCreateTenantRequest":                  "CreateTenantRequest",
+	"ControllersUpdateTenantRequest":                  "UpdateTenantRequest",
+	"ControllersAddTenantMemberRequest":               "AddTenantMemberRequest",
+	"ControllersTeamView":                             "TeamView",
+	"ControllersTeamMemberView":                       "TeamMemberView",
+	"ControllersListTeamsResponse":                    "ListTeamsResponse",
+	"ControllersTeamResponse":                         "TeamResponse",
+	"ControllersListTeamMembersResponse":              "ListTeamMembersResponse",
+	"ControllersCreateTeamRequest":                    "CreateTeamRequest",
+	"ControllersUpdateTeamRequest":                    "UpdateTeamRequest",
+	"ControllersAddTeamMemberRequest":                 "AddTeamMemberRequest",
+	"ControllersOKResponse":                           "OKResponse",
+	"ControllersProjectGrantView":                     "ProjectGrantView",
+	"ControllersProjectAccessResponse":                "ProjectAccessResponse",
+	"ControllersGrantProjectAccessRequest":            "GrantProjectAccessRequest",
+	"ControllersSkillModeView":                        "SkillModeView",
+	"ControllersSkillInstallView":                     "SkillInstallView",
+	"ControllersSkillCapabilityView":                  "SkillCapabilityView",
+	"ControllersSkillListResponse":                    "SkillListResponse",
+	"ControllersSkillImageApprovalView":               "SkillImageApprovalView",
+	"ControllersSkillImageApprovalListResponse":       "SkillImageApprovalListResponse",
+	"ControllersApproveSkillImageRequest":             "ApproveSkillImageRequest",
+	"ControllersInstallSkillRequest":                  "InstallSkillRequest",
+	"ControllersSkillAuditView":                       "SkillAuditView",
+	"ControllersSkillAuditResponse":                   "SkillAuditResponse",
+	"ControllersSkillActivationView":                  "SkillActivationView",
+	"ControllersProjectSkillsResponse":                "ProjectSkillsResponse",
+	"ControllersEnableSkillRequest":                   "EnableSkillRequest",
+	"ControllersSkillDryRunRequest":                   "SkillDryRunRequest",
+	"ControllersPentestAuthorizationRequest":          "PentestAuthorizationRequest",
+	"ControllersPentestAuthorizationView":             "PentestAuthorizationView",
+	"ControllersPentestAuthorizationListResponse":     "PentestAuthorizationListResponse",
+	"ControllersSkillCapabilityDecisionView":          "SkillCapabilityDecisionView",
+	"ControllersSkillRunnerStatusView":                "SkillRunnerStatusView",
+	"ControllersSkillDryRunResponse":                  "SkillDryRunResponse",
+	"ControllersSkillRegistryView":                    "SkillRegistryView",
+	"ControllersSkillRegistryStatusView":              "SkillRegistryStatusView",
+	"ControllersSkillRegistryProbeView":               "SkillRegistryProbeView",
+	"ControllersSkillTrustListResponse":               "SkillTrustListResponse",
+	"ControllersSkillTrustRootView":                   "SkillTrustRootView",
+	"ControllersSkillSigningKeyView":                  "SkillSigningKeyView",
+	"ControllersSkillTrustRevocationView":             "SkillTrustRevocationView",
+	"ControllersSkillExternalRevocationView":          "SkillExternalRevocationView",
+	"ControllersSkillExternalRevocationListResponse":  "SkillExternalRevocationListResponse",
+	"ControllersRevokeSkillExternalRequest":           "RevokeSkillExternalRequest",
+	"ControllersLiftSkillExternalRevocationRequest":   "LiftSkillExternalRevocationRequest",
+	"ControllersSkillMovedTagView":                    "SkillMovedTagView",
+	"ControllersSkillMovedTagListResponse":            "SkillMovedTagListResponse",
+	"ControllersSkillProvenanceView":                  "SkillProvenanceView",
+	"ControllersSaveSkillTrustRootRequest":            "SaveSkillTrustRootRequest",
+	"ControllersAddSkillSigningKeyRequest":            "AddSkillSigningKeyRequest",
+	"ControllersSkillKeyCertificateInput":             "SkillKeyCertificateInput",
+	"ControllersRevokeSkillTrustRequest":              "RevokeSkillTrustRequest",
+	"ControllersRetireSkillSigningKeyRequest":         "RetireSkillSigningKeyRequest",
+	"ControllersSkillRegistryRevocationView":          "SkillRegistryRevocationView",
+	"ControllersSkillRegistryRevocationSyncView":      "SkillRegistryRevocationSyncView",
+	"ControllersSkillRegistryListResponse":            "SkillRegistryListResponse",
+	"ControllersSaveSkillRegistryRequest":             "SaveSkillRegistryRequest",
+	"ControllersSkillReleaseModeView":                 "SkillReleaseModeView",
+	"ControllersSkillReleaseView":                     "SkillReleaseView",
+	"ControllersSkillRegistryNoteView":                "SkillRegistryNoteView",
+	"ControllersSkillRegistryFreshnessView":           "SkillRegistryFreshnessView",
+	"ControllersSkillMarketplaceSearchResponse":       "SkillMarketplaceSearchResponse",
+	"ControllersSkillReleaseDetailResponse":           "SkillReleaseDetailResponse",
+	"ControllersInstallSkillReleaseRequest":           "InstallSkillReleaseRequest",
+	"ControllersSkillInstallOriginView":               "SkillInstallOriginView",
+	"ControllersSkillInstallOutcomeView":              "SkillInstallOutcomeView",
+	"ControllersSkillUpdateStatusView":                "SkillUpdateStatusView",
+	"ControllersSkillUpdateCheckResponse":             "SkillUpdateCheckResponse",
 	"ControllersSettingsResponse":                     "SettingsResponse",
 	"ControllersUpdateSessionInterfaceRequest":        "UpdateSessionInterfaceRequest",
 	"ControllersConversationSnapshotResponse":         "ConversationSnapshotResponse",
@@ -193,6 +320,7 @@ var schemaNames = map[string]string{
 	"DomainTrackerIntakeConfig":       "TrackerIntakeConfig",
 	"ControllersTriggerReviewRequest": "TriggerReviewRequest",
 	"DomainContainerReapConfig":       "ContainerReapConfig",
+	"DomainGitPolicy":                 "GitPolicy",
 	"DomainAgentConfig":               "AgentConfig",
 	"DomainRoleOverride":              "RoleOverride",
 	// httpd/controllers (wire envelopes)
@@ -307,14 +435,97 @@ var schemaNames = map[string]string{
 	"ControllersResolveCommentsRequest":  "ResolveCommentsRequest",
 	"ControllersResolveCommentsResponse": "ResolveCommentsResponse",
 	// httpd/controllers — review wire envelopes
-	"ControllersListReviewsResponse":   "ListReviewsResponse",
-	"ControllersReviewRunResponse":     "ReviewRunResponse",
-	"ControllersTriggerReviewResponse": "TriggerReviewResponse",
-	"ControllersCancelReviewResponse":  "CancelReviewResponse",
-	"ControllersKillReviewResponse":    "KillReviewResponse",
-	"ControllersRestoreReviewResponse": "RestoreReviewResponse",
-	"ControllersSubmitReviewItem":      "SubmitReviewItem",
-	"ControllersSubmitReviewInput":     "SubmitReviewInput",
+	"ControllersListReviewsResponse":       "ListReviewsResponse",
+	"ControllersReviewRunResponse":         "ReviewRunResponse",
+	"ControllersTriggerReviewResponse":     "TriggerReviewResponse",
+	"ControllersCancelReviewResponse":      "CancelReviewResponse",
+	"ControllersKillReviewResponse":        "KillReviewResponse",
+	"ControllersRestoreReviewResponse":     "RestoreReviewResponse",
+	"ControllersSubmitReviewItem":          "SubmitReviewItem",
+	"ControllersSubmitReviewInput":         "SubmitReviewInput",
+	"ControllersSubmitWorkReportRequest":   "SubmitWorkReportRequest",
+	"ControllersSubmitWorkReportCriterion": "SubmitWorkReportCriterion",
+	"ControllersSubmitWorkReportTestClaim": "SubmitWorkReportTestClaim",
+	"ControllersWorkReportResponse":        "WorkReportResponse",
+	// httpd/controllers — workflow wire envelopes
+	"ControllersCreateWorkflowRunRequest":         "CreateWorkflowRunRequest",
+	"ControllersWorkflowAttemptView":              "WorkflowAttemptView",
+	"ControllersWorkflowStepView":                 "WorkflowStepView",
+	"ControllersWorkflowVerificationPlan":         "WorkflowVerificationPlan",
+	"ControllersWorkflowVerificationCommand":      "WorkflowVerificationCommand",
+	"ControllersWorkflowVerificationFile":         "WorkflowVerificationFile",
+	"WorkflowVerifyResult":                        "WorkflowVerifyResult",
+	"WorkflowVerifyCheckResult":                   "WorkflowVerifyCheckResult",
+	"ControllersWorkflowRunView":                  "WorkflowRunView",
+	"ControllersWorkflowStrategySignals":          "WorkflowStrategySignals",
+	"ControllersWorkflowExecutionStrategyView":    "WorkflowExecutionStrategyView",
+	"ControllersWorkflowReviewDepthView":          "WorkflowReviewDepthView",
+	"ControllersWorkflowContextEconomyView":       "WorkflowContextEconomyView",
+	"ControllersWorkflowRecoveryView":             "WorkflowRecoveryView",
+	"ControllersWorkflowResumeView":               "WorkflowResumeView",
+	"ControllersWorkflowPlanReuseView":            "WorkflowPlanReuseView",
+	"ControllersWorkflowRepairPlanView":           "WorkflowRepairPlanView",
+	"ControllersWorkflowRepairIntentView":         "WorkflowRepairIntentView",
+	"ControllersWorkflowRepairArtifactView":       "WorkflowRepairArtifactView",
+	"ControllersWorkflowRepairResponse":           "WorkflowRepairResponse",
+	"ControllersWorkflowRecoveryResponse":         "WorkflowRecoveryResponse",
+	"ControllersWorkflowWorkerOwnershipView":      "WorkflowWorkerOwnershipView",
+	"ControllersPlacementOverrideRequestBody":     "PlacementOverrideRequestBody",
+	"ControllersPlacementOverrideView":            "PlacementOverrideView",
+	"ControllersPlacementOverrideResponse":        "PlacementOverrideResponse",
+	"ControllersPlacementTransitionRequestBody":   "PlacementTransitionRequestBody",
+	"ControllersPlacementQuiescenceView":          "PlacementQuiescenceView",
+	"ControllersPlacementTransitionView":          "PlacementTransitionView",
+	"ControllersPlacementTransitionResponse":      "PlacementTransitionResponse",
+	"ControllersCapacityUsageView":                "CapacityUsageView",
+	"ControllersCapacityClaimView":                "CapacityClaimView",
+	"ControllersSchedulerStatusResponse":          "SchedulerStatusResponse",
+	"ControllersRuntimeGCRequest":                 "RuntimeGCRequest",
+	"ControllersRuntimeGCFindingView":             "RuntimeGCFindingView",
+	"ControllersRuntimeGCReportResponse":          "RuntimeGCReportResponse",
+	"ControllersWorkflowBranchWaitView":           "WorkflowBranchWaitView",
+	"ControllersWorkflowPendingChangesResponse":   "WorkflowPendingChangesResponse",
+	"ControllersWorkflowPendingChangeView":        "WorkflowPendingChangeView",
+	"ControllersCommitPendingChangesRequest":      "CommitPendingChangesRequest",
+	"ControllersCommitPendingChangesResponse":     "CommitPendingChangesResponse",
+	"ControllersWorkflowPresentationView":         "WorkflowPresentationView",
+	"ControllersWorkflowPresentationAction":       "WorkflowPresentationAction",
+	"ControllersWorkflowPresentationStage":        "WorkflowPresentationStage",
+	"ControllersWorkflowPresentationPlacement":    "WorkflowPresentationPlacement",
+	"ControllersWorkflowPresentationEvent":        "WorkflowPresentationEvent",
+	"ControllersWorkflowPresentationTechnical":    "WorkflowPresentationTechnical",
+	"ControllersWorkflowCapacityWaitView":         "WorkflowCapacityWaitView",
+	"ControllersWorkflowRepairStateView":          "WorkflowRepairStateView",
+	"ControllersWorkflowCapacityWaitProviderView": "WorkflowCapacityWaitProviderView",
+	"ControllersWorkflowRunDetailView":            "WorkflowRunDetailView",
+	"ControllersWorkflowPlanView":                 "WorkflowPlanView",
+	"ControllersWorkflowTaskView":                 "WorkflowTaskView",
+	"ControllersWorkflowTaskPlannerView":          "WorkflowTaskPlannerView",
+	"ControllersWorkflowTaskDowngradeView":        "WorkflowTaskDowngradeView",
+	"ControllersWorkflowTaskWriteScopeView":       "WorkflowTaskWriteScopeView",
+	"ControllersWorkflowTaskWorktreeView":         "WorkflowTaskWorktreeView",
+	"ControllersWorkflowTaskIntegrationStateView": "WorkflowTaskIntegrationStateView",
+	"ControllersWorkflowBoardResponse":            "WorkflowBoardResponse",
+	"ControllersWorkflowBoardEntryView":           "WorkflowBoardEntryView",
+	"ControllersWorkflowBoardTaskView":            "WorkflowBoardTaskView",
+	"ControllersWorkflowBoardRepairView":          "WorkflowBoardRepairView",
+	"ControllersWorkflowBoardCountsView":          "WorkflowBoardCountsView",
+	"ControllersProjectBoardQuery":                "ProjectBoardQuery",
+	"ControllersWorkflowStepProgressView":         "WorkflowStepProgressView",
+	"WorkflowMasterPlan":                          "WorkflowMasterPlan",
+	"WorkflowPlannedStep":                         "WorkflowPlannedStep",
+	"WorkflowPlanValidation":                      "WorkflowPlanValidation",
+	"ControllersWorkflowRunResponse":              "WorkflowRunResponse",
+	"ControllersListWorkflowsResponse":            "ListWorkflowsResponse",
+	"ControllersWorkflowProjectIDParam":           "WorkflowProjectIDParam",
+	"ControllersWorkflowIDParam":                  "WorkflowIDParam",
+	"ControllersListWorkflowsQuery":               "ListWorkflowsQuery",
+	"ControllersWorkflowQuestionChoiceResponse":   "WorkflowQuestionChoiceResponse",
+	"ControllersWorkflowQuestionResponse":         "WorkflowQuestionResponse",
+	"ControllersListWorkflowQuestionsResponse":    "ListWorkflowQuestionsResponse",
+	"ControllersWorkflowQuestionResponseBody":     "WorkflowQuestionResponseBody",
+	"ControllersAnswerWorkflowQuestionRequest":    "AnswerWorkflowQuestionRequest",
+	"ControllersWorkflowQuestionIDParam":          "WorkflowQuestionIDParam",
 	// domain review entities
 	"DomainReviewRun":     "ReviewRun",
 	"ReviewPRReviewState": "PRReviewState",
@@ -431,12 +642,17 @@ type operation struct {
 func operations() []operation {
 	ops := append([]operation{}, eventOperations()...)
 	ops = append(ops, agentOperations()...)
+	ops = append(ops, environmentOperations()...)
 	ops = append(ops, projectOperations()...)
 	ops = append(ops, sessionOperations()...)
 	ops = append(ops, prOperations()...)
 	ops = append(ops, reviewOperations()...)
+	ops = append(ops, decisionOperations()...)
 	ops = append(ops, notificationOperations()...)
 	ops = append(ops, usageOperations()...)
+	ops = append(ops, capacityOperations()...)
+	ops = append(ops, usageSubjectOperations()...)
+	ops = append(ops, projectMemoryOperations()...)
 	ops = append(ops, pushOperations()...)
 	ops = append(ops, importOperations()...)
 	ops = append(ops, devOperations()...)
@@ -444,7 +660,1488 @@ func operations() []operation {
 	ops = append(ops, mobileDeviceOperations()...)
 	ops = append(ops, browserOperations()...)
 	ops = append(ops, shellTerminalOperations()...)
+	ops = append(ops, workflowOperations()...)
+	ops = append(ops, authOperations()...)
+	ops = append(ops, providerProfileOperations()...)
+	ops = append(ops, executionPolicyOperations()...)
 	return ops
+}
+
+// providerProfileOperations declares the /provider-profiles and
+// /providers/registry operations (Checkpoint 8P-B). Must stay 1:1 with the
+// routes ProviderProfilesController.Register mounts (enforced by the parity
+// test).
+func providerProfileOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/providers/registry", id: "getProviderRegistry", tag: "provider-profiles",
+			summary: "List every provider AO knows about, with its declared capabilities/auth methods",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderRegistryResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/provider-profiles", id: "listProviderProfiles", tag: "provider-profiles",
+			summary: "List the current user's provider profiles",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProviderProfilesResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles", id: "createProviderProfile", tag: "provider-profiles",
+			summary: "Create a provider profile owned by the current user",
+			reqBody: controllers.CreateProviderProfileRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.ProviderProfileResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/provider-profiles/{id}", id: "getProviderProfile", tag: "provider-profiles",
+			summary:    "Get one of the current user's provider profiles",
+			pathParams: []any{controllers.ProviderProfileIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderProfileResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPatch, path: "/api/v1/provider-profiles/{id}", id: "updateProviderProfile", tag: "provider-profiles",
+			summary:    "Update a provider profile's display name, enabled state, or default model",
+			pathParams: []any{controllers.ProviderProfileIDParam{}},
+			reqBody:    controllers.UpdateProviderProfileRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderProfileResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles/{id}/connect", id: "connectProviderProfile", tag: "provider-profiles",
+			summary:         "Prepare the profile owner's isolated runtime-home and refresh its cached auth state",
+			pathParams:      []any{controllers.ProviderProfileIDParam{}},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderProfileResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles/{id}/disconnect", id: "disconnectProviderProfile", tag: "provider-profiles",
+			summary:         "Clear AO's cached belief that this profile is authenticated",
+			pathParams:      []any{controllers.ProviderProfileIDParam{}},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderProfileResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles/{id}/test", id: "testProviderProfile", tag: "provider-profiles",
+			summary:         "Run a connection test against the profile owner's isolated runtime-home",
+			pathParams:      []any{controllers.ProviderProfileIDParam{}},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.TestProviderProfileResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles/{id}/setup", id: "startProviderProfileSetup", tag: "provider-profiles",
+			summary:         "Start a guided setup terminal running the provider's own login flow inside the owner's isolated runtime-home (Checkpoint 8P-E.8.4)",
+			pathParams:      []any{controllers.ProviderProfileIDParam{}},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.StartProviderSetupResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/provider-profiles/{id}/setup", id: "stopProviderProfileSetup", tag: "provider-profiles",
+			summary:    "Stop a profile's live guided setup terminal, if any",
+			pathParams: []any{controllers.ProviderProfileIDParam{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
+}
+
+// executionPolicyOperations declares the /execution-policy operations
+// (Checkpoint 8P-C). Must stay 1:1 with the routes
+// ExecutionPolicyController.Register mounts (enforced by the parity test).
+func executionPolicyOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/execution-policy", id: "getExecutionPolicy", tag: "execution-policy",
+			summary: "Get the current user's execution/routing policy (or the bootstrap default if none is stored)",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecutionPolicyResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/execution-policy", id: "putExecutionPolicy", tag: "execution-policy",
+			summary: "Replace the current user's execution/routing policy",
+			reqBody: controllers.PutExecutionPolicyRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecutionPolicyResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
+}
+
+// authOperations declares the /auth operations (Checkpoint 8P-A). Must stay
+// 1:1 with the routes AuthController.Register mounts (enforced by the
+// parity test).
+func authOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/auth/login", id: "login", tag: "auth",
+			summary: "Authenticate with username/email + password and receive a session cookie",
+			reqBody: controllers.LoginRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.LoginResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/logout", id: "logout", tag: "auth",
+			summary:         "Revoke the current session and clear the session cookie",
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.LogoutResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/auth/me", id: "getCurrentUser", tag: "auth",
+			summary: "Resolve the current identity: a real session, trusted-local mode's synthesized admin, or no_user",
+			resps: []respUnit{
+				{http.StatusOK, controllers.MeResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/auth/setup-status", id: "getAuthSetupStatus", tag: "auth",
+			summary: "Report whether the installation has zero users yet (first-run signup should be offered)",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SetupStatusResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/register", id: "registerFirstUser", tag: "auth",
+			summary: "Create the installation's first (owner) account and sign in — rejected once an owner already exists",
+			reqBody: controllers.RegisterRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.LoginResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		// P4-B: users, teams and project access. The three administration
+		// surfaces the authorization model needs to be operable at all.
+		{
+			method: http.MethodGet, path: "/api/v1/users", id: "listUsers", tag: "users",
+			summary: "P4-B: list the installation's accounts. Requires users.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListUsersResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/users", id: "createUser", tag: "users",
+			summary: "P4-B: create a local (password) account with a non-owner role. Requires users.manage.",
+			reqBody: controllers.CreateUserRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.UserResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/users/{id}", id: "getUser", tag: "users",
+			summary:    "P4-B: read one account. Requires users.read.",
+			pathParams: []any{controllers.UserIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.UserResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPatch, path: "/api/v1/users/{id}/role", id: "setUserRole", tag: "users",
+			summary:    "P4-B: change an account's installation role. The owner cannot be demoted; promoting another account to owner transfers ownership and is reserved to the owner.",
+			pathParams: []any{controllers.UserIDParam{}},
+			reqBody:    controllers.SetUserRoleRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.UserResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPatch, path: "/api/v1/users/{id}/status", id: "setUserStatus", tag: "users",
+			summary:    "P4-B: enable or disable an account. The owner can never be disabled, and no account can disable itself.",
+			pathParams: []any{controllers.UserIDParam{}},
+			reqBody:    controllers.SetUserStatusRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.UserResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/users/{id}/teams", id: "listUserTeams", tag: "users",
+			summary:    "P4-B: list the teams one account belongs to. Requires users.read.",
+			pathParams: []any{controllers.UserIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListTeamMembersResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/teams", id: "listTeams", tag: "teams",
+			summary: "P4-B: list teams. Requires teams.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListTeamsResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/teams", id: "createTeam", tag: "teams",
+			summary: "P4-B: create a team. Requires teams.manage.",
+			reqBody: controllers.CreateTeamRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.TeamResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/teams/{id}", id: "getTeam", tag: "teams",
+			summary:    "P4-B: read one team. Requires teams.read.",
+			pathParams: []any{controllers.TeamIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.TeamResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPatch, path: "/api/v1/teams/{id}", id: "updateTeam", tag: "teams",
+			summary:    "P4-B: rename, re-describe, archive or reactivate a team. Requires teams.manage.",
+			pathParams: []any{controllers.TeamIDParam{}},
+			reqBody:    controllers.UpdateTeamRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.TeamResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/teams/{id}", id: "deleteTeam", tag: "teams",
+			summary:    "P4-B: delete a team, its memberships, and every project grant made to it. Requires teams.manage.",
+			pathParams: []any{controllers.TeamIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/teams/{id}/members", id: "listTeamMembers", tag: "teams",
+			summary:    "P4-B: list a team's members. Requires teams.read.",
+			pathParams: []any{controllers.TeamIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListTeamMembersResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/teams/{id}/members", id: "addTeamMember", tag: "teams",
+			summary:    "P4-B: add an account to a team, or change its role in it. Requires teams.manage.",
+			pathParams: []any{controllers.TeamIDParam{}},
+			reqBody:    controllers.AddTeamMemberRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListTeamMembersResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/teams/{id}/members/{userId}", id: "removeTeamMember", tag: "teams",
+			summary:    "P4-B: remove an account from a team. Access inherited through the team stops on the member's next request.",
+			pathParams: []any{controllers.TeamMemberParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		// P4-C: organizations (tenants). Unlike /users and /teams these are
+		// NOT gated by the global middleware -- every route is decided against
+		// one organization, which the middleware cannot resolve from the path.
+		{
+			method: http.MethodGet, path: "/api/v1/tenants", id: "listTenants", tag: "tenants",
+			summary: "P4-C: list the organizations the caller can see, each with the caller's own role in it.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListTenantsResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/tenants", id: "createTenant", tag: "tenants",
+			summary: "P4-C: found an organization, with the caller as its owner. Requires tenant.create.",
+			reqBody: controllers.CreateTenantRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.TenantResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/tenants/{id}", id: "getTenant", tag: "tenants",
+			summary:    "P4-C: read one organization. Requires tenant.read on it; an organization the caller cannot see reports 404.",
+			pathParams: []any{controllers.TenantIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.TenantResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPatch, path: "/api/v1/tenants/{id}", id: "updateTenant", tag: "tenants",
+			summary:    "P4-C: rename, re-describe, archive or reactivate an organization. Requires tenant.manage on it.",
+			pathParams: []any{controllers.TenantIDParam{}},
+			reqBody:    controllers.UpdateTenantRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.TenantResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/tenants/{id}/members", id: "listTenantMembers", tag: "tenants",
+			summary:    "P4-C: list an organization's members. Requires tenant.members.read on it.",
+			pathParams: []any{controllers.TenantIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListTenantMembersResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/tenants/{id}/members", id: "addTenantMember", tag: "tenants",
+			summary:    "P4-C: add an account to an organization, or change its role there. Requires tenant.members.manage on it.",
+			pathParams: []any{controllers.TenantIDParam{}},
+			reqBody:    controllers.AddTenantMemberRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.TenantMemberView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/tenants/{id}/members/{userId}", id: "removeTenantMember", tag: "tenants",
+			summary:    "P4-C: remove an account from an organization. Everything it reached through the membership stops on its next request.",
+			pathParams: []any{controllers.TenantMemberParams{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/access", id: "getProjectAccess", tag: "projects",
+			summary:    "P4-B: who can reach this project, and what the caller may do in it. Requires project.access.read on the project.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectAccessResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/projects/{id}/access", id: "grantProjectAccess", tag: "projects",
+			summary:    "P4-B: grant a user or a team a role on this project, or change an existing grant. Requires project.access.manage.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.GrantProjectAccessRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectAccessResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/projects/{id}/access/{subjectKind}/{subjectId}", id: "revokeProjectAccess", tag: "projects",
+			summary:    "P4-B: revoke one subject's grant on this project. Requires project.access.manage.",
+			pathParams: []any{controllers.ProjectGrantSubjectParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills", id: "listSkills", tag: "skills",
+			summary: "Skills: every installed package, with AO's capability vocabulary and the fixed policy for each capability. Requires settings.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillListResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills", id: "installSkill", tag: "skills",
+			summary: "Skills: install a package from an absolute directory on the daemon host. Validates the manifest and verifies the content digest before recording anything, and enables the skill on no project. Requires settings.manage.",
+			reqBody: controllers.InstallSkillRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.SkillInstallView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/images", id: "listSkillImageApprovals", tag: "skills",
+			summary: "Skills: every container image this installation has decided it may execute, with the scope, the digest, who approved it and whether it is still active. Revoked and expired approvals are included: they are the history of what was once allowed. The response also carries the trust model in words - an approval is an administrator's decision about inspected bytes, NOT a publisher signature - and the exact promise and non-promise of revoking. Requires settings.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillImageApprovalListResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills/images", id: "approveSkillImage", tag: "skills",
+			summary: "Skills: approve one immutable image digest for one exact scope (tenant, project, skill, version, mode) to back one AO tool. A tag is refused - it is a mutable pointer. Requires an explicit confirmation flag and a note saying what was checked, and re-approving the same scope REPLACES rather than accumulating. This does NOT run anything: a run additionally needs the skill installed, activated, its capabilities granted and every required control attested. Requires settings.manage.",
+			reqBody: controllers.ApproveSkillImageRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.SkillImageApprovalView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/skills/images/{approvalId}", id: "revokeSkillImageApproval", tag: "skills",
+			summary:    "Skills: revoke one image approval. This stops NEW executions immediately - the approval is re-checked at the last point before a container starts. It does NOT stop a container already running, and it does NOT recall a secret already delivered to one. Requires settings.manage.",
+			pathParams: []any{controllers.SkillImageApprovalParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/registries", id: "listSkillRegistries", tag: "skills",
+			summary: "Skills: every skill registry this installation is configured to install from, with its type, location, trust policy and priority. A registry scoped to one organization is listed only to that organization's members. The response also carries the trust model in words - installing verifies INTEGRITY (AO fetches the package and computes both digests itself), which is not the same as knowing who wrote it, because AO verifies no publisher signature. Requires settings.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRegistryListResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/skills/registries/{registryId}", id: "saveSkillRegistry", tag: "skills",
+			summary:    "Skills: add or update one registry configuration. AO opens it before recording it - a registry it cannot read is refused, because one that answers every search with silence reads as \"this registry has nothing\". A credential is stored as the NAME of a sealed secret, never a value. A registry scoped to a tenant can only be configured by a member of that tenant. Requires settings.manage.",
+			pathParams: []any{controllers.SkillRegistryParams{}},
+			reqBody:    controllers.SaveSkillRegistryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRegistryView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/skills/registries/{registryId}", id: "removeSkillRegistry", tag: "skills",
+			summary:    "Skills: remove one registry configuration. Every package installed from it stays installed and keeps its recorded provenance: removing a compromised registry must not erase the evidence of what it served, and must not silently uninstall a package a project may have pinned. Requires settings.manage.",
+			pathParams: []any{controllers.SkillRegistryParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills/registries/{registryId}/test", id: "testSkillRegistryConnection", tag: "skills",
+			summary:    "Skills: test one registry's connection. It reads ONE small metadata endpoint: it downloads no package, changes no catalog, installs nothing, enables nothing on any project and approves no container image. The verdict is one of CONNECTED, AUTH_FAILED, TLS_FAILED, UNREACHABLE, INVALID_RESPONSE or POLICY_BLOCKED, and CONNECTED is deliberately the hardest to reach - a socket opening, TLS verifying and a 200 arriving are each necessary and none is sufficient, because a load balancer, a captive portal and an unrelated service on the right port all produce one. CONNECTED means the registry answered AS ITSELF, speaking a protocol version this build knows. An auth failure names the secretRef and never a credential value. Answers 200 whatever the verdict: a failed test is a successful answer to the question asked. Requires settings.manage, because it makes AO open a connection and present a stored credential.",
+			pathParams: []any{controllers.SkillRegistryParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRegistryProbeView{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills/registries/{registryId}/revocations/sync", id: "syncSkillRegistryRevocations", tag: "skills",
+			summary:    "Skills: ask one registry what it has withdrawn, and record it. AO polls nothing on its own - this is a request a person made. A recorded revocation blocks new installs of that exact release and marks an installed copy, and it stays in force while the registry is unreachable: silence is not consent. It never uninstalls, never deletes files, never disables a skill on any project and never stops a run already under way - deciding what to do about an installed release that was withdrawn is a human's call, one package at a time. A registry that could not be asked is NAMED rather than treated as having nothing withdrawn. Requires settings.manage.",
+			pathParams: []any{controllers.SkillRegistryParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRegistryRevocationSyncView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/trust", id: "listSkillTrust", tag: "skills",
+			summary: "Skills: the trust roots this installation will accept signatures from, their public signing keys, and every administrative revocation. A trust root NEVER arrives from a registry or from a release - AO Official's is compiled into the build, and an enterprise root is added here by an administrator and recorded in the audit trail. Keys are served with their sha256 fingerprints so an operator can compare one against what a publisher published elsewhere, which is the only way a first key is ever verified. Everything here is PUBLIC: there is no private key in the daemon, in this schema, or in any response. Requires settings.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillTrustListResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/skills/trust/roots/{trustRootId}", id: "saveSkillTrustRoot", tag: "skills",
+			summary:    "Skills: create or update an ENTERPRISE trust root. There is no tier field and no way to create an official one: AO Official arrives with the build, and the id \"ao-official\" and the publisher \"ao\" are refused as input, so the one name worth impersonating is the one nobody can claim. A root's publisher cannot be changed once keys chain to it - repointing an anchor would silently re-attribute every release those keys signed. A revoked root does not come back because a form was re-submitted. Requires settings.manage.",
+			pathParams: []any{controllers.SkillTrustRootParams{}},
+			reqBody:    controllers.SaveSkillTrustRootRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillTrustRootView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/skills/trust/keys/{keyId}", id: "addSkillSigningKey", tag: "skills",
+			summary:    "Skills: register one PUBLIC signing key under a trust root. The key is 32 bytes of ed25519 public key, base64 - a 64-byte value, which is what somebody pasting the wrong half of a keypair sends, is refused on length rather than stored. There is no route that generates a key: the daemon verifies and does not sign, because a consumer that could sign could mint its own trusted releases. Supplying a certificate the ROOT key signed makes the chain cryptographic and records the key's origin as \"certificate\"; omitting it records \"administrative\", which is what an administrator vouching for a key actually is, and the two are never rendered as the same fact. A key id is permanent: replacing the material under an existing one is refused as a substitution. Requires settings.manage.",
+			pathParams: []any{controllers.SkillSigningKeyParams{}},
+			reqBody:    controllers.AddSkillSigningKeyRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillSigningKeyView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills/trust/keys/{keyId}/retire", id: "retireSkillSigningKey", tag: "skills",
+			summary:    "Skills: close a signing key's validity window without calling it compromised. Retiring is deliberately a DIFFERENT verb from revoking, because the consequence for history is different: a retired key's earlier signatures still verify and a revoked key's do not. Merging them would mean every scheduled rotation invalidated the releases the outgoing key had legitimately signed, which is a system that punishes rotating on time. Requires settings.manage.",
+			pathParams: []any{controllers.SkillSigningKeyParams{}},
+			reqBody:    controllers.RetireSkillSigningKeyRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills/trust/revocations", id: "revokeSkillTrust", tag: "skills",
+			summary: "Skills: withdraw a signing key, a publisher identity, or a whole trust root - globally, and one-way. A revoked key's EARLIER signatures are refused too, because a key somebody else may have held for an unknown period proves nothing about who used it and when. Revoking a root refuses every key under it at once. What it does not do is uninstall anything, delete any file, disable a skill on any project, or stop a run already under way: it blocks NEW trusted installs and marks what is already here as affected, and deciding what to do about those is a human's call, one package at a time. A RELEASE is not revocable here - that is the publishing registry's act. Built-in roots and keys are refused: a revocation a local attacker could write would be a way to turn off official trust. Requires settings.manage.",
+			reqBody: controllers.RevokeSkillTrustRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillTrustRevocationView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/external/revocations", id: "listSkillExternalRevocations", tag: "skills",
+			summary: "Skills: what this installation has administratively withdrawn on a git forge - an account, a repository, or one exact commit. A forge publishes NO revocation feed, so this list is a decision made here rather than something AO was told, and no endpoint AO could poll would change that. Withdrawing blocks NEW installs; it uninstalls nothing, deletes no file, disables no skill on any project and stops no run already under way. Requires settings.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillExternalRevocationListResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills/external/revocations", id: "revokeSkillExternal", tag: "skills",
+			summary: "Skills: withdraw a forge account, a repository, or one exact commit. Three different blast radii, and the NARROWEST is usually the most useful during an incident: a repository that shipped one bad release stays installable at every other commit, so an administrator can act immediately without taking a dependency away from everybody on a good version. A commit is named \"owner/repository@<sha>\" - a bare SHA is meaningless without the repository it belongs to, since two repositories can hold the same commit. It blocks NEW installs and removes nothing. Requires settings.manage.",
+			reqBody: controllers.RevokeSkillExternalRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillExternalRevocationView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills/external/revocations/lift", id: "liftSkillExternalRevocation", tag: "skills",
+			summary: "Skills: lift an external withdrawal. It exists for the external subjects ONLY, and the asymmetry is deliberate: a signing key somebody else may have held is compromised forever, so trust revocations are one-way and stay that way. An external subject is a judgement about a PLACE - a repository transferred to somebody who was then vetted, an account banned during an incident that turned out to be a false alarm - and places get re-vetted. Requires settings.manage.",
+			reqBody: controllers.LiftSkillExternalRevocationRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/external/tags", id: "listSkillMovedTags", tag: "skills",
+			summary: "Skills: every git tag AO has seen point somewhere else than it recorded. A tag is a name somebody can re-point and the commit is the release, so AO writes down where each tag pointed and says when that changes. Both SHAs are returned in full, because deciding two commits are different needs every character. Nothing already installed is changed by a tag moving: its provenance still records the commit its bytes actually came from. Filtered to the registries you can see. Requires settings.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillMovedTagListResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/marketplace", id: "searchSkillMarketplace", tag: "skills",
+			summary:    "Skills: search every enabled registry you can see. It downloads no package code - fetching is a separate step that only an install performs - and it stores no query. Every result reports trust \"unverified\", because a search hashed nothing; a release only becomes \"verified\" once AO has fetched and measured its bytes at install. A registry that could not be read is NAMED in notes rather than silently absent, since \"this registry has nothing\" and \"AO could not read it\" are different answers. Requires settings.read.",
+			pathParams: []any{skillMarketplaceQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillMarketplaceSearchResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/marketplace/{registryId}/{skillId}", id: "getSkillRelease", tag: "skills",
+			summary:    "Skills: one release and every version of it the registry offers, including deprecated and revoked ones - the version list is where somebody finds out the version they wanted was withdrawn. Carries the requested capabilities, the execution modes, the publisher, both digests, any provenance the release CLAIMS (AO validates none of it), the compatibility verdict against this build, and whether it is already installed. Requires settings.read.",
+			pathParams: []any{controllers.SkillReleaseParams{}, skillReleaseQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillReleaseDetailResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills/marketplace/install", id: "installSkillRelease", tag: "skills",
+			summary: "Skills: install ONE exact release from one configured registry. A version is required and exact - there is no latest. AO re-resolves the release, refuses it if the registry has revoked it, checks the registry's trust policy and the AO version range, fetches the package into a quarantine directory, and verifies BOTH digests plus the manifest's agreement with the listing over the bytes that landed before anything reaches the catalog. A symlink anywhere in the package is refused rather than followed. This enables the skill on NO project, grants no capability, approves no container image and runs no publisher script. Requires settings.manage.",
+			reqBody: controllers.InstallSkillReleaseRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.SkillInstallOutcomeView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/updates", id: "checkSkillUpdates", tag: "skills",
+			summary: "Skills: ask each installed release's registry what it says now. AO polls nothing on its own - this is a request a person made. It reports a newer installable version where one exists, names a registry it could not reach without touching that install's recorded provenance, and marks any installed release the registry has since REVOKED. A revocation blocks new installs and nothing else: AO does not uninstall it, does not disable it on any project, and does not stop a run already under way. Requires settings.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillUpdateCheckResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/{skillId}/audit", id: "getSkillAudit", tag: "skills",
+			summary:    "Skills: the catalog audit trail for one skill - who installed it, who enabled it where, and who changed its grant. Requires audit.read, which is stricter than the rest of this family: the trail names actors and carries the host path each package came from.",
+			pathParams: []any{controllers.SkillIDParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillAuditResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/{skillId}/versions/{version}", id: "getSkill", tag: "skills",
+			summary:    "Skills: one installed version, its declared capabilities, its modes and the digest verified at install. Requires settings.read.",
+			pathParams: []any{controllers.SkillVersionParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillInstallView{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/skills/{skillId}/versions/{version}", id: "uninstallSkill", tag: "skills",
+			summary:    "Skills: remove one installed version. Refused while any project still has that version enabled. Requires settings.manage.",
+			pathParams: []any{controllers.SkillVersionParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/skills", id: "listProjectSkills", tag: "skills",
+			summary:    "Skills: what this project has activated, what is available to activate, and what the caller may do here. Requires project.read on the project.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectSkillsResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/projects/{id}/skills/{skillId}", id: "enableProjectSkill", tag: "skills",
+			summary:    "Skills: enable an installed skill on this project, pinned to one version, with an explicit capability grant. The grant may never exceed the approver's own permissions. Enabling runs nothing. Requires project.manage.",
+			pathParams: []any{controllers.ProjectSkillParams{}},
+			reqBody:    controllers.EnableSkillRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillActivationView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/projects/{id}/skills/{skillId}", id: "disableProjectSkill", tag: "skills",
+			summary:    "Skills: disable a skill on this project and revoke its grant. Requires project.manage.",
+			pathParams: []any{controllers.ProjectSkillParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/skills/{skillId}/dry-run", id: "dryRunProjectSkill", tag: "skills",
+			summary:    "Skills: report what a run WOULD need - capabilities, missing permissions, outstanding approval, and what the runner does and does not provide. Starts no process, opens no socket and changes nothing. Requires project.read.",
+			pathParams: []any{controllers.ProjectSkillParams{}},
+			reqBody:    controllers.SkillDryRunRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillDryRunResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/skills/{skillId}/run", id: "runProjectSkill", tag: "skills",
+			summary:    "Skills: accept one authorized mode of an activated skill for execution and return the durable run (202). Requires project.manage -- the dry run reports what WOULD happen, this makes it happen. Refused (4xx, no run created) unless the skill is installed and enabled, the version is pinned, every capability the mode declares is granted, the runtime attests every control the mode needs, and the mode is implemented. The image approval for this exact scope is checked when the run executes: a run without one ends refused. The caller contributes no image, no command and no argv. Tool modes run one of AO's closed scan tools (ao.static-scan/v1, ao.secret-scan/v1, ao.dependency-scan/v1) in the container runner; agent modes of builtin or trusted packages run AO's host agent (ADR 0010); a composite mode (full-audit) runs each composed mode as its own child run and consolidates their verified reports, ending succeeded only when every mode produced one and partial otherwise (ADR 0011). The same idempotencyKey, or any request while a run for this project, skill and mode is queued or running, returns THAT run with created=false.",
+			pathParams: []any{controllers.ProjectSkillParams{}},
+			reqBody:    controllers.SkillRunRequest{},
+			resps: []respUnit{
+				{http.StatusAccepted, controllers.SkillRunResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/skills/runs", id: "listProjectSkillRuns", tag: "skills",
+			summary:    "Skills: the project's run history, newest first. Each run records the skill version, mode, the capabilities its authorization granted, the runner's attested controls, the approved image, and how it ended. Reports are not included; read one run for its verified report. Requires project.read.",
+			pathParams: []any{controllers.ProjectSkillRunsParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRunListResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/skills/runs/{runId}", id: "getProjectSkillRun", tag: "skills",
+			summary:    "Skills: one run of this project with its findings. The report is served only when its stored bytes still hash to reportSha256 (integrity \"verified\"); a mismatch is reported, never served. A run id from another project is 404. Requires project.read.",
+			pathParams: []any{controllers.ProjectSkillRunParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRunDetailView{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations", id: "createPentestAuthorization", tag: "skills",
+			summary:    "Skills: create the explicit, per-target authorization an active-pentest run must reference. It binds to one destination (scheme+host+port, no wildcard/IP), carries the written-authorization reference, and expires. Confirm must be true. Requires settings.manage - a pentest is the one skill capability that emits offensive traffic.",
+			pathParams: []any{controllers.ProjectSkillParams{}},
+			reqBody:    controllers.PentestAuthorizationRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.PentestAuthorizationView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations", id: "listPentestAuthorizations", tag: "skills",
+			summary:    "Skills: the project's active-pentest authorizations for one skill, active and not - the history of what it once allowed to be tested. Carries no secret. Requires project.read.",
+			pathParams: []any{controllers.ProjectSkillParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.PentestAuthorizationListResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations/{authId}/revoke", id: "revokePentestAuthorization", tag: "skills",
+			summary:    "Skills: revoke a pentest authorization. Revocation is immediate for any new run; a run already in flight keeps its own bounded window. Requires settings.manage.",
+			pathParams: []any{controllers.ProjectSkillPentestAuthParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.PentestAuthorizationView{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/skills/runs/{runId}/cancel", id: "cancelProjectSkillRun", tag: "skills",
+			summary:    "Skills: ask a queued or running run to stop. A running run's container is stopped and removed and the run ends cancelled; a result that completes in the same instant is discarded rather than recorded as a success the caller asked not to have. 409 when the run already ended. Requires project.manage.",
+			pathParams: []any{controllers.ProjectSkillRunParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRunSummaryView{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/auth/providers", id: "getAuthProviders", tag: "auth",
+			summary: "P4-A: report which sign-in methods this installation offers. Public by necessity — the sign-in screen renders from it — and it carries no issuer, client id, client secret, scope or constraint.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.AuthProvidersResponse{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/oidc/start", id: "startOIDCLogin", tag: "auth",
+			summary:         "P4-A: begin an OIDC Authorization Code + PKCE login and return the provider authorization URL",
+			reqBody:         controllers.OIDCStartRequest{},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.OIDCStartResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/auth/oidc/callback", id: "completeOIDCLogin", tag: "auth",
+			summary: "P4-A: the identity provider's redirect target. A browser flow receives the session cookie and a 302 to a bounded in-app path; a desktop flow receives a terminal HTML page and mints its session at /auth/oidc/claim instead. Never renders a token, an authorization code, or the provider's own message.",
+			resps: []respUnit{
+				{http.StatusFound, ""},
+				{http.StatusBadRequest, ""},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+			contentTypes: map[int]string{http.StatusFound: "text/html", http.StatusBadRequest: "text/html"},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/oidc/claim", id: "claimOIDCLogin", tag: "auth",
+			summary: "P4-A: redeem a finished desktop login with the handoff secret the supervisor kept on loopback. Answers pending until the person finishes at the provider; on completion the AO session arrives as a Set-Cookie header and never in the body.",
+			reqBody: controllers.OIDCClaimRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OIDCClaimResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/admin/reset-password", id: "adminResetPassword", tag: "auth",
+			summary: "Loopback-only local recovery: reset a known account's password without a session",
+			reqBody: controllers.AdminResetPasswordRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.AdminResetPasswordResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
+}
+
+// workflowOperations declares the /workflows operations (Checkpoint 8A). Must
+// stay 1:1 with the routes WorkflowsController.Register mounts (enforced by
+// the parity test).
+func workflowOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{projectId}/workflows", id: "createWorkflowRun", tag: "workflows",
+			summary:    "Create a workflow run and seed its initial steps",
+			pathParams: []any{controllers.WorkflowProjectIDParam{}},
+			reqBody:    controllers.CreateWorkflowRunRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.WorkflowRunResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{projectId}/board", id: "getProjectBoard", tag: "workflows",
+			summary:    "Project Board: every top-level workflow run projected onto the lifecycle vocabulary",
+			pathParams: []any{controllers.ProjectBoardParam{}, controllers.ProjectBoardQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowBoardResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}", id: "getWorkflowRun", tag: "workflows",
+			summary:    "Get a workflow run with its steps and attempts",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows", id: "listWorkflowRuns", tag: "workflows",
+			summary:    "List workflow run summaries",
+			pathParams: []any{controllers.ListWorkflowsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListWorkflowsResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/cancel", id: "cancelWorkflowRun", tag: "workflows",
+			summary:    "Cancel a workflow run and its non-terminal steps",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/cancel-archive", id: "cancelAndArchiveWorkflowRun", tag: "workflows",
+			summary:    "Cancel a workflow run, cascade to its child runs, and archive it off the active Board (deletes nothing)",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{projectId}/board/history", id: "getProjectBoardHistory", tag: "workflows",
+			summary:    "Archived workflows for a project, newest archive first",
+			pathParams: []any{controllers.ProjectBoardParam{}, controllers.ProjectBoardQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowBoardResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/start", id: "startWorkflowRun", tag: "workflows",
+			summary:    "Start a pending workflow run: run its plan step and dispatch its work step's Codex worker",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/continue", id: "continueWorkflowRun", tag: "workflows",
+			summary:    "Continue a workflow run: dispatch its review step's real Claude reviewer once the work step has completed (Checkpoint 8C). Idempotent no-op when nothing is currently dispatchable. P3-C: the optional body carries the authority proof from a GET /advice reading; a Continue that arrives while AO is already repairing this run is refused 409 ACTION_SUPERSEDED rather than re-entering a resume path the repair owns.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			// Optional: a caller that sends no authority proof gets exactly the
+			// pre-P3-C behaviour, so requiring the body would break every
+			// existing client for a check that is a courtesy, not a gate.
+			reqBody:         controllers.WorkflowActionAuthorityRequest{},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/runtime/capacity", id: "getRuntimeCapacity", tag: "workflows",
+			summary: "P1-C: runtime capacity. The configured concurrency limits, what currently holds each slot, and the queue in scheduling order. This is the machine's capacity (how many agent runtimes may run at once), not a provider's rate limit.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SchedulerStatusResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/runtime/gc", id: "runRuntimeGC", tag: "workflows",
+			summary: "P1-C: sweep the runtime artifacts AO left behind. Destroys only runtimes whose ownership, exact incarnation and terminality AO can prove; everything else is reported and left alone. dryRun classifies without destroying, using the identical predicates.",
+			reqBody: controllers.RuntimeGCRequest{}, optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.RuntimeGCReportResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/usage", id: "getWorkflowUsage", tag: "workflows",
+			summary:    "P3-E: the canonical token/cost ledger for one run — totals, the per-role and per-model breakdown, base execution vs repair, an autonomous parent's children, the roles whose spend AO cannot observe, and the frozen budget the run is measured against. Every figure carries its own provenance: `source` says whether tokens were reported by a provider or estimated by AO, and `cost.basis` says whether money was calculated (from the named rate card) or is simply unknown. `recorded: false` means no usage rows exist for the run and must be rendered as \"no usage data recorded\", never as zero. This is the ONLY total a client may present; the per-role `usage` block on the run detail is per-SESSION and several roles can share one session.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowUsageLedgerResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/exploration", id: "getWorkflowExploration", tag: "workflows",
+			summary:    "Frente 3 / 3C: what each agent of a run LOOKED AT beside what it spent -- file reads, distinct files, repeated reads, searches, listings, commands, edits, exploration before the first edit, bytes returned to the model by origin (agent exploration, AO prompt, harness injection), model calls and tokens -- plus the run's quality signals (final state, verify, review verdict, fix cycles, retries, failovers). Every figure carries `basis`: observed (reported by the provider transcript or counted exactly from it), derived (an inference `method` names), or unavailable (the harness does not expose it; `value` is null, never 0). Paths are project-relative and only for files inside the project that pass the repository boundary; no content, command, pattern or prompt is ever stored. A strict read: it never advances the run. `recorded: false` means nothing was recorded, not zero exploration.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowExplorationResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{projectId}/usage", id: "getProjectUsage", tag: "workflows",
+			summary:    "P3-E: a project's token/cost rollup for one period (today, 7d, 30d, all). Buckets by the instant AO DISPATCHED the work — a fact AO recorded itself — which `periodBasis` states explicitly so nobody reads these windows as a provider's billing period. `averageTokensPerWorkflow` is null, not 0, when no workflow spent anything in the range.",
+			pathParams: []any{controllers.WorkflowProjectIDParam{}, projectUsageQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectUsageResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/recovery", id: "getWorkflowRecovery", tag: "workflows",
+			summary:    "P1-B: the deterministic recovery assessment for a run — the one recommended action, why, whether AO may take it automatically, whether the durable plan is reusable, and whether a bounded Repair Agent is available. Derived entirely from durable facts; no model is consulted.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRecoveryResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/advice", id: "getWorkflowAdvice", tag: "workflows",
+			summary:    "P3-C: the deterministic answer to \"what do I do now\" — the category (no action required / auto-recoverable / wait-only / human action / terminal), whether a person is actually needed, what AO is doing about it by itself, the offered and refused actions with the reason behind every refusal, and the authority proof a later click is revalidated against. A strict read: it writes nothing.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowAdviceResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/pending-changes", id: "getWorkflowPendingChanges", tag: "workflows",
+			summary:    "P3-A: what is uncommitted in the repository this run works in, and a proposed commit message. Read-only: it runs git status and nothing else. `available: false` means AO could not read the repository, which is UNKNOWN and never \"clean\".",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowPendingChangesResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/pending-changes/commit", id: "commitWorkflowPendingChanges", tag: "workflows",
+			summary:    "P3-A: commit the repository's pending work under a message the caller supplied, re-probe, and resume the run only once the tree is provably clean. There is no stash and no silent commit: a message is required, and a commit that leaves the tree dirty does not resume the run.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			reqBody:    controllers.CommitPendingChangesRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.CommitPendingChangesResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/placement", id: "getWorkflowPlacement", tag: "workflows",
+			summary:    "P1-D: where this run's work happens and why it has not launched — the FROZEN execution placement and its own generation, the durable provider-attempt chain with what each attempt could prove about mutation, and the single admission verdict naming which authority is withholding the launch (capacity, branch, placement, provider or dependency). Read-only, derived from durable rows; no token is exposed and nothing here can move a placement.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowPlacementResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/placement/override", id: "requestWorkflowPlacementOverride", tag: "workflows",
+			summary:    "P1-E: ask for a particular execution placement for one task. This is a REQUEST, not a move: before anything is frozen it is the input the freeze uses; once a placement IS frozen it is recorded and changes nothing until a transition consumes it, and the response says which of the two happened. `auto` withdraws a standing override and defers to selection policy.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			reqBody:    controllers.PlacementOverrideRequestBody{},
+			resps: []respUnit{
+				{http.StatusAccepted, controllers.PlacementOverrideResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/placement/transition", id: "transitionWorkflowPlacement", tag: "workflows",
+			summary:    "P1-E: replace one frozen placement generation with another. Refused with 409 and the refusing AUTHORITY named unless every one of them has provably let go — the run is live, no authoritative provider attempt, no outstanding capacity claim, no runtime-bound claim, no held branch lock, and no outstanding integration authority. Quiescence is proved from durable rows, never inferred from the filesystem. Repeating a transition that already happened returns it rather than minting a second generation, and there is no operation here that re-points a running obligation.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			reqBody:    controllers.PlacementTransitionRequestBody{},
+			resps: []respUnit{
+				{http.StatusAccepted, controllers.PlacementTransitionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/resume", id: "resumeWorkflowRun", tag: "workflows",
+			summary:    "P1-B: discharge exactly the run's outstanding durable obligation, and report which one it was. Idempotent; an obligation only a person can discharge is reported rather than driven.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/reuse", id: "reuseWorkflowPlan", tag: "workflows",
+			summary:    "P1-B: execute this objective's existing durable plan revision as it stands. Refused unless the plan's identity and its project context both still hold — a stale plan is never run silently.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/regenerate", id: "regenerateWorkflowPlan", tag: "workflows",
+			summary:    "P1-B: mint a new durable plan revision for an objective whose plan cannot be reused. The superseded revision stays auditable and its tasks stop being authoritative. Bounded, and a compare-and-set on the revision the caller observed. P3-C: the optional body carries the authority proof from a GET /advice reading; a click computed against a state the run has moved past is refused 409 ACTION_SUPERSEDED.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			// Optional for the same reason /repair's is: a caller that sends no
+			// proof keeps the pre-P3-C behaviour.
+			reqBody:         controllers.WorkflowActionAuthorityRequest{},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/repair", id: "repairWorkflowRun", tag: "workflows",
+			summary:    "P1-B: launch a bounded Repair Agent for a repairable technical stop. Refused with the full repair plan (and why) for any condition AO must not aim a code-writing agent at, for a spent repair budget, or under a disabled repair policy. P3-C: the optional body carries the authority proof from a GET /advice reading; a click computed against a state the run has moved past — or one that arrives while AO is already repairing — is refused 409 ACTION_SUPERSEDED instead of duplicated.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			// Optional: a caller that sends no authority proof gets exactly the
+			// pre-P3-C behaviour, so requiring the body would break every
+			// existing client for a check that is a courtesy, not a gate.
+			reqBody:         controllers.WorkflowActionAuthorityRequest{},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusAccepted, controllers.WorkflowRepairResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/tasks/{taskId}/resume", id: "resumeWorkflowTask", tag: "workflows",
+			summary:    "Resume a planned task parked in needs_attention after a person has resolved what parked it (migration 0130). Idempotent: a task that is not parked is returned unchanged.",
+			pathParams: []any{controllers.WorkflowTaskParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception", id: "authorizeWorkflowTaskFreshReviewException", tag: "workflows",
+			summary: "Authorize ONE additional integration fresh review for a task parked on integration_stale_review_after_rebase whose ordinary budget is spent, " +
+				"with a named human approver and a reason. The global bound is unchanged; the grant is recorded against this task and this workspace state, " +
+				"and a repeat request for the same state returns the existing grant rather than widening the budget again.",
+			pathParams: []any{controllers.WorkflowTaskParam{}},
+			reqBody:    controllers.AuthorizeFreshReviewExceptionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, workflowcore.IntegrationFreshReviewException{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/amend", id: "amendWorkflowTaskCriterion", tag: "workflows",
+			summary: "Amend or declare obsolete one acceptance criterion of a planned task (migration 0132), with a named human approver, a reason and checkable evidence. " +
+				"Records the original text forever, applies the amendment, and re-opens an independent review — it never approves the work.",
+			pathParams: []any{controllers.WorkflowTaskParam{}},
+			reqBody:    controllers.AmendTaskCriterionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.AmendTaskCriterionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review", id: "resumeAmendedWorkflowTaskReview", tag: "workflows",
+			summary:    "Finish an acceptance-criterion amendment whose fresh independent review never opened: retire the superseded review dispatch and re-open the review. Records no second amendment; idempotent.",
+			pathParams: []any{controllers.WorkflowTaskParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		// The two operator-only recovery operations. They are separate from
+		// /continue because /continue is also the wake poller's entry point, and
+		// each of these DISCARDS something AO deliberately refused to act on.
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/recover/review-provenance", id: "recoverWorkflowReviewProvenance", tag: "workflows",
+			summary: "Recover a run stopped because AO cannot prove which commit its approved review target was read at, and could not reconstruct it from the branch's history. " +
+				"Discards that unlocatable approval and asks for exactly one fresh independent review of the workspace as it stands. " +
+				"It never infers or attests an approved commit and never verifies code no reviewer has read. Human-only and bounded.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/reopen", id: "reopenAmbiguousWorkflowPlan", tag: "workflows",
+			summary: "Reopen planning for an objective whose planner command was in flight when the daemon restarted, so AO could not prove whether it produced a plan. " +
+				"Planning starts over from scratch: nothing is adopted from the discarded planner. " +
+				"The request must carry the plan's observed updatedAt, and a reopen of a state that has since changed is refused. Human-only and bounded.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			reqBody:    controllers.ReopenAmbiguousPlanRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		// Checkpoint 8P-E.18 — the Incident Advisor. Four operations, mirroring
+		// the four routes: the split between proposing and executing is the
+		// authorization boundary, not a REST style choice.
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/incident", id: "getWorkflowIncident", tag: "workflows",
+			summary:    "Explain why a stopped workflow run is waiting for a person: the incident, its bounded evidence pack, and any diagnosis with AO's own reading of the proposed action",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.IncidentResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/incident/diagnose", id: "diagnoseWorkflowIncident", tag: "workflows",
+			summary:    "Investigate a stopped run with an isolated, read-only Diagnostic Agent over a bounded evidence pack. Bounded per incident.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusAccepted, controllers.IncidentResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/incident/diagnosis", id: "submitWorkflowIncidentDiagnosis", tag: "workflows",
+			summary:    "Record a Diagnostic Agent's validated classification and proposed action. This endpoint cannot execute anything.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			reqBody:    controllers.IncidentDiagnosisSubmissionBody{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.IncidentResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/incident/execute", id: "executeWorkflowIncidentAction", tag: "workflows",
+			summary:         "Carry out an incident's diagnosed action, after AO's authorization policy and — for anything beyond the ordinary continue path — an explicit human approval",
+			pathParams:      []any{controllers.WorkflowIDParam{}},
+			reqBody:         controllers.ExecuteIncidentRequest{},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.IncidentResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/generate", id: "generateWorkflowPlan", tag: "workflows", summary: "Generate and deterministically validate a durable master plan", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}, {http.StatusUnprocessableEntity, envelope.APIError{}}}},
+		{method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/plan", id: "getWorkflowPlan", tag: "workflows", summary: "Get a durable master plan and planned tasks", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusNotFound, envelope.APIError{}}}},
+		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/approve", id: "approveWorkflowPlan", tag: "workflows", summary: "Approve a validated plan and dispatch the first eligible task", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}, {http.StatusUnprocessableEntity, envelope.APIError{}}}},
+		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/reject", id: "rejectWorkflowPlan", tag: "workflows", summary: "Reject and cancel a master plan", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}}},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/questions", id: "listWorkflowQuestions", tag: "workflows",
+			summary:    "List durable questions (Checkpoint 8K-A) captured for a workflow run",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListWorkflowQuestionsResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/questions/pending", id: "listPendingDecisions", tag: "decisions",
+			summary:    "List open/in-flight questions across all workflow runs (Checkpoint 8K-B pass 3's global Pending Decisions inbox)",
+			pathParams: []any{controllers.PendingDecisionsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListWorkflowQuestionsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/questions/{questionId}", id: "getWorkflowQuestion", tag: "workflows",
+			summary:    "Get one durable question captured for a workflow run",
+			pathParams: []any{controllers.WorkflowQuestionIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowQuestionResponseBody{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/questions/{questionId}/answer", id: "answerWorkflowQuestion", tag: "workflows",
+			summary:    "Submit a human answer for a question that is awaiting one (Checkpoint 8K-A)",
+			pathParams: []any{controllers.WorkflowQuestionIDParam{}},
+			reqBody:    controllers.AnswerWorkflowQuestionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowQuestionResponseBody{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func browserOperations() []operation {
@@ -481,9 +2178,431 @@ func browserOperations() []operation {
 	}
 }
 
+// projectUsageQuery is the period selector for the P3-E project rollup.
+type projectUsageQuery struct {
+	Range *string `query:"range,omitempty" enum:"today,7d,30d,all" description:"Rollup period. Defaults to 7d. Buckets by dispatch time, not by any provider billing period."`
+}
+
+// skillMarketplaceQuery and skillReleaseQuery mirror the controller's query
+// structs. They live in controllers so the handler and the spec read the same
+// declaration.
+type skillMarketplaceQuery = controllers.SkillMarketplaceQuery
+
+type skillReleaseQuery = controllers.SkillReleaseQuery
+
 type conversationSnapshotQuery struct {
 	BeforeSequence *int64 `query:"beforeSequence,omitempty" minimum:"1" description:"Read items older than this conversation sequence. Omit for the newest page."`
 	Limit          *int64 `query:"limit,omitempty" minimum:"1" maximum:"500" description:"Maximum combined messages and activities to return. Defaults to 200."`
+}
+
+func usageSubjectOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/usage/subject-hook", id: "recordSubjectUsageHook", tag: "usage",
+			summary: "P3-E: a runtime pane reports its OWN provider token spend. Used by reviewer and decision-resolver panes, which are not AO sessions and therefore cannot report through the session activity route. Deliberately usage-only: it carries no activity state and no session id, so a pane can say what it spent without being able to touch any session's lifecycle. A session subject is refused -- sessions report through /sessions/{id}/activity, which validates a launch id this route has no business touching.",
+			reqBody: controllers.SubjectUsageHookRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SubjectUsageHookResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+			},
+		},
+	}
+}
+
+func capacityOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/capacity", id: "listCapacity", tag: "capacity",
+			summary: "List Checkpoint 8J capacity/quota snapshots per known harness",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListCapacityResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
+}
+
+// projectMemoryOperations registers P2-A's project-memory surface: read the
+// state of a project's memory, inspect the facts in it, and the two repairs
+// that follow from a bad answer.
+func projectMemoryOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory", id: "getProjectMemoryStatus", tag: "projects",
+			summary:    "P2-A: project memory status per repository. What generation the memory is at, which commit it was derived from, how many facts it holds and how many of them AO can still vouch for, and whether an indexing pass is running. A repository absent from this list has never been indexed.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/items", id: "listProjectMemoryItems", tag: "projects",
+			summary:    "P2-A: inspect the stored facts of one repository's project memory, including the stale and invalidated ones — seeing those is the point of an inspect. Bodies are omitted; this answers what AO remembers and whether it can still vouch for it.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.ListProjectMemoryItemsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryItemsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/report", id: "getProjectMemoryReport", tag: "projects",
+			summary:    "P2-B: is this project's memory warm, and what is it costing each role. Runs the ordinary lifecycle freshness check (so a warm project costs a row read and no file I/O) and then assembles each role's pack exactly as a dispatch would, reporting the budget, the items and bytes selected, the estimated tokens, and what the budget excluded. syncKind=none means memory was already at the repository's current commit — the warm path the optimisation exists to produce.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.GetProjectMemoryReportQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectMemoryReportResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/knowledge", id: "listProjectMemoryKnowledge", tag: "projects",
+			summary:    "P2-C: what tasks have taught this project, and what of it still holds. Task results, decisions and known risks, each with the lifecycle that decides whether retrieval would serve it: active, superseded (and by what), resolved (and by whom), obsolete, or conflicting. Active only by default, because that is what a task would actually receive; nothing is ever deleted, so asking for another status reconstructs what the project used to believe.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.ListProjectMemoryKnowledgeQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryKnowledgeResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/manifests", id: "listProjectMemoryContextManifests", tag: "projects",
+			summary:    "P2-C: what one execution was actually told. A context manifest records the identities of the memory facts a dispatch received — never the prompt, and never the facts' text, which may have been superseded since. It is what makes \"the Worker was working from a stale decision\" checkable rather than suspected. Names a task or a workflow run; expand=true resolves the ids back into the facts and reports any that no longer exist.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.ListProjectMemoryManifestsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryManifestsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/rebuild", id: "rebuildProjectMemory", tag: "projects",
+			summary:    "P2-A: re-derive one repository's project memory. Bounded by the indexer's limits and restart-safe; purge deletes the existing facts first, which is the escape hatch for memory that is wrong in a way a re-derivation cannot fix.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.RebuildProjectMemoryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.RebuildProjectMemoryResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/invalidate", id: "invalidateProjectMemory", tag: "projects",
+			summary:    "P2-A: retire project memory that can no longer be vouched for. With paths, retires exactly what those paths proved. With no paths, runs drift detection and applies what it finds — the honest repair for \"something moved and I cannot say what\". Nothing is deleted; facts are marked so they stop being served.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.InvalidateProjectMemoryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.InvalidateProjectMemoryResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/validate", id: "validateProjectMemory", tag: "projects",
+			summary:    "P2-D: check which facts AO can still prove it is entitled to serve. Distinct from invalidate, which asks whether a fact's source FILES moved: this asks whether its LICENCE still holds — same repository identity, a mutation-provenance row behind every canonical promotion, a provenance kind this build can check. Dry run unless apply is set, and it only ever demotes.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.ValidateProjectMemoryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ValidateProjectMemoryResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/prune", id: "pruneProjectMemory", tag: "projects",
+			summary:    "P2-E: retire canonical project memory that was built from a task's isolated worktree instead of from the repository. A worktree is a checkout of a repository AO already knows, not a second repository; indexing one produced canonical facts derived from an unintegrated branch. Dry run unless apply is set, and it refuses anything it cannot prove is safe: registered repositories, workspaces a live execution is using, and any prune that would leave the project with no memory at all.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.PruneProjectMemoryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.PruneProjectMemoryResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/graph", id: "getProjectMemoryGraphStatus", tag: "projects",
+			summary:    "The code graph's state per repository: which backend is serving it (by its real name -- the in-tree one is reported as \"local\" and never under a vendor's name), which generation and commit, how many files, symbols and relations it holds, what the last sync had to do, and the bounded architecture summary derived from it. drift is non-empty when the graph can no longer be vouched for -- the checkout moved on, or it is no longer the same repository -- and such a graph is reported unhealthy even though its rows are intact.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryGraphResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/graph/sync", id: "syncProjectMemoryGraph", tag: "projects",
+			summary:    "Bring one repository's code graph up to its current commit. It chooses incremental or full exactly as a dispatch would, so an operator running it by hand exercises the production path: incremental whenever a change set can be proved, a full build otherwise. filesParsed against filesReused is the measurement -- an incremental sync of a one-file commit parses one file, and a full pass over an unchanged tree parses none.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.SyncProjectMemoryGraphQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectMemoryGraphSyncResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/graph/query", id: "queryProjectMemoryGraph", tag: "projects",
+			summary:    "Ask the code graph what a dispatch would be told. Given a symbol, a file, or free text from an objective, it returns the bounded neighbourhood: the matching declarations with their signatures and summaries, what reaches them, what they reach, the tests proven to cover them, the routes that arrive at them and the tables they touch. consideredSymbols against the returned count is what makes the bound visible.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.GetProjectMemoryGraphQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectMemoryGraphAnswerResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		// P4-G: Project Intelligence. Every route is project-scoped and gated
+		// on memory.read (or project.manage for the two that do work), so a
+		// project in another organization answers 404 exactly as /projects/{id}
+		// does.
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/intelligence", id: "getProjectIntelligence", tag: "projects",
+			summary:    "P4-G: what AO knows about this project, per repository — the derived lifecycle state (pending, indexing, ready, stale, failed), the commit the graph describes against the one the checkout is actually at, the counts, what the last sync had to do, and how long it took. Stale is reported rather than smoothed over: serving structure AO cannot vouch for as current is the one failure this subsystem refuses to make.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectIntelligenceOverview{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/intelligence/architecture", id: "getProjectIntelligenceArchitecture", tag: "projects",
+			summary:    "P4-G: the structural summary the build derived — modules, entry points, services, storage and the dependencies between them. Read from the row the build wrote, never recomputed: the summary belongs to a generation and cannot have changed since it.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.ProjectIntelligenceRepoQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectIntelligenceArchitecture{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/intelligence/graph", id: "getProjectIntelligenceGraph", tag: "projects",
+			summary:    "P4-G: a bounded neighbourhood of the code graph, walked outward from a named symbol or file. There is deliberately no whole-graph export — a seed is required, depth is capped at two hops, and both nodes and edges have ceilings a caller cannot raise. A walk that hits one reports truncated rather than returning a partial answer as if it were whole.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.GetProjectIntelligenceGraphQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectIntelligenceSubgraph{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/intelligence/search", id: "searchProjectIntelligence", tag: "projects",
+			summary:    "P4-G: ask a question of the two authorities AO already has — durable project memory and the code graph — and get one ranked answer list with provenance on every row. Every hit says which authority produced it, because a fact somebody wrote and a symbol AO parsed are different kinds of claim.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.GetProjectIntelligenceSearchQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectIntelligenceSearchResult{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/intelligence/context", id: "previewProjectIntelligenceContext", tag: "projects",
+			summary:    "P4-G: the context pack one role would actually be handed, assembled by the same call a dispatch makes. Input observability only — it shows AO's own construction from AO's own durable rows, never anything a model produced. The measurements are named 'selected' and 'avoided' rather than 'saved': AO cannot see what the coding harness reads inside the worktree, so it cannot claim to have prevented a read.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.GetProjectIntelligenceContextQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectIntelligenceContextPreview{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/intelligence/sync", id: "syncProjectIntelligence", tag: "projects",
+			summary:    "P4-G/P4-H: bring the graph AND durable project memory up to date now, each choosing between an incremental pass and a full build exactly as a dispatch would. Normal operation does not need this: the reconciler keeps every project current on its own, and this is the button for when somebody does not want to wait for it. Memory runs second, so its high-level facts read the graph this call just built.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.ProjectIntelligenceRepoQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectIntelligenceSyncResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/intelligence/rebuild", id: "rebuildProjectIntelligence", tag: "projects",
+			summary:    "P4-G/P4-H: discard the served graph and build it again from scratch, then re-derive every durable memory fact. The repair for knowledge an operator has reason to distrust, and expensive on a large repository — the frontend confirms before calling it.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.ProjectIntelligenceRepoQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectIntelligenceSyncResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		// P4-F: GitHub intelligence. One project-scoped route behind the same
+		// guard as /projects/{id}, so a project in another organization
+		// answers 404 rather than leaking repository metadata across tenants.
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/github", id: "getProjectGitHub", tag: "projects",
+			summary:    "P4-F: what AO can currently see of this project's GitHub repository — the local checkout's branch, HEAD, dirtiness and ahead/behind beside the server's default branch and tip; the open pull requests with their review decision, checks and mergeability; the pull request for the checkout's own branch; and recent or one focused issue with its labels, milestone, GitHub-linked pull requests and a bounded comment tail. GitHub is external context and never authority over AO's execution state: an outage, a missing token or an origin AO does not recognize answers 200 with availability 'degraded' or 'unavailable' and a stable reason code, serving the last snapshot it could fetch rather than emptying the surface.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.GetProjectGitHubQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectGitHubIntelligence{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		// --- P4-E: external work management -----------------------------
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/workitems", id: "getProjectWorkItemsConfig", tag: "projects",
+			summary:    "P4-E: this project's external work-management connection (Plane): which workspace and project it maps to, whether a credential is stored, and whether the last connection check passed. The credential itself is never returned.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkItemsConfigResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/projects/{id}/workitems", id: "putProjectWorkItemsConfig", tag: "projects",
+			summary:    "P4-E: configure the connection. Every field is optional and omitting one leaves it unchanged — in particular, omitting apiToken keeps the stored credential rather than clearing it. A configuration may be saved incomplete; only switching it on requires a workspace, a project and a token.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.WorkItemsConfigUpdate{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkItemsConfigResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/projects/{id}/workitems", id: "deleteProjectWorkItemsConfig", tag: "projects",
+			summary:    "P4-E: disconnect the project, deleting the stored credential. Links are left alone: forgetting how to reach a provider is not a reason to forget which items the work was about.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/workitems/test", id: "testProjectWorkItemsConnection", tag: "projects",
+			summary:    "P4-E: verify the configured credential against the provider and record the result. It lists the workspace's projects, which proves both that the token is valid and that it can see the workspace it is configured for.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkItemsConnectionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/workitems/projects", id: "listProjectWorkItemsProviderProjects", tag: "projects",
+			summary:    "P4-E: the projects in the connected workspace, so a person mapping this AO project can choose one rather than paste a UUID.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkItemsProviderProjectsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/workitems/health", id: "getProjectWorkItemsHealth", tag: "projects",
+			summary:    "P4-E: whether the integration is configured, switched on, connected or degraded, and how much is queued or permanently failed. It makes no provider call: a status endpoint that probes is slow exactly when the thing it reports on is broken.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkItemsHealthResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/workitems/audit", id: "listProjectWorkItemsAudit", tag: "projects",
+			summary:    "P4-E: the recent provider operations — what AO sent, what came back, and whether it was retried. Never a credential, a request header, or an untruncated provider body.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.WorkItemsAuditQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkItemsAuditResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/workitems/links", id: "listProjectWorkItemLinks", tag: "projects",
+			summary:    "P4-E: the external items this project's work is linked to. With live=true each is refreshed from the provider; a link the provider could not answer for comes back with its cached title and state and stale=true, rather than disappearing.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.WorkItemsLinksQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkItemLinksResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/workitems/links", id: "createProjectWorkItemLink", tag: "projects",
+			summary:    "P4-E: link a workflow run or planned task to an external work item, either by naming one that exists (\"PROJ-123\" or a provider URL) or by asking AO to create it. AO never creates items on its own — internal repair and reviewer work does not mint anything on somebody's board.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.WorkItemLinkRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkItemLinkResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/projects/{id}/workitems/links/{linkId}", id: "deleteProjectWorkItemLink", tag: "projects",
+			summary:    "P4-E: unlink. The external item is left untouched — deleting somebody's planning item because a link was removed would be a destructive surprise.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.WorkItemsLinkIDParam{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/workitems/links/{linkId}/sync", id: "setProjectWorkItemLinkSync", tag: "projects",
+			summary:    "P4-E: turn state and comment pushing on or off for one link. A link is useful without it — recording that two things are about each other is worth doing on its own.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.WorkItemsLinkIDParam{}},
+			reqBody:    controllers.WorkItemLinkSyncRequest{},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/workitems/sync", id: "syncProjectWorkItems", tag: "projects",
+			summary:    "P4-E: drain the outbound sync queue now. Normal operation does not need this — a background worker drains it on its own — and it is the button for when somebody does not want to wait for the next tick.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkItemsSyncResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/provenance/{itemId}", id: "getProjectMemoryProvenance", tag: "projects",
+			summary:    "P2-D: the full evidence chain behind one fact — why it is valid, which task produced it, which commit supports it, how it became canonical, what withdrew it, and what replaced it. Retired edges are included: a superseded decision's supersedes edge is not in the current graph and is usually what is being looked for.",
+			pathParams: []any{controllers.ProjectMemoryItemIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectMemoryProvenanceResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func usageOperations() []operation {
@@ -531,6 +2650,36 @@ func shellTerminalOperations() []operation {
 			reqBody: controllers.UpdateSessionInterfaceRequest{},
 			resps: []respUnit{
 				{http.StatusOK, controllers.SettingsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/settings/email-notifications", id: "getEmailNotificationSettings", tag: "settings",
+			summary: "Read the completion-email configuration (never the password)",
+			resps: []respUnit{
+				{http.StatusOK, controllers.EmailNotificationSettingsEnvelope{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPatch, path: "/api/v1/settings/email-notifications", id: "updateEmailNotificationSettings", tag: "settings",
+			summary: "Change the completion-email configuration",
+			reqBody: controllers.UpdateEmailNotificationSettingsRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.EmailNotificationSettingsEnvelope{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/settings/email-notifications/test", id: "sendTestEmail", tag: "settings",
+			summary: "Send a test email to the configured recipient",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SendTestEmailResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
@@ -1030,6 +3179,15 @@ func notificationOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/notifications/unread-count", id: "notificationUnreadCount", tag: "notifications",
+			summary: "Unread notification count",
+			resps: []respUnit{
+				{http.StatusOK, controllers.NotificationUnreadCountResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPatch, path: "/api/v1/notifications/{id}", id: "markNotificationRead", tag: "notifications",
 			summary:    "Mark a notification read",
 			pathParams: []any{controllers.NotificationIDParam{}},
@@ -1194,11 +3352,46 @@ func reviewOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/work-report", id: "submitWorkReport", tag: "workflows",
+			summary:    "Record a worker's declaration about the change it delivered (never evidence)",
+			pathParams: []any{controllers.SessionIDParam{}},
+			reqBody:    controllers.SubmitWorkReportRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkReportResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
 	}
 }
 
 type eventsQuery struct {
 	After *int64 `query:"after,omitempty" minimum:"0" description:"Replay events with seq greater than this cursor. When omitted, clients may send Last-Event-ID instead."`
+}
+
+// decisionOperations declares Checkpoint 8K-B pass 2's resolver-callback
+// route. Must stay 1:1 with DecisionsController.Register — TestRouteSpecParity
+// fails the build otherwise.
+func decisionOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{resolverSessionId}/decisions/resolve", id: "resolveDecision", tag: "decisions",
+			summary:    "Record a cross-provider Decision Resolver's result for one auto_resolvable question (Checkpoint 8K-B)",
+			pathParams: []any{controllers.ResolverSessionIDParam{}},
+			reqBody:    controllers.ResolveDecisionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ResolveDecisionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func eventOperations() []operation {
@@ -1221,6 +3414,27 @@ func eventOperations() []operation {
 // projectOperations declares the canonical /projects operations. The set must
 // stay 1:1 with the routes ProjectsController.Register mounts —
 // TestRouteSpecParity fails the build otherwise.
+func environmentOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/environment/status", id: "getEnvironmentStatus", tag: "environment",
+			summary: "Report real local Codex/Claude/GitHub/project readiness for the Setup UX",
+			resps: []respUnit{
+				{http.StatusOK, controllers.EnvironmentStatusResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/environment/github/test", id: "testGitHubConnection", tag: "environment",
+			summary: "Run a fresh, cheap local GitHub CLI probe (no REST call, never returns a token)",
+			resps: []respUnit{
+				{http.StatusOK, controllers.GitHubTestResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+	}
+}
+
 func projectOperations() []operation {
 	return []operation{
 		{
@@ -1248,6 +3462,28 @@ func projectOperations() []operation {
 			reqBody: projectsvc.InitializeRepositoryInput{},
 			resps: []respUnit{
 				{http.StatusOK, projectsvc.InitializeRepositoryResult{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/browse", id: "browseProjectRoot", tag: "projects",
+			summary:    "List the immediate subdirectories of an absolute path under the configured allowed project roots (or the home directory when none are configured), for the web folder-browser UX",
+			pathParams: []any{controllers.BrowseProjectRootQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.BrowseProjectRootResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/clone", id: "cloneProjectFromGitHub", tag: "projects",
+			summary: "Clone a GitHub repository into an allowed project root and register it",
+			reqBody: projectsvc.CloneInput{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.ProjectResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
@@ -1292,6 +3528,29 @@ func projectOperations() []operation {
 			pathParams: []any{controllers.ProjectIDParam{}},
 			resps: []respUnit{
 				{http.StatusOK, projectsvc.RemoveResult{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/repo-connection-test", id: "testRepoConnection", tag: "projects",
+			summary:    "Run a non-destructive git ls-remote probe against a project's root repo or a named workspace child repo",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.TestRepoConnectionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.TestRepoConnectionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/workspace-repos/refresh", id: "refreshWorkspaceRepos", tag: "projects",
+			summary:    "Re-detect a workspace project's child repositories from disk, correcting stale per-repo metadata",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},

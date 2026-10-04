@@ -215,3 +215,80 @@ func TestHarnessSignalsCapabilityGate(t *testing.T) {
 		t.Fatal("harnessSignals(amp) = true with codex-only predicate")
 	}
 }
+
+// completedRec is a live task holding the durable proof that its agent
+// reported the work finished.
+func completedRec(at time.Time) domain.SessionRecord {
+	rec := statusRec(domain.ActivityIdle, false)
+	rec.TurnCompletedAt = at
+	return rec
+}
+
+// The bug this exists to fix: a task that finished its work read "Inactive"
+// forever, because idle-with-a-receipt and idle-with-nothing were the same row.
+func TestServiceReportsCompletedOnlyWithDurableProof(t *testing.T) {
+	if got := deriveStatus(completedRec(statusNow), nil, statusNow, true); got != domain.StatusCompleted {
+		t.Fatalf("finished task = %q, want %q", got, domain.StatusCompleted)
+	}
+	if got := deriveStatus(statusRec(domain.ActivityIdle, false), nil, statusNow, true); got != domain.StatusIdle {
+		t.Fatalf("idle task with no proof of completion = %q, want %q", got, domain.StatusIdle)
+	}
+}
+
+// Requirements two and three, at the service boundary: the status is a function
+// of a durable fact, so it neither ages out nor depends on anything a restart
+// throws away. A restored session has no hook receipt for its new launch
+// (FirstSignalAt is deliberately cleared on every spawn/restore) — that is what
+// no_signal is for, and it must not swallow a task that already finished.
+func TestServiceKeepsCompletedThroughInactivityAndRestart(t *testing.T) {
+	finishedAt := statusNow.Add(-30 * 24 * time.Hour)
+
+	stale := completedRec(finishedAt)
+	stale.Activity.LastActivityAt = finishedAt
+	if got := deriveStatus(stale, nil, statusNow, true); got != domain.StatusCompleted {
+		t.Fatalf("a month of inactivity = %q, want %q", got, domain.StatusCompleted)
+	}
+
+	// What the daemon reads back after a restart + restore.
+	restored := stale
+	restored.FirstSignalAt = time.Time{}
+	if got := deriveStatus(restored, nil, statusNow, true); got != domain.StatusCompleted {
+		t.Fatalf("after restart = %q, want %q", got, domain.StatusCompleted)
+	}
+
+	unproven := restored
+	unproven.TurnCompletedAt = time.Time{}
+	if got := deriveStatus(unproven, nil, statusNow, true); got != domain.StatusNoSignal {
+		t.Fatalf("same restored session with no completion proof = %q, want %q", got, domain.StatusNoSignal)
+	}
+}
+
+// Requirement five at the service boundary: a receipt never outranks trouble.
+func TestServiceNeverReportsCompletedForTroubledTasks(t *testing.T) {
+	troubled := func(rec domain.SessionRecord) domain.SessionRecord {
+		rec.TurnCompletedAt = statusNow
+		return rec
+	}
+	tests := []struct {
+		name string
+		rec  domain.SessionRecord
+		prs  []domain.PRFacts
+		want domain.SessionStatus
+	}{
+		{"cancelled or killed", troubled(statusRec(domain.ActivityIdle, true)), nil, domain.StatusTerminated},
+		{"agent crashed", troubled(statusRec(domain.ActivityExited, false)), nil, domain.StatusExited},
+		{"needs the user", troubled(statusRec(domain.ActivityWaitingInput, false)), nil, domain.StatusNeedsInput},
+		{"blocked on a decision", troubled(statusRec(domain.ActivityBlocked, false)), nil, domain.StatusNeedsInput},
+		{"working again", troubled(statusRec(domain.ActivityActive, false)), nil, domain.StatusWorking},
+		{"ci failed", completedRec(statusNow), statusPR(domain.PRFacts{CI: domain.CIFailing}), domain.StatusCIFailed},
+		{"changes requested", completedRec(statusNow), statusPR(domain.PRFacts{Review: domain.ReviewChangesRequest}), domain.StatusChangesRequested},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deriveStatus(tt.rec, tt.prs, statusNow, true)
+			if got != tt.want {
+				t.Fatalf("got %q want %q", got, tt.want)
+			}
+		})
+	}
+}

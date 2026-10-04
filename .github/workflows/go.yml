@@ -95,3 +95,28 @@ jobs:
       # the build-test job (go test -race ./...). Only schema.ts needs checking here.
       - name: Check for schema.ts drift
         run: git diff --exit-code -- frontend/src/api/schema.ts
+
+  # P0-C section F. The generated sqlc output is a build artifact of
+  # backend/internal/storage/sqlite/{migrations,queries}, and nothing enforced
+  # that until now -- so hand-written additions accumulated directly in
+  # gen/*.sql.go, out of sqlc's canonical order and (in one case) with a
+  # parameter renamed away from what the query actually generates. This job
+  # makes the canonical SQL the only source: regenerate, and fail on any diff.
+  #
+  # Fix a failure by editing the query/migration, never the generated file.
+  sqlc-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache: false
+
+      - name: Regenerate sqlc output
+        working-directory: backend
+        run: go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate
+
+      - name: Check for generated SQLite drift
+        run: git diff --exit-code -- backend/internal/storage/sqlite/gen

@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -112,5 +115,66 @@ func TestRunFileOwnerServingNilOrZeroPort(t *testing.T) {
 	}
 	if runFileOwnerServing(client, "127.0.0.1", &runfile.Info{PID: 1, Port: 0}) {
 		t.Error("runFileOwnerServing(port 0) = true, want false")
+	}
+}
+
+// P9: a start must see a daemon that published <data dir>/running.json even
+// when its own configured run-file is elsewhere, and must not be blocked by a
+// daemon that serves a DIFFERENT data dir.
+func TestLiveDaemonForDataDirSeesBothConventions(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	pid := os.Getpid() // alive by construction
+	serve := func(servedDir string) int {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"service": daemonmeta.ServiceName, "pid": pid, "dataDir": servedDir})
+		}))
+		t.Cleanup(srv.Close)
+		u, _ := url.Parse(srv.URL)
+		port, _ := strconv.Atoi(u.Port())
+		return port
+	}
+
+	port := serve(dataDir)
+	if err := runfile.Write(filepath.Join(dataDir, "running.json"), runfile.Info{PID: pid, Port: port, StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	live, path, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, filepath.Join(root, "running.json"), dataDir)
+	if err != nil || live == nil || path != filepath.Join(dataDir, "running.json") {
+		t.Fatalf("live=%v path=%q err=%v, want the daemon under the data-dir convention", live, path, err)
+	}
+
+	// A daemon serving ANOTHER data dir under this installation's alternate
+	// location does not block the start.
+	elsewhere := filepath.Join(root, "elsewhere-data")
+	foreignPort := serve("/some/other/data")
+	if err := runfile.Write(filepath.Join(elsewhere, "running.json"), runfile.Info{PID: pid, Port: foreignPort, StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if live, _, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, filepath.Join(root, "unused-running.json"), elsewhere); err != nil || live != nil {
+		t.Fatalf("a daemon serving another data dir at the alternate location blocked this start: %+v %v", live, err)
+	}
+
+	// The CONFIGURED run-file is shared: a live daemon behind it is refused
+	// whatever data dir it serves, or this start would overwrite its handshake.
+	shared := filepath.Join(root, "shared-running.json")
+	if err := runfile.Write(shared, runfile.Info{PID: pid, Port: foreignPort, StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if live, path, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, shared, filepath.Join(root, "scratch-data")); err != nil || live == nil || path != shared {
+		t.Fatalf("a live daemon behind the shared run-file did not block the start: live=%v path=%q err=%v", live, path, err)
+	}
+
+	// One data dir spelled through a symlink is ONE installation.
+	link := filepath.Join(root, "data-link")
+	if err := os.Symlink(dataDir, link); err != nil {
+		t.Fatal(err)
+	}
+	linkedPort := serve(link)
+	if err := runfile.Write(filepath.Join(dataDir, "running.json"), runfile.Info{PID: pid, Port: linkedPort, StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if live, _, err := liveDaemonForDataDir(&http.Client{Timeout: time.Second}, filepath.Join(root, "unused-running.json"), dataDir); err != nil || live == nil {
+		t.Fatalf("a daemon serving this data dir through a symlink was taken for another installation: %+v %v", live, err)
 	}
 }

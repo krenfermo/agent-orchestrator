@@ -202,6 +202,12 @@ const api = {
 		readText: () => ipcRenderer.invoke("clipboard:readText") as Promise<string>,
 	},
 	daemon: {
+		getEnvInfo: () =>
+			ipcRenderer.invoke("daemon:getEnvInfo") as Promise<{
+				isDevSandbox: boolean;
+				dataDir: string | null;
+				runFile: string | null;
+			}>,
 		getStatus: () => ipcRenderer.invoke("daemon:getStatus") as Promise<DaemonStatus>,
 		start: () => ipcRenderer.invoke("daemon:start") as Promise<DaemonStatus>,
 		stop: () => ipcRenderer.invoke("daemon:stop") as Promise<DaemonStatus>,
@@ -353,6 +359,15 @@ const api = {
 	featureBuilds: {
 		list: () => ipcRenderer.invoke("featureBuilds:list") as Promise<FeatureBuild[]>,
 		getActive: () => ipcRenderer.invoke("featureBuilds:getActive") as Promise<{ pr: number } | null>,
+	},
+	// P4-A: desktop single sign-on. The renderer only ever learns the OUTCOME —
+	// the session itself arrives as an HttpOnly cookie the main process
+	// installed, never as a value crossing this bridge.
+	auth: {
+		ssoSignIn: () =>
+			ipcRenderer.invoke("auth:ssoSignIn") as Promise<
+				{ status: "complete"; user: { id: string; displayName: string; email: string } } | { status: "cancelled" }
+			>,
 	},
 	cloud: {
 		getSession: () => ipcRenderer.invoke("cloud:getSession") as Promise<CloudAccount | null>,

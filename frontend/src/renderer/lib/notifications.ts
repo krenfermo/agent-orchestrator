@@ -16,12 +16,17 @@ const SSE_RETRY_MS = 5_000;
 const EVENTSOURCE_CLOSED = 2;
 
 /**
- * Only these two kinds describe something still waiting on the user.
- * `pr_merged` / `pr_closed_unmerged` report something that already happened.
+ * Only these two kinds describe something still waiting on the user. Every
+ * other kind — `pr_merged`, `pr_closed_unmerged`, `task_completed`,
+ * `workflow_completed`, and the attention/failure families — reports something
+ * that already happened. An attention notification is not resolvable here even
+ * though the run may later resume: AO never writes `resolvedAt` for it, so
+ * counting it as unresolved would leave a badge nothing can clear.
  * Mirrors NotificationType.NeedsResolution on the backend — used here only to
  * keep `unresolvedCount` accurate on the unread/all caches.
  */
 const UNRESOLVABLE_TYPES = new Set(["needs_input", "ready_to_merge"]);
+
 
 type NotificationsQueryKey = typeof unreadNotificationsQueryKey | typeof recentNotificationsQueryKey;
 
@@ -267,15 +272,24 @@ export function keepLatestNotificationsPage(
  * reviewer tab hides the agent while the URL still names that session. The
  * caller resolves that, passing the session only while its agent pane shows.
  *
- * Only `needs_input` is suppressed. PR outcomes (`ready_to_merge`,
- * `pr_merged`, `pr_closed_unmerged`) are not visible in the terminal pane, so
- * they still deserve a toast even for the session in the foreground.
+ * Only the two "the agent is stopped, answer it" kinds are suppressed:
+ * `needs_input` and `human_question_required`. A permission prompt IS the
+ * terminal content the user is looking at, so toasting it tells them something
+ * already on their screen.
+ *
+ * Nothing else is suppressed. PR outcomes (`ready_to_merge`, `pr_merged`,
+ * `pr_closed_unmerged`) are not visible in the terminal pane, so they still
+ * deserve a toast even for the session in the foreground. Nor are completions:
+ * `task_completed` is the whole point of stepping away from the screen, and
+ * `workflow_completed` has no terminal pane at all. Nor is `repair_exhausted`
+ * or `integration_failed`: both report something that happened outside the
+ * pane, which is exactly why the user would otherwise miss them.
  */
 function suppressToastForWatchedSession(
 	notification: NotificationDTO,
 	visibleAgentSessionId: string | undefined,
 ): boolean {
-	if (notification.type !== "needs_input") return false;
+	if (notification.type !== "needs_input" && notification.type !== "human_question_required") return false;
 	if (!notification.sessionId || notification.sessionId !== visibleAgentSessionId) return false;
 	return document.visibilityState === "visible" && document.hasFocus();
 }
@@ -312,7 +326,9 @@ export function createNotificationsTransport(
 				source = undefined;
 				sourceBaseUrl = baseUrl;
 				try {
-					source = new EventSource(`${baseUrl.replace(/\/+$/, "")}/api/v1/notifications/stream`);
+					source = new EventSource(`${baseUrl.replace(/\/+$/, "")}/api/v1/notifications/stream`, {
+						withCredentials: true,
+					});
 					source.onopen = invalidateNotifications;
 					source.onerror = () => {
 						if (source?.readyState === EVENTSOURCE_CLOSED) scheduleRetry();

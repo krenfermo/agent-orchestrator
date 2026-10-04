@@ -1,0 +1,11 @@
+# The built proxy artifacts are 6 MiB each and are deliberately NOT committed:
+# a binary blob in a diff is reviewed by nobody. What IS committed is
+# ../provenance.json -- version, toolchain, build flags and a SHA-256 per
+# architecture, which is 30 lines a person can actually read -- and
+# scripts/build-egress-proxy.sh is what proves the bytes still match it.
+#
+# This rule lives here rather than relying on the repository's generic `bin/`
+# rule on purpose: an ignore that happens to catch these files is one that
+# stops catching them the day somebody narrows it, and 13 MiB of binaries
+# would then become committable by accident.
+ao-egress-proxy-linux-*

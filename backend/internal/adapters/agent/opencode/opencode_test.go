@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/hookutil"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -211,6 +212,7 @@ func TestOpenCodeLocalAuthStatusUnknownWithEmptyDBAccounts(t *testing.T) {
 }
 
 func TestOpenCodeAuthStatusUnknownWithZeroCredentials(t *testing.T) {
+	widenAuthProbeTimeout(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture")
 	}
@@ -936,4 +938,19 @@ func contains(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// widenAuthProbeTimeout removes the wall-clock deadline from the auth probe for
+// one test.
+//
+// These tests assert on what the probe MAKES of a stub harness's output, not on
+// how fast it got it. Leaving the shipped three-second bound in place makes them
+// fail whenever the host is slow enough that spawning /bin/sh takes longer than
+// that -- which a full-repo `go test ./...` on a laptop reliably produces, and
+// which says nothing about the code under test.
+func widenAuthProbeTimeout(t *testing.T) {
+	t.Helper()
+	previous := authProbeTimeout
+	authProbeTimeout = time.Minute
+	t.Cleanup(func() { authProbeTimeout = previous })
 }

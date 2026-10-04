@@ -1,0 +1,324 @@
+package projectmemory
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/repoaccess"
+)
+
+// drift.go — proving, or failing to prove, that a stored fact still holds.
+//
+// The indexing passes keep memory in step with the repository as they see it
+// change. Drift detection is the independent check that answers the question
+// no pass can: has the repository moved in a way no pass observed — a file
+// edited outside AO, a checkout swapped underneath it, a branch reset?
+//
+// It is built on one asymmetry, and the asymmetry is the whole safety
+// argument: **a fact can be disproved cheaply and can never be proved by this
+// check.** Recomputing the digest of an item's source paths either matches —
+// in which case the fact is exactly as good as it was — or does not, in which
+// case the fact is demonstrably about a version of the file that is gone. So
+// the detector only ever demotes. It never promotes a stale item back to
+// valid, because a matching digest does not show that the *derivation* is
+// still right; only a re-derivation does, and that is the indexer's job.
+//
+// Items with no source paths (the repository overview, a module census) cannot
+// be checked this way: their provenance is the whole tree, and recomputing it
+// is a full pass. They are reported as unverifiable rather than silently
+// counted as confirmed — see DriftReport.Unverifiable.
+
+// DriftRequest asks for one drift check over one repository.
+type DriftRequest struct {
+	ProjectID domain.ProjectID
+	// RepoPath is the repository root to check against.
+	RepoPath string
+	// Commit is the commit the working tree is at, recorded in the reasons
+	// the check writes so an operator can see when a fact went stale.
+	Commit string
+	// Apply writes the demotions. With Apply false the check is a dry run:
+	// it reports exactly what it would do and changes nothing, which is what
+	// `ao memory status --verify` uses.
+	Apply bool
+	// MaxChecks bounds the work. Zero means DefaultDriftChecks. The bound
+	// exists because this runs on operator command and on a wake, and an
+	// unbounded verify over a large repository is a verify nobody runs.
+	MaxChecks int
+}
+
+// DefaultDriftChecks bounds one drift pass.
+const DefaultDriftChecks = 2000
+
+// errUnverifiedButPresent means an item's sources were all found on disk but
+// the item carries no digest to compare them against — a task outcome, a
+// decision, a risk. It is a sentinel rather than a bool because it must never
+// be confused with "confirmed": the item is not disproved, and it is not
+// vouched for either.
+var errUnverifiedButPresent = errors.New("projectmemory: item has no source digest to verify")
+
+// DriftFinding is one fact whose provenance no longer holds.
+type DriftFinding struct {
+	ItemID string
+	Key    domain.ProjectMemoryKey
+	// From and To are the state transition the check would apply, or applied.
+	From domain.ProjectMemoryState
+	To   domain.ProjectMemoryState
+	// Reason is the operator-readable explanation, and is what gets written
+	// into the item's StateReason.
+	Reason string
+	// Applied reports whether the demotion was written. It is false for a dry
+	// run, and also for a demotion the store refused because a newer
+	// generation had already moved the row.
+	Applied bool
+}
+
+// DriftReport is what one check found.
+type DriftReport struct {
+	RepoID string
+	// Checked counts items whose provenance the check could evaluate.
+	Checked int
+	// Confirmed counts items whose source digests still match.
+	Confirmed int
+	// Unverifiable counts valid items with no path-anchored provenance —
+	// aggregates whose source is the whole tree. They are left alone, and
+	// counted here so the report never implies they were confirmed.
+	Unverifiable int
+	// EdgesRetired counts graph edges withheld because a fact they name was
+	// invalidated by this pass (P2-D section 23).
+	EdgesRetired int64
+	// Truncated reports that MaxChecks stopped the pass short, which means
+	// "no drift found" covers only what was checked.
+	Truncated bool
+	Findings  []DriftFinding
+}
+
+// Drifted reports whether anything was found to have moved.
+func (r DriftReport) Drifted() bool { return len(r.Findings) > 0 }
+
+// Detector checks stored provenance against a repository on disk.
+type Detector struct {
+	repo Repository
+	now  func() time.Time
+	// hash lets a test substitute the file hasher. Production always uses the
+	// same content hash the indexer writes, which is the point: two different
+	// hashes would make every fact look drifted.
+	hash func(root, rel string) (string, error)
+}
+
+// NewDetector builds a drift detector over a durable repository.
+func NewDetector(repo Repository) *Detector {
+	return &Detector{
+		repo: repo,
+		now:  func() time.Time { return time.Now().UTC() },
+		hash: hashFileContent,
+	}
+}
+
+// Check evaluates every currently-valid fact whose provenance names a path.
+func (d *Detector) Check(ctx context.Context, req DriftRequest) (DriftReport, error) {
+	repoPath, err := canonicalRepoPath(req.RepoPath)
+	if err != nil {
+		return DriftReport{}, err
+	}
+	repoID := domain.ProjectMemoryRepoID(repoPath)
+	report := DriftReport{RepoID: repoID}
+
+	limit := req.MaxChecks
+	if limit <= 0 {
+		limit = DefaultDriftChecks
+	}
+
+	items, err := d.repo.ListProjectMemoryItemsByState(ctx, req.ProjectID, repoID, domain.MemoryStateValid)
+	if err != nil {
+		return report, err
+	}
+
+	// Hash each distinct path once. A convention item and the instruction item
+	// it was lifted out of share a source file, and hashing it twice would
+	// double the cost of the check for no new information.
+	digests := map[string]string{}
+	missing := map[string]bool{}
+
+	for _, item := range items {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		if len(item.SourcePaths) == 0 {
+			report.Unverifiable++
+			continue
+		}
+		if report.Checked >= limit {
+			report.Truncated = true
+			break
+		}
+		report.Checked++
+
+		finding, ok, err := d.evaluate(repoPath, item, digests, missing, req.Commit)
+		switch {
+		case errors.Is(err, errUnverifiedButPresent):
+			// Its sources are still there, and there is no digest to compare.
+			// Counted as unverifiable, never as confirmed, so the report never
+			// implies AO vouched for something it could not check.
+			report.Checked--
+			report.Unverifiable++
+			continue
+		case err != nil:
+			return report, err
+		case !ok:
+			report.Confirmed++
+			continue
+		}
+		if req.Apply {
+			now := d.now()
+			applied, err := d.repo.MarkProjectMemoryItemState(ctx, item.ID, item.Generation,
+				finding.To, finding.Reason, now)
+			if err != nil {
+				return report, err
+			}
+			finding.Applied = applied
+			if applied && finding.To == domain.MemoryStateInvalidated {
+				// P2-D section 23: the graph follows its nodes. An edge
+				// derived from a fact whose subject is GONE must stop being
+				// traversed as current -- and must not be deleted, because the
+				// record that two facts were once related is what an operator
+				// reads when asking why a decision was made.
+				//
+				// Only on invalidation, not on staleness. A stale fact is one
+				// whose content moved and which the next pass will re-derive
+				// in place; retiring its edges would make every ordinary edit
+				// tear down and rebuild the graph around it. An invalidated
+				// fact is one whose sources are gone, and nothing is coming
+				// back to re-derive it.
+				n, err := d.repo.RetireProjectMemoryRelationsForNode(ctx, req.ProjectID, repoID,
+					knowledgeNode(item.ID), finding.Reason, now)
+				if err != nil {
+					return report, err
+				}
+				report.EdgesRetired += n
+			}
+		}
+		report.Findings = append(report.Findings, finding)
+	}
+
+	sort.Slice(report.Findings, func(i, j int) bool { return report.Findings[i].ItemID < report.Findings[j].ItemID })
+	return report, nil
+}
+
+// evaluate decides whether one item's provenance still holds.
+func (d *Detector) evaluate(
+	repoPath string, item domain.ProjectMemoryItem,
+	digests map[string]string, missing map[string]bool, commit string,
+) (DriftFinding, bool, error) {
+	pairs := make(map[string]string, len(item.SourcePaths))
+	var gone []string
+
+	for _, rel := range item.SourcePaths {
+		if missing[rel] {
+			gone = append(gone, rel)
+			continue
+		}
+		digest, cached := digests[rel]
+		if !cached {
+			// Frente 3 / 3B: the read goes through the shared confined-read
+			// contract. A stored source path that escapes the root, traverses
+			// a symlink, names a secret, or is gone is not evidence of
+			// anything any more -- every such refusal fails closed as
+			// "no longer present".
+			h, err := d.hash(repoPath, rel)
+			switch {
+			case repoaccess.IsRefusal(err):
+				missing[rel] = true
+				gone = append(gone, rel)
+				continue
+			case err != nil:
+				return DriftFinding{}, false, fmt.Errorf("hash %s: %w", rel, err)
+			}
+			digest = h
+			digests[rel] = h
+		}
+		pairs[rel] = digest
+	}
+
+	if len(gone) > 0 {
+		return DriftFinding{
+			ItemID: item.ID, Key: item.Key,
+			From: item.State, To: domain.MemoryStateInvalidated,
+			Reason: fmt.Sprintf("source %s no longer present at %s",
+				strings.Join(gone, ", "), orNone(commit)),
+		}, true, nil
+	}
+	if item.SourceDigest == "" {
+		// A fact with paths but no digest — a task outcome, a decision, a risk.
+		// Its evidence EXISTS, which is all a digest-free item can be checked
+		// for, and that check is exactly the one P2-C §10 needs: a decision
+		// about a module that has since been deleted must stop being served
+		// as current, while one whose files merely changed is handled by the
+		// path-anchored invalidation the commit itself triggers.
+		//
+		// It is not "confirmed" either. Reporting it as unverifiable is the
+		// honest answer: AO checked what it could, and what it could check
+		// held.
+		return DriftFinding{}, false, errUnverifiedButPresent
+	}
+	if domain.MemorySourceDigest(pairs) == item.SourceDigest {
+		return DriftFinding{}, false, nil
+	}
+	return DriftFinding{
+		ItemID: item.ID, Key: item.Key,
+		From: item.State, To: domain.MemoryStateStale,
+		Reason: fmt.Sprintf("source content moved since this fact was derived at %s",
+			orNone(item.SourceCommit)),
+	}, true, nil
+}
+
+// InvalidatePaths marks everything derived from the named paths as no longer
+// authoritative, without deriving anything.
+//
+// It is the operator's `ao memory invalidate` and the safety valve a caller
+// reaches for when it knows the repository moved but cannot say how: marking
+// too much stale costs a re-derivation, and marking too little costs a wrong
+// answer handed to an agent.
+func (d *Detector) InvalidatePaths(
+	ctx context.Context, projectID domain.ProjectID, repoPath string, paths []string, reason string,
+) (int64, error) {
+	canonical, err := canonicalRepoPath(repoPath)
+	if err != nil {
+		return 0, err
+	}
+	repoID := domain.ProjectMemoryRepoID(canonical)
+	if strings.TrimSpace(reason) == "" {
+		reason = "invalidated by operator request"
+	}
+	var total int64
+	for _, rel := range domain.NormalizeMemorySourcePaths(paths) {
+		items, _, err := d.repo.InvalidateProjectMemoryByPath(ctx, projectID, repoID, rel,
+			domain.MemoryStateStale, reason, d.now())
+		if err != nil {
+			return total, err
+		}
+		total += items
+	}
+	return total, nil
+}
+
+// driftHashLimit bounds a drift re-hash. The indexer never derives a fact
+// from a file above its own per-file cap, so anything much larger than that is
+// not a source a live item can name.
+const driftHashLimit = 64 << 20
+
+// hashFileContent computes the same digest the indexer writes, reading through
+// the shared confined-read contract (no symlink at any component, no escape,
+// no secret path).
+func hashFileContent(root, rel string) (string, error) {
+	content, err := repoaccess.ReadConfined(root, rel, driftHashLimit)
+	if err != nil {
+		return "", err
+	}
+	return hashBytes(content), nil
+}

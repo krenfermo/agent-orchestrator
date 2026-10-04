@@ -1413,10 +1413,13 @@ func TestManager_AddWorkspaceRejectsReservedChildName(t *testing.T) {
 	wantCode(t, err, "WORKSPACE_CHILD_RESERVED_NAME")
 }
 
-// TestManager_AddWorkspaceNonGitChildWithNestedRepo verifies that a non-git
-// child folder containing a nested git repo is imported as needs_init (not
-// rejected as a gitlink). The child is gitignored in the parent, so the
-// nested repo is never staged by git add -A and guardNoGitlinks never fires.
+// TestManager_AddWorkspaceNonGitChildWithNestedRepo verifies that a plain,
+// non-git child folder (docs/, backend/, .claude/, etc. in real-world
+// monorepos) is never registered as a workspace repo, even when it happens to
+// contain a nested git repo two levels deep. It is still gitignored in the
+// parent (via ignoreOnly) so the nested repo is never staged by git add -A
+// and guardNoGitlinks never fires — but it does not show up as a needs_init
+// pseudo-repo the way an actual (if incomplete) child git repo would.
 func TestManager_AddWorkspaceNonGitChildWithNestedRepo(t *testing.T) {
 	configureCommitter(t)
 	ctx := context.Background()
@@ -1426,8 +1429,6 @@ func TestManager_AddWorkspaceNonGitChildWithNestedRepo(t *testing.T) {
 	// One direct committed child repo — valid on its own.
 	gitRepoWithCommit(t, filepath.Join(parent, "app"))
 	// A non-git child folder containing a nested git repo at depth 2.
-	// detectWorkspaceChildren registers packages/ as needs_init; it gets
-	// gitignored in the parent, so packages/foo is never staged as a gitlink.
 	pkgs := filepath.Join(parent, "packages")
 	if err := os.MkdirAll(pkgs, 0o755); err != nil {
 		t.Fatalf("mkdir packages: %v", err)
@@ -1438,28 +1439,25 @@ func TestManager_AddWorkspaceNonGitChildWithNestedRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add workspace with non-git child: %v", err)
 	}
-	if len(proj.WorkspaceRepos) != 2 {
-		t.Fatalf("expected 2 child repos (app + packages), got %d", len(proj.WorkspaceRepos))
+	if len(proj.WorkspaceRepos) != 1 {
+		t.Fatalf("expected 1 child repo (app only, packages/ is not a git repo), got %d: %#v", len(proj.WorkspaceRepos), proj.WorkspaceRepos)
 	}
-	var pkgsRepo *project.WorkspaceRepo
-	for i := range proj.WorkspaceRepos {
-		if proj.WorkspaceRepos[i].Name == "packages" {
-			pkgsRepo = &proj.WorkspaceRepos[i]
+	for _, repo := range proj.WorkspaceRepos {
+		if repo.Name == "packages" {
+			t.Fatalf("packages/ must not be registered as a workspace repo: %#v", repo)
 		}
-	}
-	if pkgsRepo == nil {
-		t.Fatalf("packages not in WorkspaceRepos = %#v", proj.WorkspaceRepos)
-	}
-	if pkgsRepo.GitStatus != string(domain.GitStatusNeedsInit) {
-		t.Fatalf("packages GitStatus = %q, want %q", pkgsRepo.GitStatus, domain.GitStatusNeedsInit)
 	}
 
 	// Parent git repo and .gitignore must exist (no rollback).
 	if _, statErr := os.Lstat(filepath.Join(parent, ".git")); statErr != nil {
 		t.Fatalf(".git missing after successful init: %v", statErr)
 	}
-	if _, statErr := os.Lstat(filepath.Join(parent, ".gitignore")); statErr != nil {
-		t.Fatalf(".gitignore missing after successful init: %v", statErr)
+	gitignore, readErr := os.ReadFile(filepath.Join(parent, ".gitignore"))
+	if readErr != nil {
+		t.Fatalf(".gitignore missing after successful init: %v", readErr)
+	}
+	if !strings.Contains(string(gitignore), "/packages/") {
+		t.Fatalf(".gitignore = %q, want it to still ignore /packages/ so its nested gitlink is never staged", gitignore)
 	}
 }
 

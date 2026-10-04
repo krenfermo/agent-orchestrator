@@ -18,11 +18,64 @@ import (
 
 // -- fakeRunner test seam --
 
+// fakeInstanceID is the tmux `$N` handle every fake creation returns.
+const fakeInstanceID = "$1"
+
 type fakeRunner struct {
 	calls   []runnerCall
 	outputs [][]byte
 	err     error
 	hook    func(context.Context, int) error
+	// paneInMode answers SendMessage's #{pane_in_mode} guard
+	// (ensurePaneAcceptsKeys). It is served ahead of the outputs queue and
+	// defaults to "0" — not in a mode — so every pre-existing test keeps its
+	// original call/output expectations. Tests about the guard itself set it,
+	// and a queue of values models a pane that changes state across probes
+	// (e.g. "1" then "0" for a cancel that worked).
+	paneInMode    []string
+	paneInModeErr error
+}
+
+// nextPaneInMode pops the next scripted #{pane_in_mode} answer, repeating the
+// last one once the script is exhausted so a steady state needs one entry.
+func (f *fakeRunner) nextPaneInMode() string {
+	switch len(f.paneInMode) {
+	case 0:
+		return "0"
+	case 1:
+		return f.paneInMode[0]
+	default:
+		v := f.paneInMode[0]
+		f.paneInMode = f.paneInMode[1:]
+		return v
+	}
+}
+
+// sendCalls returns fr's recorded calls with SendMessage's #{pane_in_mode}
+// guard probes filtered out, so the delivery assertions below stay about the
+// delivery. The guard has its own tests; every other SendMessage test asserts
+// what reaches the pane, which is unchanged by it.
+func sendCalls(fr *fakeRunner) []runnerCall {
+	out := make([]runnerCall, 0, len(fr.calls))
+	for _, c := range fr.calls {
+		if isPaneInModeProbe(c.args) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func isPaneInModeProbe(args []string) bool {
+	if subcommandOf(args) != "display-message" {
+		return false
+	}
+	for _, a := range args {
+		if a == "#{pane_in_mode}" {
+			return true
+		}
+	}
+	return false
 }
 
 type runnerCall struct {
@@ -33,10 +86,21 @@ type runnerCall struct {
 
 func (f *fakeRunner) Run(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, runnerCall{env: append([]string(nil), env...), name: name, args: append([]string(nil), args...)})
+	if isPaneInModeProbe(args) {
+		if f.paneInModeErr != nil {
+			return nil, f.paneInModeErr
+		}
+		return []byte(f.nextPaneInMode() + "\n"), nil
+	}
 	var out []byte
 	if len(f.outputs) > 0 {
 		out = f.outputs[0]
 		f.outputs = f.outputs[1:]
+	}
+	// `new-session -P -F "#{session_id}"` prints the new session's instance id.
+	// Every fake must answer it, or Create cannot identify what it created.
+	if subcommandOf(args) == "new-session" && len(out) == 0 {
+		out = []byte(fakeInstanceID + "\n")
 	}
 	if f.hook != nil {
 		if err := f.hook(ctx, len(f.calls)); err != nil {
@@ -76,16 +140,37 @@ func newTestRuntime(chunkSize int) (*Runtime, *fakeRunner) {
 }
 
 // countCalls returns how many of fr's recorded calls invoked the given tmux
-// subcommand (args[0]), e.g. "display-message" for pane cwd verification
-// probes.
+// subcommand, e.g. "display-message" for pane cwd verification probes. Every
+// call is prefixed with `-L <socket>` (see Runtime.run), so the subcommand is
+// looked up past that prefix via subcommandOf.
 func countCalls(fr *fakeRunner, subcommand string) int {
 	n := 0
 	for _, c := range fr.calls {
-		if len(c.args) > 0 && c.args[0] == subcommand {
+		if subcommandOf(c.args) == subcommand {
 			n++
 		}
 	}
 	return n
+}
+
+// subcommandOf returns a recorded call's tmux subcommand, skipping the
+// leading `-L <socket>` every call carries (see Runtime.run).
+func subcommandOf(args []string) string {
+	if len(args) >= 2 && args[0] == "-L" {
+		args = args[2:]
+	}
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+
+// srv prepends the default test socket's `-L <socket>` prefix that every
+// real tmux invocation carries (see Runtime.run), so expectations built from
+// the commands.go arg builders (which return bare subcommand args) match
+// what the fakeRunner actually records.
+func srv(args []string) []string {
+	return append([]string{"-L", defaultSocket}, args...)
 }
 
 // -- Options / New tests --
@@ -160,12 +245,139 @@ func TestExecRunnerFallsBackWhenTempDirMissing(t *testing.T) {
 	}
 }
 
+// -- Checkpoint 8I.2: tmux server env sanitization --
+
+// TestSanitizeInheritedEnv_DropsNestedAgentVarsPreservesOthers is the direct
+// unit test for sanitizeInheritedEnv's policy: drop exactly
+// nestedAgentEnvVars, keep everything else (including a var whose name merely
+// contains "CLAUDE" as a substring but isn't one of the denylisted names).
+func TestSanitizeInheritedEnv_DropsNestedAgentVarsPreservesOthers(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"HOME=/Users/dev",
+		"CLAUDECODE=1",
+		"CLAUDE_CODE_CHILD_SESSION=abc123",
+		"CLAUDE_CODE_ENTRYPOINT=cli",
+		"CLAUDE_CODE_SESSION_ID=sess-1",
+		"CLAUDE_CODE_MESSAGING_SOCKET=/tmp/sock",
+		"CLAUDE_CODE_MESSAGING_TOKEN=secret-token",
+		"CLAUDE_CODE_EXECPATH=/usr/local/bin/claude",
+		"CLAUDE_PID=4242",
+		"CLAUDE_EFFORT=high",
+		"CLAUDE_DESKTOP_INSTALLED=1", // superficially similar name, not denylisted
+		"USER=dev",
+	}
+	got := sanitizeInheritedEnv(in)
+
+	wantDropped := []string{
+		"CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT",
+		"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
+		"CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_EFFORT",
+	}
+	for _, name := range wantDropped {
+		for _, kv := range got {
+			if strings.HasPrefix(kv, name+"=") {
+				t.Fatalf("sanitizeInheritedEnv kept denylisted %s, want it dropped; got %v", name, got)
+			}
+		}
+	}
+	wantKept := []string{"PATH=/usr/bin", "HOME=/Users/dev", "USER=dev", "CLAUDE_DESKTOP_INSTALLED=1"}
+	for _, kv := range wantKept {
+		found := false
+		for _, g := range got {
+			if g == kv {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("sanitizeInheritedEnv dropped %q, want it preserved; got %v", kv, got)
+		}
+	}
+	if len(got) != len(in)-len(wantDropped) {
+		t.Fatalf("sanitizeInheritedEnv kept %d vars, want %d (dropped exactly the denylist)", len(got), len(in)-len(wantDropped))
+	}
+}
+
+// TestExecRunnerRun_DropsNestedAgentEnvVars is the real-subprocess regression
+// test for Checkpoint 8I.1/8I.2: a var like CLAUDE_CODE_CHILD_SESSION present
+// in the calling process's own environment (e.g. because AO's daemon was
+// itself started from inside another Claude Code agent's shell) must not
+// reach the tmux CLI child process — since the very first such call may be
+// the one that auto-starts AO's tmux server, and that call's environment
+// becomes the server's permanent ambient environment for every session and
+// pane it later spawns.
+func TestExecRunnerRun_DropsNestedAgentEnvVars(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_CHILD_SESSION", "test-contamination")
+	t.Setenv("AO_AGENT_TEST_MARKER", "still-here")
+
+	out, err := (execRunner{}).Run(context.Background(), nil, "sh", "-c", "env")
+	if err != nil {
+		t.Fatalf("execRunner.Run: %v", err)
+	}
+	got := string(out)
+	if strings.Contains(got, "CLAUDE_CODE_CHILD_SESSION") {
+		t.Fatalf("execRunner.Run leaked CLAUDE_CODE_CHILD_SESSION into the tmux CLI child process env: %s", got)
+	}
+	if !strings.Contains(got, "AO_AGENT_TEST_MARKER=still-here") {
+		t.Fatalf("execRunner.Run dropped an unrelated env var it should have preserved: %s", got)
+	}
+}
+
+// TestContaminatedFromShowEnvironment covers the drift-detection parser
+// against tmux's real `show-environment -g` output shape: "NAME=value" for
+// set vars, "-NAME" for a var tmux is tracking as explicitly unset.
+func TestContaminatedFromShowEnvironment(t *testing.T) {
+	output := "PATH=/usr/bin\nCLAUDE_CODE_CHILD_SESSION=abc123\n-CLAUDECODE\nHOME=/Users/dev\n"
+	got := contaminatedFromShowEnvironment(output, nestedAgentEnvVars)
+	want := []string{"CLAUDE_CODE_CHILD_SESSION"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("contaminatedFromShowEnvironment = %v, want %v (an unset '-NAME' marker is not contamination)", got, want)
+	}
+}
+
+// TestContaminatedEnvVars_NoServerYet covers Runtime.ContaminatedEnvVars's
+// documented "no server for this socket" case: tmux show-environment errors
+// when there is nothing to show, and that must read as "nothing found", not
+// propagate as a caller-visible failure.
+func TestContaminatedEnvVars_NoServerYet(t *testing.T) {
+	rt, fr := newTestRuntime(0)
+	fr.err = errors.New("no server running on")
+	if got := rt.ContaminatedEnvVars(context.Background()); got != nil {
+		t.Fatalf("ContaminatedEnvVars = %v, want nil when the server doesn't exist yet", got)
+	}
+}
+
+// TestContaminatedEnvVars_ReportsExistingDrift covers the documented,
+// intentionally non-destructive half of drift detection: an already-running
+// server (started before a sanitized AO build, or by an unpatched AO
+// instance) that already carries a nested-agent var is reported, not
+// silently ignored — Runtime never auto-restarts an active server to fix it.
+func TestContaminatedEnvVars_ReportsExistingDrift(t *testing.T) {
+	rt, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{[]byte("PATH=/usr/bin\nCLAUDE_CODE_CHILD_SESSION=leaked\n")}
+	got := rt.ContaminatedEnvVars(context.Background())
+	if len(got) != 1 || got[0] != "CLAUDE_CODE_CHILD_SESSION" {
+		t.Fatalf("ContaminatedEnvVars = %v, want [CLAUDE_CODE_CHILD_SESSION]", got)
+	}
+	if len(fr.calls) != 1 || subcommandOf(fr.calls[0].args) != "show-environment" {
+		t.Fatalf("ContaminatedEnvVars issued %v, want a single show-environment call", fr.calls)
+	}
+}
+
 // -- command builder tests --
 
 func TestCommandBuilders(t *testing.T) {
-	if got, want := newSessionArgs("sess-1", "/tmp/ws", "/bin/sh", `echo hi; exec "${SHELL:-/bin/sh}" -i`),
-		[]string{"new-session", "-d", "-s", "sess-1", "-x", "220", "-y", "50", "-c", "/tmp/ws", "/bin/sh", "-c", `echo hi; exec "${SHELL:-/bin/sh}" -i`}; !reflect.DeepEqual(got, want) {
+	if got, want := newSessionArgs("sess-1", "/tmp/ws", "/bin/sh", `echo hi; exec "${SHELL:-/bin/sh}" -i`, ""),
+		[]string{"new-session", "-d", "-P", "-F", "#{session_id}", "-s", "sess-1", "-x", "220", "-y", "50", "-c", "/tmp/ws", "/bin/sh", "-c", `echo hi; exec "${SHELL:-/bin/sh}" -i`}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("newSessionArgs = %#v, want %#v", got, want)
+	}
+	// With an owner, the token is part of the CREATION command itself — that is
+	// the property the whole ownership model rests on.
+	if got, want := newSessionArgs("sess-1", "/tmp/ws", "/bin/sh", "run", "ao-reviewer:sess-1"),
+		[]string{"new-session", "-d", "-P", "-F", "#{session_id}", "-s", "sess-1", "-x", "220", "-y", "50", "-c", "/tmp/ws",
+			"-e", "AO_SESSION_OWNER=ao-reviewer:sess-1", "/bin/sh", "-c", "run"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("newSessionArgs(owner) = %#v, want %#v", got, want)
 	}
 	if got, want := respawnPaneArgs("sess-1", "/tmp/ws", "/bin/sh", "echo hi"),
 		[]string{"respawn-pane", "-k", "-t", "sess-1:0.0", "-c", "/tmp/ws", "/bin/sh", "-c", "echo hi"}; !reflect.DeepEqual(got, want) {
@@ -275,7 +487,7 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	// new-session, display-message cwd verification, set-option status,
 	// set-option mouse, set-option window-size, has-session (exit 0 = alive)
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{nil, []byte("/tmp/ws\n"), nil, nil, nil, nil}
+	fr.outputs = [][]byte{nil, []byte("/tmp/ws\n"), nil, nil, nil, nil, nil}
 
 	h, err := r.Create(context.Background(), ports.RuntimeConfig{
 		SessionID:     "sess-1",
@@ -289,15 +501,23 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	if h.ID != "sess-1" {
 		t.Fatalf("handle ID = %q, want sess-1", h.ID)
 	}
-	// Expect 6 calls: new-session, display-message cwd verification,
-	// set-option status, set-option mouse, set-option window-size, has-session.
-	if len(fr.calls) != 6 {
-		t.Fatalf("calls = %d, want 6", len(fr.calls))
+	// Expect 7 calls: new-session, display-message cwd verification,
+	// set-option status, set-option mouse, set-option window-size,
+	// set-option remain-on-exit off, has-session.
+	//
+	// No owner is configured here, so there is no ownership read-back: an
+	// unowned session is the pre-existing behaviour for every caller that does
+	// not need a recoverable identity.
+	if len(fr.calls) != 7 {
+		t.Fatalf("calls = %d, want 7", len(fr.calls))
 	}
 
 	// Call 0: new-session
-	if got := fr.calls[0].args[0]; got != "new-session" {
+	if got := subcommandOf(fr.calls[0].args); got != "new-session" {
 		t.Fatalf("call[0] = %q, want new-session", got)
+	}
+	if got := fr.calls[0].args[:2]; !reflect.DeepEqual(got, []string{"-L", defaultSocket}) {
+		t.Fatalf("call[0] server prefix = %v, want -L %s", got, defaultSocket)
 	}
 	// Check -s <id>, -c <cwd> are present.
 	joined := strings.Join(fr.calls[0].args, " ")
@@ -313,29 +533,35 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	}
 
 	// Call 1: verify pane cwd.
-	if got, want := fr.calls[1].args, paneCurrentPathArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[1].args, srv(paneCurrentPathArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[1] = %#v, want %#v", got, want)
 	}
 
 	// Call 2: set-option status off (plain target, pane-targeting does not use =).
-	if got, want := fr.calls[2].args, setStatusOffArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[2].args, srv(setStatusOffArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[2] = %#v, want %#v", got, want)
 	}
 
 	// Call 3: set-option mouse on (enables wheel-scroll of the pane).
-	if got, want := fr.calls[3].args, setMouseOnArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[3].args, srv(setMouseOnArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[3] = %#v, want %#v", got, want)
 	}
 
 	// Call 4: set-option window-size largest (multi-client sizing, see
 	// setWindowSizeLargestArgs).
-	if got, want := fr.calls[4].args, setWindowSizeLargestArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[4].args, srv(setWindowSizeLargestArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[4] = %#v, want %#v", got, want)
 	}
 
-	// Call 5: has-session (IsAlive, uses exact-match target =sess-1).
-	if got, want := fr.calls[5].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	// Call 5: set-option remain-on-exit off, so a finished process cannot leave
+	// its session standing for a later probe to mistake for a live one.
+	if got, want := fr.calls[5].args, srv(setRemainOnExitOffArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[5] = %#v, want %#v", got, want)
+	}
+
+	// Call 6: has-session (IsAlive, uses exact-match target =sess-1).
+	if got, want := fr.calls[6].args, srv(hasSessionArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("call[6] = %#v, want %#v", got, want)
 	}
 }
 
@@ -555,7 +781,7 @@ func TestCreateDestroysAndReturnsErrorWhenNotAlive(t *testing.T) {
 	}
 	sawHasSession := false
 	for _, c := range fr3.calls {
-		if len(c.args) > 0 && c.args[0] == "has-session" {
+		if subcommandOf(c.args) == "has-session" {
 			sawHasSession = true
 		}
 	}
@@ -565,7 +791,7 @@ func TestCreateDestroysAndReturnsErrorWhenNotAlive(t *testing.T) {
 	// Verify Destroy was called (kill-session).
 	hasKill := false
 	for _, c := range fr3.calls {
-		if len(c.args) > 0 && c.args[0] == "kill-session" {
+		if subcommandOf(c.args) == "kill-session" {
 			hasKill = true
 		}
 	}
@@ -587,10 +813,13 @@ type fakeRunnerSelectiveErr struct {
 
 func (f *fakeRunnerSelectiveErr) Run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, runnerCall{env: append([]string(nil), env...), name: name, args: append([]string(nil), args...)})
-	if len(args) > 0 && args[0] == f.exitErrOn {
+	if subcommandOf(args) == f.exitErrOn {
 		return f.errOutput, &exec.ExitError{}
 	}
-	if len(args) > 0 && args[0] == "display-message" {
+	if subcommandOf(args) == "new-session" {
+		return []byte(fakeInstanceID + "\n"), nil
+	}
+	if subcommandOf(args) == "display-message" {
 		return []byte("/tmp/ws\n"), nil
 	}
 	return nil, nil
@@ -639,14 +868,119 @@ func TestRestartRespawnsExistingPaneAndPreservesHandle(t *testing.T) {
 	if got != handle {
 		t.Fatalf("Restart handle = %+v, want %+v", got, handle)
 	}
-	if len(fr.calls) != 2 {
-		t.Fatalf("calls = %d, want respawn + liveness probe", len(fr.calls))
+	if len(fr.calls) != 3 {
+		t.Fatalf("calls = %d, want owner read + respawn + liveness probe", len(fr.calls))
 	}
-	if args := fr.calls[0].args; len(args) < 6 || args[0] != "respawn-pane" || args[1] != "-k" || args[3] != "sess-1:0.0" || args[5] != "/tmp/ws" {
+	if args := fr.calls[0].args; !reflect.DeepEqual(args, srv(sessionEnvArgs("sess-1", ownerEnvKey))) {
+		t.Fatalf("owner read args = %#v", args)
+	}
+	if args := fr.calls[1].args; len(args) < 8 || args[0] != "-L" || args[2] != "respawn-pane" || args[3] != "-k" || args[5] != "sess-1:0.0" || args[7] != "/tmp/ws" {
 		t.Fatalf("respawn args = %#v", args)
 	}
-	if args := fr.calls[1].args; !reflect.DeepEqual(args, hasSessionArgs("sess-1")) {
-		t.Fatalf("liveness args = %#v, want %#v", args, hasSessionArgs("sess-1"))
+	if args := fr.calls[2].args; !reflect.DeepEqual(args, srv(hasSessionArgs("sess-1"))) {
+		t.Fatalf("liveness args = %#v, want %#v", args, srv(hasSessionArgs("sess-1")))
+	}
+}
+
+// P9 review 5.2: a restart that restamps the owner token and then fails must put
+// the previous token back -- otherwise the runtime claims a launch the session
+// row never recorded, and every later ownership proof fails closed.
+func TestRestartRollsBackTheOwnerTokenWhenTheRespawnFails(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	const previous = "ao-session:sess-1:launch-old"
+	fr.outputs = [][]byte{[]byte(ownerEnvKey + "=" + previous + "\n")}
+	fr.hook = func(_ context.Context, n int) error {
+		if subcommandOf(fr.calls[n-1].args) == "respawn-pane" {
+			return errors.New("respawn failed")
+		}
+		return nil
+	}
+	_, err := r.Restart(context.Background(), ports.RuntimeHandle{ID: "sess-1", InstanceID: "$7"}, ports.RuntimeConfig{
+		SessionID: "sess-1", WorkspacePath: "/tmp/ws", Argv: []string{"codex"}, Owner: "ao-session:sess-1:launch-new",
+	})
+	if err == nil {
+		t.Fatal("a failed respawn reported success")
+	}
+	var ownerWrites []string
+	for _, c := range fr.calls {
+		if subcommandOf(c.args) != "set-environment" {
+			continue
+		}
+		if c.args[len(c.args)-2] == ownerEnvKey {
+			if c.args[len(c.args)-3] != "$7" {
+				t.Fatalf("owner write addressed %q, want the exact incarnation", c.args[len(c.args)-3])
+			}
+			ownerWrites = append(ownerWrites, c.args[len(c.args)-1])
+		}
+	}
+	if len(ownerWrites) != 2 || ownerWrites[0] != "ao-session:sess-1:launch-new" || ownerWrites[1] != previous {
+		t.Fatalf("owner writes = %v, want restamp then rollback to %q", ownerWrites, previous)
+	}
+}
+
+// A restart that cannot read the owner it would overwrite does not overwrite it.
+func TestRestartRefusesWhenThePreviousOwnerIsUnreadable(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{[]byte("server exited unexpectedly")}
+	fr.hook = func(_ context.Context, n int) error {
+		if n == 1 {
+			return errors.New("exit status 1")
+		}
+		return nil
+	}
+	_, err := r.Restart(context.Background(), ports.RuntimeHandle{ID: "sess-1", InstanceID: "$7"}, ports.RuntimeConfig{
+		SessionID: "sess-1", WorkspacePath: "/tmp/ws", Argv: []string{"codex"}, Owner: "ao-session:sess-1:launch-new",
+	})
+	if err == nil {
+		t.Fatal("restart proceeded over an unreadable owner")
+	}
+	if countCalls(fr, "set-environment") != 0 || countCalls(fr, "respawn-pane") != 0 {
+		t.Fatalf("restart wrote after an unreadable owner: %+v", fr.calls)
+	}
+}
+
+// P9 review 2.1/2.2: only a missing SOCKET is absence, and only "unknown
+// variable" is an unmarked session. Every other failure is an error.
+func TestServerAbsenceAndUnknownVariableAreTheOnlyConclusiveFailures(t *testing.T) {
+	absent := serverUnreachableError("probe", "error connecting to /private/tmp/tmux-501/ao (No such file or directory)")
+	if !errors.Is(absent, ports.ErrRuntimeServerAbsent) || !errors.Is(absent, ports.ErrRuntimeUnavailable) {
+		t.Fatalf("missing socket = %v, want absent and unavailable", absent)
+	}
+	for _, out := range []string{
+		"no server running on /private/tmp/tmux-501/ao",
+		"error connecting to /private/tmp/tmux-501/ao (Permission denied)",
+		"error connecting to /private/tmp/tmux-501/ao (Connection refused)",
+	} {
+		err := serverUnreachableError("probe", out)
+		if errors.Is(err, ports.ErrRuntimeServerAbsent) || !errors.Is(err, ports.ErrRuntimeUnavailable) {
+			t.Fatalf("%q = %v, want unavailable and NOT absent", out, err)
+		}
+	}
+
+	r, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{[]byte("unknown variable: " + ownerEnvKey)}
+	fr.hook = func(context.Context, int) error { return errors.New("exit status 1") }
+	if v, known, err := r.instanceEnv(context.Background(), "$3", ownerEnvKey); err != nil || known || v != "" {
+		t.Fatalf("unknown variable = (%q, %v, %v), want unmarked", v, known, err)
+	}
+	fr.outputs = [][]byte{[]byte("lost server")}
+	if _, known, err := r.instanceEnv(context.Background(), "$3", ownerEnvKey); err == nil || known {
+		t.Fatalf("an unexplained failure = (known=%v, err=%v), want an error", known, err)
+	}
+	fr.outputs = [][]byte{[]byte("no such session: $3")}
+	if _, _, err := r.instanceEnv(context.Background(), "$3", ownerEnvKey); !errors.Is(err, errInstanceGone) {
+		t.Fatalf("missing incarnation = %v, want errInstanceGone", err)
+	}
+}
+
+// Review 1.3: resolution by name is EXACT in the one form tmux honours for
+// display-message; a bare name would let "proj-1" resolve "proj-12".
+func TestSessionInstanceResolutionUsesTheExactFormatTarget(t *testing.T) {
+	if got := sessionInstanceArgs("proj-1"); got[3] != "=proj-1:" {
+		t.Fatalf("name target = %q, want =proj-1:", got[3])
+	}
+	if got := sessionInstanceArgs("$4"); got[3] != "$4" {
+		t.Fatalf("instance target = %q, want $4", got[3])
 	}
 }
 
@@ -677,7 +1011,7 @@ func TestDestroyIsIdempotentWhenSessionMissing(t *testing.T) {
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	if len(fr.calls) != 2 || fr.calls[0].args[0] != "list-panes" || fr.calls[1].args[0] != "kill-session" {
+	if len(fr.calls) != 2 || subcommandOf(fr.calls[0].args) != "list-panes" || subcommandOf(fr.calls[1].args) != "kill-session" {
 		t.Fatalf("calls = %#v, want list-panes then kill-session", fr.calls)
 	}
 }
@@ -711,10 +1045,10 @@ func TestDestroyArgs(t *testing.T) {
 	}
 	// list-panes discovers pane sessions; kill-session (exact-match target
 	// =<id>) tears the session down.
-	if got, want := fr.calls[0].args, listPanePIDsArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(listPanePIDsArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("list-panes args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[1].args, killSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[1].args, srv(killSessionArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("destroy args = %#v, want %#v", got, want)
 	}
 }
@@ -849,7 +1183,7 @@ func TestIsAliveReturnsTrueOnExitZero(t *testing.T) {
 	if !alive {
 		t.Fatal("alive = false, want true")
 	}
-	if got, want := fr.calls[0].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(hasSessionArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("has-session args = %#v, want %#v", got, want)
 	}
 }
@@ -925,19 +1259,20 @@ func TestSendMessageChunksAndSendsEnter(t *testing.T) {
 	if err := r.SendMessage(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, "hello世界"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if len(fr.calls) != 4 {
-		t.Fatalf("calls = %d, want 4 (3 chunks + Enter)", len(fr.calls))
+	sent := sendCalls(fr)
+	if len(sent) != 4 {
+		t.Fatalf("calls = %d, want 4 (3 chunks + Enter)", len(sent))
 	}
-	if got, want := fr.calls[0].args, sendKeysLiteralArgs("sess-1", "hello"); !reflect.DeepEqual(got, want) {
+	if got, want := sent[0].args, srv(sendKeysLiteralArgs("sess-1", "hello")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 1 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[1].args, sendKeysLiteralArgs("sess-1", "世"); !reflect.DeepEqual(got, want) {
+	if got, want := sent[1].args, srv(sendKeysLiteralArgs("sess-1", "世")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 2 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[2].args, sendKeysLiteralArgs("sess-1", "界"); !reflect.DeepEqual(got, want) {
+	if got, want := sent[2].args, srv(sendKeysLiteralArgs("sess-1", "界")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 3 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[3].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := sent[3].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -948,8 +1283,8 @@ func TestSendMessageUsesLiteralFlag(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	// First call must use -l so "Enter" is sent literally, not as a key binding.
-	if fr.calls[0].args[3] != "-l" {
-		t.Fatalf("send-keys args[3] = %q, want -l", fr.calls[0].args[3])
+	if first := sendCalls(fr)[0].args; first[5] != "-l" {
+		t.Fatalf("send-keys args[5] = %q, want -l", first[5])
 	}
 }
 
@@ -982,10 +1317,11 @@ func TestSendMessageDelaysBeforeEnter(t *testing.T) {
 		t.Fatalf("SendMessage took %s, want >= %s pre-Enter pause", dt, r.enterDelay)
 	}
 	// Non-empty message still ends with the literal chunks then Enter.
-	if len(fr.calls) != 2 {
-		t.Fatalf("calls = %d, want 2 (chunk + Enter)", len(fr.calls))
+	sent := sendCalls(fr)
+	if len(sent) != 2 {
+		t.Fatalf("calls = %d, want 2 (chunk + Enter)", len(sent))
 	}
-	if got, want := fr.calls[1].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := sent[1].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 
@@ -1000,10 +1336,10 @@ func TestSendMessageDelaysBeforeEnter(t *testing.T) {
 		t.Fatalf("nudge SendMessage took %s; want no pause for empty message", dt)
 	}
 	// Empty message is Enter-only: no send-keys -l call, just Enter.
-	if len(frNudge.calls) != 1 {
-		t.Fatalf("nudge calls = %d, want 1 (Enter only)", len(frNudge.calls))
+	if sent := sendCalls(frNudge); len(sent) != 1 {
+		t.Fatalf("nudge calls = %d, want 1 (Enter only)", len(sent))
 	}
-	if got, want := frNudge.calls[0].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := sendCalls(frNudge)[0].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("nudge Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -1026,10 +1362,11 @@ func TestSendMessageEnterSurvivesCallerCancel(t *testing.T) {
 	if err := r.SendMessage(ctx, ports.RuntimeHandle{ID: "sess-1"}, "hello"); err != nil {
 		t.Fatalf("SendMessage cancelled mid-pause: %v (Enter must run detached)", err)
 	}
-	if len(fr.calls) != 2 {
-		t.Fatalf("calls = %d, want 2 (chunk + Enter despite the caller cancel after the paste)", len(fr.calls))
+	sent := sendCalls(fr)
+	if len(sent) != 2 {
+		t.Fatalf("calls = %d, want 2 (chunk + Enter despite the caller cancel after the paste)", len(sent))
 	}
-	if got, want := fr.calls[1].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := sent[1].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -1047,7 +1384,9 @@ func TestSendMessageRemainingChunksSurviveCallerCancel(t *testing.T) {
 		close(callerCancelled)
 	}()
 	fr.hook = func(runCtx context.Context, call int) error {
-		if call != 2 {
+		// call 1 is SendMessage's #{pane_in_mode} guard probe, so the second
+		// literal chunk is call 3.
+		if call != 3 {
 			return nil
 		}
 		close(secondChunkStarted)
@@ -1061,13 +1400,13 @@ func TestSendMessageRemainingChunksSurviveCallerCancel(t *testing.T) {
 	if ctx.Err() != context.Canceled {
 		t.Fatalf("caller context error = %v, want context.Canceled", ctx.Err())
 	}
-	if len(fr.calls) != 3 {
-		t.Fatalf("calls = %d, want 3 (two chunks + Enter)", len(fr.calls))
+	if sent := sendCalls(fr); len(sent) != 3 {
+		t.Fatalf("calls = %d, want 3 (two chunks + Enter)", len(sent))
 	}
-	if got, want := fr.calls[1].args, sendKeysLiteralArgs("sess-1", "world"); !reflect.DeepEqual(got, want) {
+	if got, want := sendCalls(fr)[1].args, srv(sendKeysLiteralArgs("sess-1", "world")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 2 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[2].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := sendCalls(fr)[2].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -1105,7 +1444,7 @@ func TestInterruptSendsCtrlC(t *testing.T) {
 	if err := r.Interrupt(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Interrupt: %v", err)
 	}
-	if got, want := fr.calls[0].args, sendInterruptArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(sendInterruptArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("interrupt args = %#v, want %#v", got, want)
 	}
 }
@@ -1118,7 +1457,7 @@ func TestSendInputSendsEscapeWithoutEnter(t *testing.T) {
 	if len(fr.calls) != 1 {
 		t.Fatalf("calls = %d, want 1", len(fr.calls))
 	}
-	if got, want := fr.calls[0].args, sendKeysLiteralArgs("sess-1", "\x1b"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(sendKeysLiteralArgs("sess-1", "\x1b")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("escape args = %#v, want %#v", got, want)
 	}
 }
@@ -1167,7 +1506,7 @@ func TestGetOutputArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOutput: %v", err)
 	}
-	if got, want := fr.calls[0].args, capturePaneArgs("sess-1", 10); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(capturePaneArgs("sess-1", 10)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("capture-pane args = %#v, want %#v", got, want)
 	}
 }
@@ -1183,7 +1522,7 @@ func TestGetStyledOutputPreservesCaptureMode(t *testing.T) {
 	if !strings.Contains(out, "\x1b[2m") {
 		t.Fatalf("styled output lost SGR sequence: %q", out)
 	}
-	if got, want := fr.calls[0].args, capturePaneStyledArgs("sess-1", 10); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(capturePaneStyledArgs("sess-1", 10)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("capture-pane args = %#v, want %#v", got, want)
 	}
 }
@@ -1196,7 +1535,7 @@ func TestAttachCommandReturnsExpectedArgv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AttachCommand: %v", err)
 	}
-	want := []string{"/usr/bin/tmux", "-u", "-T", "RGB", "attach-session", "-t", "sess-1"}
+	want := []string{"/usr/bin/tmux", "-L", defaultSocket, "-u", "-T", "RGB", "attach-session", "-t", "sess-1"}
 	if !reflect.DeepEqual(argv, want) {
 		t.Fatalf("argv = %#v, want %#v", argv, want)
 	}
@@ -1386,4 +1725,30 @@ func exitCodeErr(t *testing.T, code int) error {
 		t.Fatalf("sh -c 'exit %d' should fail", code)
 	}
 	return err
+}
+
+// Frente 3 / 3D: the daemon's context switches never reach an agent pane --
+// their values would tell the agent which arm of a memory A/B it is in.
+func TestSanitizeInheritedEnv_WithholdsDaemonContextSwitches(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/x",
+		"AO_MEMORY_MODE=assisted",
+		"AO_MEMORY_EXTERNAL=off",
+		"AO_CONTEXT_ROUTER=on",
+		"AO_DATA_DIR=/scratch/data",
+		"AO_MEMORY_CACHE=on",
+	}
+	got := sanitizeInheritedEnv(in)
+	joined := strings.Join(got, "\n")
+	for _, withheld := range []string{"AO_MEMORY_MODE", "AO_MEMORY_EXTERNAL", "AO_CONTEXT_ROUTER"} {
+		if strings.Contains(joined, withheld+"=") {
+			t.Fatalf("%s reached the pane environment: %v", withheld, got)
+		}
+	}
+	for _, kept := range []string{"PATH=/usr/bin", "HOME=/home/x", "AO_DATA_DIR=/scratch/data", "AO_MEMORY_CACHE=on"} {
+		if !strings.Contains(joined, kept) {
+			t.Fatalf("%s must be preserved: %v", kept, got)
+		}
+	}
 }

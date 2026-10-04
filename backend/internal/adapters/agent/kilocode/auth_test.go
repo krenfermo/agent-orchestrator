@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
@@ -115,6 +116,7 @@ func TestKilocodeDBHasAuthorizedAccount(t *testing.T) {
 }
 
 func TestAuthStatusUnknownWhenKeyOnlyComesFromInteractiveShell(t *testing.T) {
+	widenAuthProbeTimeout(t)
 	dir := t.TempDir()
 	shellPath := filepath.Join(dir, "fake-shell")
 	if err := os.WriteFile(shellPath, []byte(`#!/bin/sh
@@ -162,4 +164,19 @@ func TestKilocodeAuthListStatusUnknownWhenEmpty(t *testing.T) {
 	if !ok || status != ports.AgentAuthStatusUnknown {
 		t.Fatalf("status = (%q, %v), want (%q, true)", status, ok, ports.AgentAuthStatusUnknown)
 	}
+}
+
+// widenAuthProbeTimeout removes the wall-clock deadline from the auth probe for
+// one test.
+//
+// These tests assert on what the probe MAKES of a stub harness's output, not on
+// how fast it got it. Leaving the shipped three-second bound in place makes them
+// fail whenever the host is slow enough that spawning /bin/sh takes longer than
+// that -- which a full-repo `go test ./...` on a laptop reliably produces, and
+// which says nothing about the code under test.
+func widenAuthProbeTimeout(t *testing.T) {
+	t.Helper()
+	previous := authProbeTimeout
+	authProbeTimeout = time.Minute
+	t.Cleanup(func() { authProbeTimeout = previous })
 }

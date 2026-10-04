@@ -12,6 +12,7 @@ import (
 	stdctx "context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,11 @@ type Deps struct {
 	Projects Projects
 	Launcher Launcher
 
+	// SessionFacts receives the session-level fact that an AO-internal review
+	// pass failed durably. Optional: without it the run is still recorded
+	// failed, only the notification is skipped.
+	SessionFacts ports.SessionNotifier
+
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
 	NewID func() string
@@ -85,6 +91,7 @@ type Engine struct {
 	prs      PRs
 	projects Projects
 	launcher Launcher
+	facts    ports.SessionNotifier
 	clock    func() time.Time
 	newID    func() string
 
@@ -111,6 +118,7 @@ func New(d Deps) *Engine {
 		prs:          d.PRs,
 		projects:     d.Projects,
 		launcher:     d.Launcher,
+		facts:        d.SessionFacts,
 		clock:        clock,
 		newID:        newID,
 		triggerLocks: make(map[domain.SessionID]*sync.Mutex),
@@ -355,6 +363,10 @@ func (e *Engine) TriggerWithSource(ctx stdctx.Context, workerID domain.SessionID
 			if _, updateErr := e.store.UpdateReviewRunResult(ctx, run.ID, domain.ReviewRunFailed, domain.VerdictNone, err.Error(), "", run.AutoInjectReview); updateErr != nil {
 				return updateErr
 			}
+			// The failed run row is the durable authority; the notification is
+			// made from it, AFTER it is written, and is keyed on the run id, so
+			// re-reading that row can never raise a second one.
+			e.notifyIntegrationFailed(ctx, worker, run, err)
 		}
 		return err
 	}
@@ -991,3 +1003,44 @@ func (e *Engine) upsertReview(ctx stdctx.Context, worker domain.SessionRecord, h
 	}
 	return review, nil
 }
+
+// notifyIntegrationFailed reports a durably failed AO-internal review pass to
+// the notification producer. Best-effort: the run is already recorded failed,
+// so a notification failure must not turn into a trigger failure.
+func (e *Engine) notifyIntegrationFailed(
+	ctx stdctx.Context,
+	worker domain.SessionRecord,
+	run domain.ReviewRun,
+	cause error,
+) {
+	if e.facts == nil {
+		return
+	}
+	detail := ""
+	if cause != nil {
+		detail = domain.SanitizeControlChars(cause.Error())
+		if len(detail) > integrationDetailLimit {
+			detail = detail[:integrationDetailLimit] + "..."
+		}
+	}
+	fact := ports.SessionFact{
+		Kind:      ports.SessionFactIntegrationFailed,
+		SessionID: worker.ID,
+		ProjectID: worker.ProjectID,
+		// The review run id is the failure's durable identity: one failed row,
+		// one notification, however many times that row is read back.
+		ScopeID:            run.ID,
+		PRURL:              run.PRURL,
+		Detail:             detail,
+		SessionDisplayName: worker.DisplayName,
+		ObservedAt:         e.clock(),
+	}
+	if err := e.facts.Record(ctx, fact); err != nil {
+		slog.Default().Warn("review: integration failure notification failed", "run", run.ID, "err", err)
+	}
+}
+
+// integrationDetailLimit bounds the provider error text carried into a
+// notification body. P4-D section 9: a notification carries a concise summary,
+// never a transcript or raw provider output.
+const integrationDetailLimit = 200

@@ -21,7 +21,6 @@ import (
 
 const (
 	maxSwitchNoteBytes          = 16 << 10
-	conversationFactBytes       = 16 << 10
 	handoffContinuationMaxBytes = 96 << 10
 	// Retain a small bounded prefix of each deterministic conversation fact in
 	// the final emergency context envelope.
@@ -740,6 +739,27 @@ func (m *Manager) prepareTargetActivation(ctx context.Context, store ports.Agent
 	}
 	config := effectiveAgentConfig(rec.Kind, project.Config)
 	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
+	// Checkpoint 8P-B.2 §13: a provider switch (Claude<->Codex, ...) keeps
+	// the SAME session row/id (runtimeCfg.SessionID below is the original
+	// id, never a new one) and must launch the target harness under the
+	// SAME owner's isolated runtime-home -- re-derived here against the
+	// TARGET harness specifically, since the source and target harness can
+	// require different provider profiles (e.g. Claude's vs Codex's).
+	if m.runtimeIsolation != nil {
+		owner, ownerErr := m.store.GetSessionOwner(ctx, rec.ID)
+		if ownerErr != nil {
+			return preparedTargetActivation{}, fmt.Errorf("resolve session owner: %w", ownerErr)
+		}
+		if owner != nil {
+			switchEnv, _, envErr := m.runtimeIsolation.ResolveForOwner(ctx, *owner, harness)
+			if envErr != nil {
+				return preparedTargetActivation{}, fmt.Errorf("target runtime env: %w", envErr)
+			}
+			for k, v := range switchEnv {
+				env[k] = v
+			}
+		}
+	}
 	m.augmentAgentRuntimeEnv(agent, env)
 	configDir, err := nativeConfigDir(ctx, agent, env)
 	if err != nil {
@@ -2708,8 +2728,13 @@ func nativeSessionIDPtr(id domain.AgentNativeSessionID) *domain.AgentNativeSessi
 	return &copyID
 }
 
+// boundedConversationFact renders a conversation fact exactly as
+// SessionMetadata.LatestUserPrompt stores it. The bound and the trimming live
+// on the domain field itself rather than here: workflow's fix-delivery recovery
+// recognises a prompt it sent by re-deriving these same bytes, and two packages
+// that each kept their own copy of the rule could drift apart silently.
 func boundedConversationFact(value string) string {
-	return boundedString(strings.TrimSpace(value), conversationFactBytes)
+	return domain.BoundLatestUserPrompt(value)
 }
 
 func boundedString(value string, maxBytes int) string {

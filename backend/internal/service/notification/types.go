@@ -11,13 +11,17 @@ const (
 	TargetSession TargetKind = "session"
 	// TargetPR navigates to a pull request view.
 	TargetPR TargetKind = "pr"
+	// TargetWorkflow navigates to a workflow run view. Used by run-level
+	// notifications, which have no session to open.
+	TargetWorkflow TargetKind = "workflow"
 )
 
 // Target is the service-facing navigation metadata for a notification.
 type Target struct {
-	Kind      TargetKind
-	SessionID domain.SessionID
-	PRURL     string
+	Kind          TargetKind
+	SessionID     domain.SessionID
+	PRURL         string
+	WorkflowRunID string
 }
 
 // Notification is the dashboard-facing service DTO assembled from a stored row.
@@ -38,11 +42,32 @@ const (
 	ListUnresolved = domain.NotificationListUnresolved
 )
 
+// ProjectScope limits a read to notifications about a set of projects.
+//
+// The nil/empty distinction is the whole point of the type, and it is the
+// opposite of what a bare slice would give you:
+//
+//   - a nil *ProjectScope means "do not scope" -- the caller's authority spans
+//     every organization, which is what an installation owner or administrator
+//     has and what every pre-P4-C wiring has;
+//   - a non-nil scope with NO project ids means "nothing is visible", and must
+//     return an empty page rather than everything.
+//
+// A plain []domain.ProjectID cannot express that difference: nil and empty are
+// the same value, and the safe reading of one is the dangerous reading of the
+// other.
+type ProjectScope struct {
+	ProjectIDs []domain.ProjectID
+}
+
 // ListFilter controls paginated notification history.
 type ListFilter struct {
 	Status ListStatus
 	Limit  int
 	Cursor string
+	// Scope limits the page to the caller's visible projects (P4-C). Nil
+	// means unscoped -- see ProjectScope.
+	Scope *ProjectScope
 }
 
 // ListPage is one newest-first page of notification history.

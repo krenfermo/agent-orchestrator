@@ -9,6 +9,13 @@ import (
 // ErrSessionNotFound reports an observation for an unknown session id.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrProviderProfileRequired reports that a workflow's owner has no
+// enabled ProviderProfile for the harness a launch needs (Checkpoint
+// 8P-B.1). Like ErrChatAuthRequired, this is a configuration/security
+// condition, never auto-retried and never treated as capacity/transient
+// failure -- see workflow/failure_classifier.go.
+var ErrProviderProfileRequired = errors.New("provider profile required: connect this provider in Settings → Agents & Models")
+
 // SpawnConfig is the request to start a new session: which project/issue, which
 // agent harness, and the branch/prompt the agent launches with.
 type SpawnConfig struct {
@@ -26,7 +33,16 @@ type SpawnConfig struct {
 	Kind         domain.SessionKind
 	Harness      domain.AgentHarness
 	Branch       string
-	Prompt       string
+	// BaseRef overrides the project's default branch as the base a new
+	// session's worktree is created from. Empty keeps the existing
+	// project-default-branch behavior. Used by the master workflow
+	// (Checkpoint 8M.1) to base task N+1's worktree on the integration state
+	// containing every previously completed dependency task, instead of the
+	// project's default branch — the mechanism that lets task N+1 physically
+	// see task N's verified code. Accepts anything git can resolve as a ref
+	// (a branch name or a full ref path like refs/ao/workflows/<id>/integration).
+	BaseRef string
+	Prompt  string
 	// AgentConfig overrides the resolved project/role agent config for this
 	// single spawn. Empty fields keep the project defaults.
 	AgentConfig AgentConfig
@@ -47,6 +63,41 @@ type SpawnConfig struct {
 	// consume inline binary data). Any file type is accepted except for
 	// explicitly blocked types (e.g., SVG for security reasons).
 	Attachments []SpawnAttachment
+
+	// RuntimeEnv overrides subprocess env vars for the launched provider
+	// process (Checkpoint 8P-B.1) -- e.g. HOME/CLAUDE_CONFIG_DIR/CODEX_HOME
+	// pinned to the workflow owner's isolated runtime-home. Nil preserves
+	// pre-8P-B.1 behavior exactly (daemon's own real environment). Applied
+	// last, after every other env source, so it always wins.
+	RuntimeEnv map[string]string
+
+	// Owner is the resolved workflow-run owner, when known (Checkpoint
+	// 8P-B.1). Empty means unresolved/unowned; best-effort stamped onto the
+	// created session for later ownership checks, never trusted as-is from
+	// a client -- callers must resolve it from durable ownership data.
+	Owner domain.UserID
+
+	// WorkflowRunID names the autonomous run this spawn belongs to, when it
+	// belongs to one (Checkpoint 8P-E.14). It exists for exactly one decision:
+	// in direct-branch mode the session manager acquires the repository+branch
+	// execution lock for an ordinary task, but a workflow's worker must not,
+	// because its run already owns that lock and the session would otherwise
+	// contend with the run that spawned it.
+	//
+	// Daemon-internal: it is set by the workflow coordinator from durable run
+	// state and is deliberately absent from the HTTP spawn DTO, so no client
+	// can present itself as a workflow to bypass task branch locking.
+	WorkflowRunID string
+
+	// Placement is the workflow run's frozen execution placement, when the
+	// spawn belongs to one (P3-A §7). It is threaded down to the workspace
+	// router so an explicitly chosen direct branch can never be materialised as
+	// an isolated worktree, whatever the project's current execution mode says.
+	//
+	// Daemon-internal like WorkflowRunID, and for the same reason: it is set by
+	// the workflow coordinator from the durable placement record and is
+	// deliberately absent from the HTTP spawn DTO.
+	Placement domain.ExecutionPlacementType
 }
 
 // SpawnAttachment is a single file attached to a spawn request. Data holds the

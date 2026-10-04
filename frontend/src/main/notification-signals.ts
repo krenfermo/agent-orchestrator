@@ -9,14 +9,48 @@
  */
 
 /** The notification types defined by `backend/internal/domain/notification.go`. */
-export type NotificationType = "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged";
+export type NotificationType =
+	| "needs_input"
+	| "ready_to_merge"
+	| "pr_merged"
+	| "pr_closed_unmerged"
+	| "task_completed"
+	| "workflow_completed"
+	| "task_needs_attention"
+	| "workflow_needs_attention"
+	| "task_failed"
+	| "workflow_failed"
+	| "human_question_required"
+	| "repair_exhausted"
+	| "integration_failed";
 
 /**
  * Types that warrant an *active* attention signal (macOS dock bounce / Windows &
  * Linux taskbar flash). A merged or closed PR is worth a toast, but should not
  * demand attention as insistently as an agent blocked waiting on the user.
+ *
+ * Completions sit on the toast side of that line for the same reason. Finished
+ * work is news, and the toast delivers it; nothing is waiting on the user, so
+ * bouncing the dock would be an interruption with nothing to act on — and a
+ * fleet of tasks finishing would make it a constant one.
  */
-const ATTENTION_TYPES: ReadonlySet<string> = new Set<NotificationType>(["needs_input", "ready_to_merge"]);
+const ATTENTION_TYPES: ReadonlySet<string> = new Set<NotificationType>([
+	"needs_input",
+	"ready_to_merge",
+	// A run that stopped on a decision, or ended without doing the work, is
+	// waiting on the user in exactly the way a blocked agent is: nothing moves
+	// again until they look. That is the whole test this set applies.
+	"task_needs_attention",
+	"workflow_needs_attention",
+	"task_failed",
+	"workflow_failed",
+	// All three session-scoped facts pass the same test: AO has no autonomous
+	// move left, so nothing moves again until the user looks. A pending
+	// permission prompt is the most literal case of it.
+	"human_question_required",
+	"repair_exhausted",
+	"integration_failed",
+]);
 
 /** Whether this notification type should bounce the dock / flash the taskbar. */
 export function shouldSignalAttention(type: string | undefined): boolean {

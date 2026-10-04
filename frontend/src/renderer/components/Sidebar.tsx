@@ -5,11 +5,13 @@ import {
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import {
+	Brain,
 	ChevronRight,
 	Folder,
 	FolderOpen,
 	LogIn,
 	LogOut,
+	MessageCircleQuestion,
 	MoreVertical,
 	Pencil,
 	Pin,
@@ -20,6 +22,7 @@ import {
 	Settings,
 	Trash2,
 	User,
+	Workflow,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -34,6 +37,8 @@ import {
 import { getAgentActivityView } from "../lib/session-presentation";
 import { aoBridge } from "../lib/bridge";
 import { useCommandPaletteEnabled } from "../hooks/useCommandPaletteEnabled";
+import { TenantSwitcher } from "./TenantSwitcher";
+import { useDevSandboxInfo } from "../hooks/useDevSandboxInfo";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { usePinSession, useUnpinSession } from "../hooks/usePinSession";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
@@ -146,6 +151,17 @@ function useSelection() {
 		// terminal, board, etc.) stays underneath.
 		goGlobalSettings: () => openGlobalSettings(),
 		goSettings: (projectId: string) => openProjectSettings(projectId),
+		// P4-G: project intelligence is a full route rather than a modal —
+		// it is something you read and explore, not a form you close.
+		goIntelligence: (projectId: string) =>
+			void navigate({ to: "/projects/$projectId/intelligence", params: { projectId } }),
+		goWorkflows: () => void navigate({ to: "/workflows" }),
+		// The same form, with the project already chosen. It navigates and
+		// creates nothing: the run is created by the /workflows form itself,
+		// so there is exactly one place that POSTs a workflow.
+		goProjectWorkflows: (projectId: string) =>
+			void navigate({ to: "/workflows", search: { projectId } }),
+		goDecisions: () => void navigate({ to: "/decisions" }),
 		goProject: (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } }),
 		goSession: (projectId: string, sessionId: string) =>
 			void navigate({ to: "/projects/$projectId/sessions/$sessionId", params: { projectId, sessionId } }),
@@ -222,6 +238,7 @@ export function Sidebar({
 		staleTime: Infinity,
 	});
 	const isNightly = typeof appVersion === "string" && appVersion.includes("-nightly.");
+	const { isDevSandbox, dataDir } = useDevSandboxInfo();
 
 	// agent-orchestrator's sidebar resize: drag the right edge (200-420px,
 	// persisted), double-click to reset to 240px. Drives --ao-sidebar-w on :root,
@@ -312,6 +329,18 @@ export function Sidebar({
 						<span className="sidebar-expanded-chrome shrink-0 rounded-full bg-purple-subtle px-1.5 py-0.5 text-micro font-semibold leading-none text-purple-accent group-data-[collapsible=icon]:hidden">
 							{t("shell.nightly")}
 						</span>
+					)}
+					{isDevSandbox && (
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<span className="sidebar-expanded-chrome shrink-0 rounded-full bg-warning/15 px-1.5 py-0.5 text-micro font-semibold leading-none text-warning group-data-[collapsible=icon]:hidden">
+									{t("shell.devSandbox")}
+								</span>
+							</TooltipTrigger>
+							<TooltipContent side="bottom">
+								{t("shell.devSandboxDataDir", { dataDir: dataDir ?? "?" })}
+							</TooltipContent>
+						</Tooltip>
 					)}
 				</div>
 			</SidebarHeader>
@@ -421,7 +450,37 @@ export function Sidebar({
 					className="sidebar-expanded-chrome relative flex w-full min-w-46.5 flex-col gap-0.5 transition-[opacity,transform] duration-150 ease-out group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-translate-x-2 group-data-[collapsible=icon]:opacity-0"
 				>
 					<RestartToUpdateRow status={updateStatus} tabIndex={isCollapsed ? -1 : 0} />
+					{/* P4-C. Renders nothing at all on a single-organization
+					    installation, which is every installation that has not
+					    asked for a second one. */}
+					<TenantSwitcher tabIndex={isCollapsed ? -1 : 0} />
 					<CloudAccountRow tabIndex={isCollapsed ? -1 : 0} />
+					<button
+						aria-label={t("shell.workflows")}
+						className={cn(
+							NAV_ROW_CLASS,
+							"flex h-[42px] w-full items-center text-left [&_svg]:size-icon-md [&_svg]:shrink-0",
+						)}
+						onClick={() => selection.goWorkflows()}
+						tabIndex={isCollapsed ? -1 : 0}
+						type="button"
+					>
+						<Workflow aria-hidden="true" />
+						<span className="tracking-tight">{t("shell.workflows")}</span>
+					</button>
+					<button
+						aria-label={t("shell.decisions.navLabel")}
+						className={cn(
+							NAV_ROW_CLASS,
+							"flex h-[42px] w-full items-center text-left [&_svg]:size-icon-md [&_svg]:shrink-0",
+						)}
+						onClick={() => selection.goDecisions()}
+						tabIndex={isCollapsed ? -1 : 0}
+						type="button"
+					>
+						<MessageCircleQuestion aria-hidden="true" />
+						<span className="tracking-tight">{t("shell.decisions.navLabel")}</span>
+					</button>
 					<button
 						aria-label={t("shell.settings")}
 						className={cn(
@@ -442,6 +501,34 @@ export function Sidebar({
 				>
 					<RestartToUpdateRailButton status={updateStatus} tabIndex={isCollapsed ? 0 : -1} />
 					<CloudAccountRailButton tabIndex={isCollapsed ? 0 : -1} />
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								aria-label={t("shell.workflows")}
+								className="grid size-control-board place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground [&_svg]:size-icon-base"
+								onClick={() => selection.goWorkflows()}
+								tabIndex={isCollapsed ? 0 : -1}
+								type="button"
+							>
+								<Workflow aria-hidden="true" />
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="right">{t("shell.workflows")}</TooltipContent>
+					</Tooltip>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								aria-label={t("shell.decisions.navLabel")}
+								className="grid size-control-board place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground [&_svg]:size-icon-base"
+								onClick={() => selection.goDecisions()}
+								tabIndex={isCollapsed ? 0 : -1}
+								type="button"
+							>
+								<MessageCircleQuestion aria-hidden="true" />
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="right">{t("shell.decisions.navLabel")}</TooltipContent>
+					</Tooltip>
 					<Tooltip>
 						<TooltipTrigger asChild>
 							<button
@@ -745,7 +832,18 @@ function ProjectItem({
 						<Plus aria-hidden="true" />
 						{t("shell.newSession")}
 					</DropdownMenuItem>
+					{/* Two entries, never one: delegating a freeform worker and
+					    creating a workflow run are different objects, and the
+					    project menu used to offer only the first. */}
+					<DropdownMenuItem onSelect={() => selection.goProjectWorkflows(workspace.id)}>
+						<Workflow aria-hidden="true" />
+						{t("shell.newWorkflowRun")}
+					</DropdownMenuItem>
 					<DropdownMenuSeparator />
+					<DropdownMenuItem onSelect={() => selection.goIntelligence(workspace.id)}>
+						<Brain aria-hidden="true" />
+						{t("shell.projectIntelligence")}
+					</DropdownMenuItem>
 					<DropdownMenuItem onSelect={() => selection.goSettings(workspace.id)}>
 						<Settings aria-hidden="true" />
 						{t("shell.projectSettings")}
@@ -828,7 +926,15 @@ function ProjectItem({
 				<Plus aria-hidden="true" />
 				{t("shell.newSession")}
 			</ContextMenuItem>
+			<ContextMenuItem onSelect={() => selection.goProjectWorkflows(workspace.id)}>
+				<Workflow aria-hidden="true" />
+				{t("shell.newWorkflowRun")}
+			</ContextMenuItem>
 			<ContextMenuSeparator />
+			<ContextMenuItem onSelect={() => selection.goIntelligence(workspace.id)}>
+				<Brain aria-hidden="true" />
+				{t("shell.projectIntelligence")}
+			</ContextMenuItem>
 			<ContextMenuItem onSelect={() => selection.goSettings(workspace.id)}>
 				<Settings aria-hidden="true" />
 				{t("shell.projectSettings")}

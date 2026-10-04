@@ -11,6 +11,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/lifecycle"
 	scmobserve "github.com/aoagents/agent-orchestrator/backend/internal/observe/scm"
+	githubintelsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/githubintel"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
@@ -119,4 +120,30 @@ func closedDone() <-chan struct{} {
 	done := make(chan struct{})
 	close(done)
 	return done
+}
+
+// newGitHubIntelligence builds P4-F's GitHub intelligence service.
+//
+// It reuses the SAME providers the rest of the daemon runs on rather than
+// constructing a second GitHub client with its own token handling and its own
+// cache: PR discovery and PR facts come from the multi-provider the observer
+// uses, and the repository/issue reads come from the GitHub sub-provider.
+//
+// It is never nil. A daemon with no GitHub credentials still serves the
+// surface in its degraded form — local branch, HEAD, dirtiness and ahead/behind
+// need no token — and reporting "unavailable, no credentials" is a better
+// answer than 501, because it is the true one.
+func newGitHubIntelligence(
+	projects githubintelsvc.Projects, gitlabCfg config.GitLabConfig, logger *slog.Logger,
+) *githubintelsvc.Service {
+	opts := []githubintelsvc.Option{githubintelsvc.WithLogger(logger)}
+	if gh, err := newGitHubSCMProvider(logger); err == nil {
+		opts = append(opts, githubintelsvc.WithGitHub(gh))
+	} else {
+		logger.Debug("github intelligence: github reader unavailable", "err", err)
+	}
+	if multi := newMultiSCMProvider(gitlabCfg, logger); multi != nil {
+		opts = append(opts, githubintelsvc.WithSCM(multi))
+	}
+	return githubintelsvc.New(projects, opts...)
 }

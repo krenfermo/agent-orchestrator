@@ -89,6 +89,176 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/admin/reset-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Loopback-only local recovery: reset a known account's password without a session */
+        post: operations["adminResetPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Authenticate with username/email + password and receive a session cookie */
+        post: operations["login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke the current session and clear the session cookie */
+        post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Resolve the current identity: a real session, trusted-local mode's synthesized admin, or no_user */
+        get: operations["getCurrentUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/oidc/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-A: the identity provider's redirect target. A browser flow receives the session cookie and a 302 to a bounded in-app path; a desktop flow receives a terminal HTML page and mints its session at /auth/oidc/claim instead. Never renders a token, an authorization code, or the provider's own message. */
+        get: operations["completeOIDCLogin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/oidc/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-A: redeem a finished desktop login with the handoff secret the supervisor kept on loopback. Answers pending until the person finishes at the provider; on completion the AO session arrives as a Set-Cookie header and never in the body. */
+        post: operations["claimOIDCLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/oidc/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-A: begin an OIDC Authorization Code + PKCE login and return the provider authorization URL */
+        post: operations["startOIDCLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-A: report which sign-in methods this installation offers. Public by necessity — the sign-in screen renders from it — and it carries no issuer, client id, client secret, scope or constraint. */
+        get: operations["getAuthProviders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create the installation's first (owner) account and sign in — rejected once an owner already exists */
+        post: operations["registerFirstUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/setup-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Report whether the installation has zero users yet (first-run signup should be offered) */
+        get: operations["getAuthSetupStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/browser/commands": {
         parameters: {
             query?: never;
@@ -123,6 +293,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Checkpoint 8J capacity/quota snapshots per known harness */
+        get: operations["listCapacity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/dev/import-projects": {
         parameters: {
             query?: never;
@@ -140,6 +327,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/environment/github/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run a fresh, cheap local GitHub CLI probe (no REST call, never returns a token) */
+        post: operations["testGitHubConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environment/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Report real local Codex/Claude/GitHub/project readiness for the Setup UX */
+        get: operations["getEnvironmentStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -150,6 +371,24 @@ export interface paths {
         /** Stream CDC events with durable replay */
         get: operations["streamEvents"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/execution-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the current user's execution/routing policy (or the bootstrap default if none is stored) */
+        get: operations["getExecutionPolicy"];
+        /** Replace the current user's execution/routing policy */
+        put: operations["putExecutionPolicy"];
         post?: never;
         delete?: never;
         options?: never;
@@ -363,6 +602,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/notifications/unread-count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Unread notification count */
+        get: operations["notificationUnreadCount"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orchestrators": {
         parameters: {
             query?: never;
@@ -452,6 +708,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-B: who can reach this project, and what the caller may do in it. Requires project.access.read on the project. */
+        get: operations["getProjectAccess"];
+        /** P4-B: grant a user or a team a role on this project, or change an existing grant. Requires project.access.manage. */
+        put: operations["grantProjectAccess"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/access/{subjectKind}/{subjectId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** P4-B: revoke one subject's grant on this project. Requires project.access.manage. */
+        delete: operations["revokeProjectAccess"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/config": {
         parameters: {
             query?: never;
@@ -469,6 +760,810 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/github": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-F: what AO can currently see of this project's GitHub repository — the local checkout's branch, HEAD, dirtiness and ahead/behind beside the server's default branch and tip; the open pull requests with their review decision, checks and mergeability; the pull request for the checkout's own branch; and recent or one focused issue with its labels, milestone, GitHub-linked pull requests and a bounded comment tail. GitHub is external context and never authority over AO's execution state: an outage, a missing token or an origin AO does not recognize answers 200 with availability 'degraded' or 'unavailable' and a stable reason code, serving the last snapshot it could fetch rather than emptying the surface. */
+        get: operations["getProjectGitHub"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: what AO knows about this project, per repository — the derived lifecycle state (pending, indexing, ready, stale, failed), the commit the graph describes against the one the checkout is actually at, the counts, what the last sync had to do, and how long it took. Stale is reported rather than smoothed over: serving structure AO cannot vouch for as current is the one failure this subsystem refuses to make. */
+        get: operations["getProjectIntelligence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/architecture": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: the structural summary the build derived — modules, entry points, services, storage and the dependencies between them. Read from the row the build wrote, never recomputed: the summary belongs to a generation and cannot have changed since it. */
+        get: operations["getProjectIntelligenceArchitecture"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: the context pack one role would actually be handed, assembled by the same call a dispatch makes. Input observability only — it shows AO's own construction from AO's own durable rows, never anything a model produced. The measurements are named 'selected' and 'avoided' rather than 'saved': AO cannot see what the coding harness reads inside the worktree, so it cannot claim to have prevented a read. */
+        get: operations["previewProjectIntelligenceContext"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: a bounded neighbourhood of the code graph, walked outward from a named symbol or file. There is deliberately no whole-graph export — a seed is required, depth is capped at two hops, and both nodes and edges have ceilings a caller cannot raise. A walk that hits one reports truncated rather than returning a partial answer as if it were whole. */
+        get: operations["getProjectIntelligenceGraph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-G/P4-H: discard the served graph and build it again from scratch, then re-derive every durable memory fact. The repair for knowledge an operator has reason to distrust, and expensive on a large repository — the frontend confirms before calling it. */
+        post: operations["rebuildProjectIntelligence"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: ask a question of the two authorities AO already has — durable project memory and the code graph — and get one ranked answer list with provenance on every row. Every hit says which authority produced it, because a fact somebody wrote and a symbol AO parsed are different kinds of claim. */
+        get: operations["searchProjectIntelligence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-G/P4-H: bring the graph AND durable project memory up to date now, each choosing between an incremental pass and a full build exactly as a dispatch would. Normal operation does not need this: the reconciler keeps every project current on its own, and this is the button for when somebody does not want to wait for it. Memory runs second, so its high-level facts read the graph this call just built. */
+        post: operations["syncProjectIntelligence"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-A: project memory status per repository. What generation the memory is at, which commit it was derived from, how many facts it holds and how many of them AO can still vouch for, and whether an indexing pass is running. A repository absent from this list has never been indexed. */
+        get: operations["getProjectMemoryStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The code graph's state per repository: which backend is serving it (by its real name -- the in-tree one is reported as "local" and never under a vendor's name), which generation and commit, how many files, symbols and relations it holds, what the last sync had to do, and the bounded architecture summary derived from it. drift is non-empty when the graph can no longer be vouched for -- the checkout moved on, or it is no longer the same repository -- and such a graph is reported unhealthy even though its rows are intact. */
+        get: operations["getProjectMemoryGraphStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/graph/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ask the code graph what a dispatch would be told. Given a symbol, a file, or free text from an objective, it returns the bounded neighbourhood: the matching declarations with their signatures and summaries, what reaches them, what they reach, the tests proven to cover them, the routes that arrive at them and the tables they touch. consideredSymbols against the returned count is what makes the bound visible. */
+        get: operations["queryProjectMemoryGraph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/graph/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bring one repository's code graph up to its current commit. It chooses incremental or full exactly as a dispatch would, so an operator running it by hand exercises the production path: incremental whenever a change set can be proved, a full build otherwise. filesParsed against filesReused is the measurement -- an incremental sync of a one-file commit parses one file, and a full pass over an unchanged tree parses none. */
+        post: operations["syncProjectMemoryGraph"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/invalidate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P2-A: retire project memory that can no longer be vouched for. With paths, retires exactly what those paths proved. With no paths, runs drift detection and applies what it finds — the honest repair for "something moved and I cannot say what". Nothing is deleted; facts are marked so they stop being served. */
+        post: operations["invalidateProjectMemory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-A: inspect the stored facts of one repository's project memory, including the stale and invalidated ones — seeing those is the point of an inspect. Bodies are omitted; this answers what AO remembers and whether it can still vouch for it. */
+        get: operations["listProjectMemoryItems"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/knowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-C: what tasks have taught this project, and what of it still holds. Task results, decisions and known risks, each with the lifecycle that decides whether retrieval would serve it: active, superseded (and by what), resolved (and by whom), obsolete, or conflicting. Active only by default, because that is what a task would actually receive; nothing is ever deleted, so asking for another status reconstructs what the project used to believe. */
+        get: operations["listProjectMemoryKnowledge"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/manifests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-C: what one execution was actually told. A context manifest records the identities of the memory facts a dispatch received — never the prompt, and never the facts' text, which may have been superseded since. It is what makes "the Worker was working from a stale decision" checkable rather than suspected. Names a task or a workflow run; expand=true resolves the ids back into the facts and reports any that no longer exist. */
+        get: operations["listProjectMemoryContextManifests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/provenance/{itemId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-D: the full evidence chain behind one fact — why it is valid, which task produced it, which commit supports it, how it became canonical, what withdrew it, and what replaced it. Retired edges are included: a superseded decision's supersedes edge is not in the current graph and is usually what is being looked for. */
+        get: operations["getProjectMemoryProvenance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/prune": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P2-E: retire canonical project memory that was built from a task's isolated worktree instead of from the repository. A worktree is a checkout of a repository AO already knows, not a second repository; indexing one produced canonical facts derived from an unintegrated branch. Dry run unless apply is set, and it refuses anything it cannot prove is safe: registered repositories, workspaces a live execution is using, and any prune that would leave the project with no memory at all. */
+        post: operations["pruneProjectMemory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P2-A: re-derive one repository's project memory. Bounded by the indexer's limits and restart-safe; purge deletes the existing facts first, which is the escape hatch for memory that is wrong in a way a re-derivation cannot fix. */
+        post: operations["rebuildProjectMemory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-B: is this project's memory warm, and what is it costing each role. Runs the ordinary lifecycle freshness check (so a warm project costs a row read and no file I/O) and then assembles each role's pack exactly as a dispatch would, reporting the budget, the items and bytes selected, the estimated tokens, and what the budget excluded. syncKind=none means memory was already at the repository's current commit — the warm path the optimisation exists to produce. */
+        get: operations["getProjectMemoryReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P2-D: check which facts AO can still prove it is entitled to serve. Distinct from invalidate, which asks whether a fact's source FILES moved: this asks whether its LICENCE still holds — same repository identity, a mutation-provenance row behind every canonical promotion, a provenance kind this build can check. Dry run unless apply is set, and it only ever demotes. */
+        post: operations["validateProjectMemory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/repo-connection-test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run a non-destructive git ls-remote probe against a project's root repo or a named workspace child repo */
+        post: operations["testRepoConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: what this project has activated, what is available to activate, and what the caller may do here. Requires project.read on the project. */
+        get: operations["listProjectSkills"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/{skillId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Skills: enable an installed skill on this project, pinned to one version, with an explicit capability grant. The grant may never exceed the approver's own permissions. Enabling runs nothing. Requires project.manage. */
+        put: operations["enableProjectSkill"];
+        post?: never;
+        /** Skills: disable a skill on this project and revoke its grant. Requires project.manage. */
+        delete: operations["disableProjectSkill"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/{skillId}/dry-run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: report what a run WOULD need - capabilities, missing permissions, outstanding approval, and what the runner does and does not provide. Starts no process, opens no socket and changes nothing. Requires project.read. */
+        post: operations["dryRunProjectSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: the project's active-pentest authorizations for one skill, active and not - the history of what it once allowed to be tested. Carries no secret. Requires project.read. */
+        get: operations["listPentestAuthorizations"];
+        put?: never;
+        /** Skills: create the explicit, per-target authorization an active-pentest run must reference. It binds to one destination (scheme+host+port, no wildcard/IP), carries the written-authorization reference, and expires. Confirm must be true. Requires settings.manage - a pentest is the one skill capability that emits offensive traffic. */
+        post: operations["createPentestAuthorization"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations/{authId}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: revoke a pentest authorization. Revocation is immediate for any new run; a run already in flight keeps its own bounded window. Requires settings.manage. */
+        post: operations["revokePentestAuthorization"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/{skillId}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: accept one authorized mode of an activated skill for execution and return the durable run (202). Requires project.manage -- the dry run reports what WOULD happen, this makes it happen. Refused (4xx, no run created) unless the skill is installed and enabled, the version is pinned, every capability the mode declares is granted, the runtime attests every control the mode needs, and the mode is implemented. The image approval for this exact scope is checked when the run executes: a run without one ends refused. The caller contributes no image, no command and no argv. Tool modes run one of AO's closed scan tools (ao.static-scan/v1, ao.secret-scan/v1, ao.dependency-scan/v1) in the container runner; agent modes of builtin or trusted packages run AO's host agent (ADR 0010); a composite mode (full-audit) runs each composed mode as its own child run and consolidates their verified reports, ending succeeded only when every mode produced one and partial otherwise (ADR 0011). The same idempotencyKey, or any request while a run for this project, skill and mode is queued or running, returns THAT run with created=false. */
+        post: operations["runProjectSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: the project's run history, newest first. Each run records the skill version, mode, the capabilities its authorization granted, the runner's attested controls, the approved image, and how it ended. Reports are not included; read one run for its verified report. Requires project.read. */
+        get: operations["listProjectSkillRuns"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: one run of this project with its findings. The report is served only when its stored bytes still hash to reportSha256 (integrity "verified"); a mismatch is reported, never served. A run id from another project is 404. Requires project.read. */
+        get: operations["getProjectSkillRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/runs/{runId}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: ask a queued or running run to stop. A running run's container is stopped and removed and the run ends cancelled; a result that completes in the same instant is discarded rather than recorded as a success the caller asked not to have. 409 when the run already ended. Requires project.manage. */
+        post: operations["cancelProjectSkillRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: this project's external work-management connection (Plane): which workspace and project it maps to, whether a credential is stored, and whether the last connection check passed. The credential itself is never returned. */
+        get: operations["getProjectWorkItemsConfig"];
+        /** P4-E: configure the connection. Every field is optional and omitting one leaves it unchanged — in particular, omitting apiToken keeps the stored credential rather than clearing it. A configuration may be saved incomplete; only switching it on requires a workspace, a project and a token. */
+        put: operations["putProjectWorkItemsConfig"];
+        post?: never;
+        /** P4-E: disconnect the project, deleting the stored credential. Links are left alone: forgetting how to reach a provider is not a reason to forget which items the work was about. */
+        delete: operations["deleteProjectWorkItemsConfig"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: the recent provider operations — what AO sent, what came back, and whether it was retried. Never a credential, a request header, or an untruncated provider body. */
+        get: operations["listProjectWorkItemsAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: whether the integration is configured, switched on, connected or degraded, and how much is queued or permanently failed. It makes no provider call: a status endpoint that probes is slow exactly when the thing it reports on is broken. */
+        get: operations["getProjectWorkItemsHealth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: the external items this project's work is linked to. With live=true each is refreshed from the provider; a link the provider could not answer for comes back with its cached title and state and stale=true, rather than disappearing. */
+        get: operations["listProjectWorkItemLinks"];
+        put?: never;
+        /** P4-E: link a workflow run or planned task to an external work item, either by naming one that exists ("PROJ-123" or a provider URL) or by asking AO to create it. AO never creates items on its own — internal repair and reviewer work does not mint anything on somebody's board. */
+        post: operations["createProjectWorkItemLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/links/{linkId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** P4-E: unlink. The external item is left untouched — deleting somebody's planning item because a link was removed would be a destructive surprise. */
+        delete: operations["deleteProjectWorkItemLink"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/links/{linkId}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-E: turn state and comment pushing on or off for one link. A link is useful without it — recording that two things are about each other is worth doing on its own. */
+        post: operations["setProjectWorkItemLinkSync"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: the projects in the connected workspace, so a person mapping this AO project can choose one rather than paste a UUID. */
+        get: operations["listProjectWorkItemsProviderProjects"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-E: drain the outbound sync queue now. Normal operation does not need this — a background worker drains it on its own — and it is the button for when somebody does not want to wait for the next tick. */
+        post: operations["syncProjectWorkItems"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-E: verify the configured credential against the provider and record the result. It lists the workspace's projects, which proves both that the token is valid and that it can see the workspace it is configured for. */
+        post: operations["testProjectWorkItemsConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workspace-repos/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Re-detect a workspace project's child repositories from disk, correcting stale per-repo metadata */
+        post: operations["refreshWorkspaceRepos"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectId}/board": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Board: every top-level workflow run projected onto the lifecycle vocabulary */
+        get: operations["getProjectBoard"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectId}/board/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Archived workflows for a project, newest archive first */
+        get: operations["getProjectBoardHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectId}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P3-E: a project's token/cost rollup for one period (today, 7d, 30d, all). Buckets by the instant AO DISPATCHED the work — a fact AO recorded itself — which `periodBasis` states explicitly so nobody reads these windows as a provider's billing period. `averageTokensPerWorkflow` is null, not 0, when no workflow spent anything in the range. */
+        get: operations["getProjectUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectId}/workflows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a workflow run and seed its initial steps */
+        post: operations["createWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/browse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the immediate subdirectories of an absolute path under the configured allowed project roots (or the home directory when none are configured), for the web folder-browser UX */
+        get: operations["browseProjectRoot"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/clone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clone a GitHub repository into an allowed project root and register it */
+        post: operations["cloneProjectFromGitHub"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/initialize": {
         parameters: {
             query?: never;
@@ -480,6 +1575,128 @@ export interface paths {
         put?: never;
         /** Initialize a selected folder as a Git repository with an initial commit */
         post: operations["initializeProjectRepository"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the current user's provider profiles */
+        get: operations["listProviderProfiles"];
+        put?: never;
+        /** Create a provider profile owned by the current user */
+        post: operations["createProviderProfile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-profiles/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one of the current user's provider profiles */
+        get: operations["getProviderProfile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update a provider profile's display name, enabled state, or default model */
+        patch: operations["updateProviderProfile"];
+        trace?: never;
+    };
+    "/api/v1/provider-profiles/{id}/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Prepare the profile owner's isolated runtime-home and refresh its cached auth state */
+        post: operations["connectProviderProfile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-profiles/{id}/disconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clear AO's cached belief that this profile is authenticated */
+        post: operations["disconnectProviderProfile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-profiles/{id}/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start a guided setup terminal running the provider's own login flow inside the owner's isolated runtime-home (Checkpoint 8P-E.8.4) */
+        post: operations["startProviderProfileSetup"];
+        /** Stop a profile's live guided setup terminal, if any */
+        delete: operations["stopProviderProfileSetup"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-profiles/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run a connection test against the profile owner's isolated runtime-home */
+        post: operations["testProviderProfile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/providers/registry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List every provider AO knows about, with its declared capabilities/auth methods */
+        get: operations["getProviderRegistry"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -571,6 +1788,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/questions/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List open/in-flight questions across all workflow runs (Checkpoint 8K-B pass 3's global Pending Decisions inbox) */
+        get: operations["listPendingDecisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/reviews/{reviewSessionID}/activity": {
         parameters: {
             query?: never;
@@ -582,6 +1816,40 @@ export interface paths {
         put?: never;
         /** Report a reviewer-owned hook signal */
         post: operations["setReviewActivity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P1-C: runtime capacity. The configured concurrency limits, what currently holds each slot, and the queue in scheduling order. This is the machine's capacity (how many agent runtimes may run at once), not a provider's rate limit. */
+        get: operations["getRuntimeCapacity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/gc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-C: sweep the runtime artifacts AO left behind. Destroys only runtimes whose ownership, exact incarnation and terminality AO can prove; everything else is reported and left alone. dryRun classifies without destroying, using the identical predicates. */
+        post: operations["runRuntimeGC"];
         delete?: never;
         options?: never;
         head?: never;
@@ -600,6 +1868,23 @@ export interface paths {
         put?: never;
         /** Spawn a new agent session */
         post: operations["spawnSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{resolverSessionId}/decisions/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a cross-provider Decision Resolver's result for one auto_resolvable question (Checkpoint 8K-B) */
+        post: operations["resolveDecision"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1430,6 +2715,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/work-report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a worker's declaration about the change it delivered (never evidence) */
+        post: operations["submitWorkReport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/workspace/events": {
         parameters: {
             query?: never;
@@ -1515,6 +2817,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/settings/email-notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the completion-email configuration (never the password) */
+        get: operations["getEmailNotificationSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Change the completion-email configuration */
+        patch: operations["updateEmailNotificationSettings"];
+        trace?: never;
+    };
+    "/api/v1/settings/email-notifications/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send a test email to the configured recipient */
+        post: operations["sendTestEmail"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings/session-interface": {
         parameters: {
             query?: never;
@@ -1568,6 +2905,511 @@ export interface paths {
         patch: operations["renameShellTerminal"];
         trace?: never;
     };
+    "/api/v1/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: every installed package, with AO's capability vocabulary and the fixed policy for each capability. Requires settings.read. */
+        get: operations["listSkills"];
+        put?: never;
+        /** Skills: install a package from an absolute directory on the daemon host. Validates the manifest and verifies the content digest before recording anything, and enables the skill on no project. Requires settings.manage. */
+        post: operations["installSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/{skillId}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: the catalog audit trail for one skill - who installed it, who enabled it where, and who changed its grant. Requires audit.read, which is stricter than the rest of this family: the trail names actors and carries the host path each package came from. */
+        get: operations["getSkillAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/{skillId}/versions/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: one installed version, its declared capabilities, its modes and the digest verified at install. Requires settings.read. */
+        get: operations["getSkill"];
+        put?: never;
+        post?: never;
+        /** Skills: remove one installed version. Refused while any project still has that version enabled. Requires settings.manage. */
+        delete: operations["uninstallSkill"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/external/revocations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: what this installation has administratively withdrawn on a git forge - an account, a repository, or one exact commit. A forge publishes NO revocation feed, so this list is a decision made here rather than something AO was told, and no endpoint AO could poll would change that. Withdrawing blocks NEW installs; it uninstalls nothing, deletes no file, disables no skill on any project and stops no run already under way. Requires settings.read. */
+        get: operations["listSkillExternalRevocations"];
+        put?: never;
+        /** Skills: withdraw a forge account, a repository, or one exact commit. Three different blast radii, and the NARROWEST is usually the most useful during an incident: a repository that shipped one bad release stays installable at every other commit, so an administrator can act immediately without taking a dependency away from everybody on a good version. A commit is named "owner/repository@<sha>" - a bare SHA is meaningless without the repository it belongs to, since two repositories can hold the same commit. It blocks NEW installs and removes nothing. Requires settings.manage. */
+        post: operations["revokeSkillExternal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/external/revocations/lift": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: lift an external withdrawal. It exists for the external subjects ONLY, and the asymmetry is deliberate: a signing key somebody else may have held is compromised forever, so trust revocations are one-way and stay that way. An external subject is a judgement about a PLACE - a repository transferred to somebody who was then vetted, an account banned during an incident that turned out to be a false alarm - and places get re-vetted. Requires settings.manage. */
+        post: operations["liftSkillExternalRevocation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/external/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: every git tag AO has seen point somewhere else than it recorded. A tag is a name somebody can re-point and the commit is the release, so AO writes down where each tag pointed and says when that changes. Both SHAs are returned in full, because deciding two commits are different needs every character. Nothing already installed is changed by a tag moving: its provenance still records the commit its bytes actually came from. Filtered to the registries you can see. Requires settings.read. */
+        get: operations["listSkillMovedTags"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/images": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: every container image this installation has decided it may execute, with the scope, the digest, who approved it and whether it is still active. Revoked and expired approvals are included: they are the history of what was once allowed. The response also carries the trust model in words - an approval is an administrator's decision about inspected bytes, NOT a publisher signature - and the exact promise and non-promise of revoking. Requires settings.read. */
+        get: operations["listSkillImageApprovals"];
+        put?: never;
+        /** Skills: approve one immutable image digest for one exact scope (tenant, project, skill, version, mode) to back one AO tool. A tag is refused - it is a mutable pointer. Requires an explicit confirmation flag and a note saying what was checked, and re-approving the same scope REPLACES rather than accumulating. This does NOT run anything: a run additionally needs the skill installed, activated, its capabilities granted and every required control attested. Requires settings.manage. */
+        post: operations["approveSkillImage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/images/{approvalId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Skills: revoke one image approval. This stops NEW executions immediately - the approval is re-checked at the last point before a container starts. It does NOT stop a container already running, and it does NOT recall a secret already delivered to one. Requires settings.manage. */
+        delete: operations["revokeSkillImageApproval"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/marketplace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: search every enabled registry you can see. It downloads no package code - fetching is a separate step that only an install performs - and it stores no query. Every result reports trust "unverified", because a search hashed nothing; a release only becomes "verified" once AO has fetched and measured its bytes at install. A registry that could not be read is NAMED in notes rather than silently absent, since "this registry has nothing" and "AO could not read it" are different answers. Requires settings.read. */
+        get: operations["searchSkillMarketplace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/marketplace/{registryId}/{skillId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: one release and every version of it the registry offers, including deprecated and revoked ones - the version list is where somebody finds out the version they wanted was withdrawn. Carries the requested capabilities, the execution modes, the publisher, both digests, any provenance the release CLAIMS (AO validates none of it), the compatibility verdict against this build, and whether it is already installed. Requires settings.read. */
+        get: operations["getSkillRelease"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/marketplace/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: install ONE exact release from one configured registry. A version is required and exact - there is no latest. AO re-resolves the release, refuses it if the registry has revoked it, checks the registry's trust policy and the AO version range, fetches the package into a quarantine directory, and verifies BOTH digests plus the manifest's agreement with the listing over the bytes that landed before anything reaches the catalog. A symlink anywhere in the package is refused rather than followed. This enables the skill on NO project, grants no capability, approves no container image and runs no publisher script. Requires settings.manage. */
+        post: operations["installSkillRelease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/registries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: every skill registry this installation is configured to install from, with its type, location, trust policy and priority. A registry scoped to one organization is listed only to that organization's members. The response also carries the trust model in words - installing verifies INTEGRITY (AO fetches the package and computes both digests itself), which is not the same as knowing who wrote it, because AO verifies no publisher signature. Requires settings.read. */
+        get: operations["listSkillRegistries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/registries/{registryId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Skills: add or update one registry configuration. AO opens it before recording it - a registry it cannot read is refused, because one that answers every search with silence reads as "this registry has nothing". A credential is stored as the NAME of a sealed secret, never a value. A registry scoped to a tenant can only be configured by a member of that tenant. Requires settings.manage. */
+        put: operations["saveSkillRegistry"];
+        post?: never;
+        /** Skills: remove one registry configuration. Every package installed from it stays installed and keeps its recorded provenance: removing a compromised registry must not erase the evidence of what it served, and must not silently uninstall a package a project may have pinned. Requires settings.manage. */
+        delete: operations["removeSkillRegistry"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/registries/{registryId}/revocations/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: ask one registry what it has withdrawn, and record it. AO polls nothing on its own - this is a request a person made. A recorded revocation blocks new installs of that exact release and marks an installed copy, and it stays in force while the registry is unreachable: silence is not consent. It never uninstalls, never deletes files, never disables a skill on any project and never stops a run already under way - deciding what to do about an installed release that was withdrawn is a human's call, one package at a time. A registry that could not be asked is NAMED rather than treated as having nothing withdrawn. Requires settings.manage. */
+        post: operations["syncSkillRegistryRevocations"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/registries/{registryId}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: test one registry's connection. It reads ONE small metadata endpoint: it downloads no package, changes no catalog, installs nothing, enables nothing on any project and approves no container image. The verdict is one of CONNECTED, AUTH_FAILED, TLS_FAILED, UNREACHABLE, INVALID_RESPONSE or POLICY_BLOCKED, and CONNECTED is deliberately the hardest to reach - a socket opening, TLS verifying and a 200 arriving are each necessary and none is sufficient, because a load balancer, a captive portal and an unrelated service on the right port all produce one. CONNECTED means the registry answered AS ITSELF, speaking a protocol version this build knows. An auth failure names the secretRef and never a credential value. Answers 200 whatever the verdict: a failed test is a successful answer to the question asked. Requires settings.manage, because it makes AO open a connection and present a stored credential. */
+        post: operations["testSkillRegistryConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/trust": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: the trust roots this installation will accept signatures from, their public signing keys, and every administrative revocation. A trust root NEVER arrives from a registry or from a release - AO Official's is compiled into the build, and an enterprise root is added here by an administrator and recorded in the audit trail. Keys are served with their sha256 fingerprints so an operator can compare one against what a publisher published elsewhere, which is the only way a first key is ever verified. Everything here is PUBLIC: there is no private key in the daemon, in this schema, or in any response. Requires settings.read. */
+        get: operations["listSkillTrust"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/trust/keys/{keyId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Skills: register one PUBLIC signing key under a trust root. The key is 32 bytes of ed25519 public key, base64 - a 64-byte value, which is what somebody pasting the wrong half of a keypair sends, is refused on length rather than stored. There is no route that generates a key: the daemon verifies and does not sign, because a consumer that could sign could mint its own trusted releases. Supplying a certificate the ROOT key signed makes the chain cryptographic and records the key's origin as "certificate"; omitting it records "administrative", which is what an administrator vouching for a key actually is, and the two are never rendered as the same fact. A key id is permanent: replacing the material under an existing one is refused as a substitution. Requires settings.manage. */
+        put: operations["addSkillSigningKey"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/trust/keys/{keyId}/retire": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: close a signing key's validity window without calling it compromised. Retiring is deliberately a DIFFERENT verb from revoking, because the consequence for history is different: a retired key's earlier signatures still verify and a revoked key's do not. Merging them would mean every scheduled rotation invalidated the releases the outgoing key had legitimately signed, which is a system that punishes rotating on time. Requires settings.manage. */
+        post: operations["retireSkillSigningKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/trust/revocations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: withdraw a signing key, a publisher identity, or a whole trust root - globally, and one-way. A revoked key's EARLIER signatures are refused too, because a key somebody else may have held for an unknown period proves nothing about who used it and when. Revoking a root refuses every key under it at once. What it does not do is uninstall anything, delete any file, disable a skill on any project, or stop a run already under way: it blocks NEW trusted installs and marks what is already here as affected, and deciding what to do about those is a human's call, one package at a time. A RELEASE is not revocable here - that is the publishing registry's act. Built-in roots and keys are refused: a revocation a local attacker could write would be a way to turn off official trust. Requires settings.manage. */
+        post: operations["revokeSkillTrust"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/trust/roots/{trustRootId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Skills: create or update an ENTERPRISE trust root. There is no tier field and no way to create an official one: AO Official arrives with the build, and the id "ao-official" and the publisher "ao" are refused as input, so the one name worth impersonating is the one nobody can claim. A root's publisher cannot be changed once keys chain to it - repointing an anchor would silently re-attribute every release those keys signed. A revoked root does not come back because a form was re-submitted. Requires settings.manage. */
+        put: operations["saveSkillTrustRoot"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: ask each installed release's registry what it says now. AO polls nothing on its own - this is a request a person made. It reports a newer installable version where one exists, names a registry it could not reach without touching that install's recorded provenance, and marks any installed release the registry has since REVOKED. A revocation blocks new installs and nothing else: AO does not uninstall it, does not disable it on any project, and does not stop a run already under way. Requires settings.read. */
+        get: operations["checkSkillUpdates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-B: list teams. Requires teams.read. */
+        get: operations["listTeams"];
+        put?: never;
+        /** P4-B: create a team. Requires teams.manage. */
+        post: operations["createTeam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/teams/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-B: read one team. Requires teams.read. */
+        get: operations["getTeam"];
+        put?: never;
+        post?: never;
+        /** P4-B: delete a team, its memberships, and every project grant made to it. Requires teams.manage. */
+        delete: operations["deleteTeam"];
+        options?: never;
+        head?: never;
+        /** P4-B: rename, re-describe, archive or reactivate a team. Requires teams.manage. */
+        patch: operations["updateTeam"];
+        trace?: never;
+    };
+    "/api/v1/teams/{id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-B: list a team's members. Requires teams.read. */
+        get: operations["listTeamMembers"];
+        put?: never;
+        /** P4-B: add an account to a team, or change its role in it. Requires teams.manage. */
+        post: operations["addTeamMember"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/teams/{id}/members/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** P4-B: remove an account from a team. Access inherited through the team stops on the member's next request. */
+        delete: operations["removeTeamMember"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-C: list the organizations the caller can see, each with the caller's own role in it. */
+        get: operations["listTenants"];
+        put?: never;
+        /** P4-C: found an organization, with the caller as its owner. Requires tenant.create. */
+        post: operations["createTenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-C: read one organization. Requires tenant.read on it; an organization the caller cannot see reports 404. */
+        get: operations["getTenant"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** P4-C: rename, re-describe, archive or reactivate an organization. Requires tenant.manage on it. */
+        patch: operations["updateTenant"];
+        trace?: never;
+    };
+    "/api/v1/tenants/{id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-C: list an organization's members. Requires tenant.members.read on it. */
+        get: operations["listTenantMembers"];
+        put?: never;
+        /** P4-C: add an account to an organization, or change its role there. Requires tenant.members.manage on it. */
+        post: operations["addTenantMember"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{id}/members/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** P4-C: remove an account from an organization. Everything it reached through the membership stops on its next request. */
+        delete: operations["removeTenantMember"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/usage/sessions": {
         parameters: {
             query?: never;
@@ -1602,6 +3444,721 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/usage/subject-hook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P3-E: a runtime pane reports its OWN provider token spend. Used by reviewer and decision-resolver panes, which are not AO sessions and therefore cannot report through the session activity route. Deliberately usage-only: it carries no activity state and no session id, so a pane can say what it spent without being able to touch any session's lifecycle. A session subject is refused -- sessions report through /sessions/{id}/activity, which validates a launch id this route has no business touching. */
+        post: operations["recordSubjectUsageHook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-B: list the installation's accounts. Requires users.read. */
+        get: operations["listUsers"];
+        put?: never;
+        /** P4-B: create a local (password) account with a non-owner role. Requires users.manage. */
+        post: operations["createUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-B: read one account. Requires users.read. */
+        get: operations["getUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{id}/role": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** P4-B: change an account's installation role. The owner cannot be demoted; promoting another account to owner transfers ownership and is reserved to the owner. */
+        patch: operations["setUserRole"];
+        trace?: never;
+    };
+    "/api/v1/users/{id}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** P4-B: enable or disable an account. The owner can never be disabled, and no account can disable itself. */
+        patch: operations["setUserStatus"];
+        trace?: never;
+    };
+    "/api/v1/users/{id}/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-B: list the teams one account belongs to. Requires users.read. */
+        get: operations["listUserTeams"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow run summaries */
+        get: operations["listWorkflowRuns"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a workflow run with its steps and attempts */
+        get: operations["getWorkflowRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/advice": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P3-C: the deterministic answer to "what do I do now" — the category (no action required / auto-recoverable / wait-only / human action / terminal), whether a person is actually needed, what AO is doing about it by itself, the offered and refused actions with the reason behind every refusal, and the authority proof a later click is revalidated against. A strict read: it writes nothing. */
+        get: operations["getWorkflowAdvice"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a workflow run and its non-terminal steps */
+        post: operations["cancelWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/cancel-archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a workflow run, cascade to its child runs, and archive it off the active Board (deletes nothing) */
+        post: operations["cancelAndArchiveWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/continue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Continue a workflow run: dispatch its review step's real Claude reviewer once the work step has completed (Checkpoint 8C). Idempotent no-op when nothing is currently dispatchable. P3-C: the optional body carries the authority proof from a GET /advice reading; a Continue that arrives while AO is already repairing this run is refused 409 ACTION_SUPERSEDED rather than re-entering a resume path the repair owns. */
+        post: operations["continueWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/exploration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Frente 3 / 3C: what each agent of a run LOOKED AT beside what it spent -- file reads, distinct files, repeated reads, searches, listings, commands, edits, exploration before the first edit, bytes returned to the model by origin (agent exploration, AO prompt, harness injection), model calls and tokens -- plus the run's quality signals (final state, verify, review verdict, fix cycles, retries, failovers). Every figure carries `basis`: observed (reported by the provider transcript or counted exactly from it), derived (an inference `method` names), or unavailable (the harness does not expose it; `value` is null, never 0). Paths are project-relative and only for files inside the project that pass the repository boundary; no content, command, pattern or prompt is ever stored. A strict read: it never advances the run. `recorded: false` means nothing was recorded, not zero exploration. */
+        get: operations["getWorkflowExploration"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/incident": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Explain why a stopped workflow run is waiting for a person: the incident, its bounded evidence pack, and any diagnosis with AO's own reading of the proposed action */
+        get: operations["getWorkflowIncident"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/incident/diagnose": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Investigate a stopped run with an isolated, read-only Diagnostic Agent over a bounded evidence pack. Bounded per incident. */
+        post: operations["diagnoseWorkflowIncident"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/incident/diagnosis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a Diagnostic Agent's validated classification and proposed action. This endpoint cannot execute anything. */
+        post: operations["submitWorkflowIncidentDiagnosis"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/incident/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Carry out an incident's diagnosed action, after AO's authorization policy and — for anything beyond the ordinary continue path — an explicit human approval */
+        post: operations["executeWorkflowIncidentAction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/pending-changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P3-A: what is uncommitted in the repository this run works in, and a proposed commit message. Read-only: it runs git status and nothing else. `available: false` means AO could not read the repository, which is UNKNOWN and never "clean". */
+        get: operations["getWorkflowPendingChanges"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/pending-changes/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P3-A: commit the repository's pending work under a message the caller supplied, re-probe, and resume the run only once the tree is provably clean. There is no stash and no silent commit: a message is required, and a commit that leaves the tree dirty does not resume the run. */
+        post: operations["commitWorkflowPendingChanges"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/placement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P1-D: where this run's work happens and why it has not launched — the FROZEN execution placement and its own generation, the durable provider-attempt chain with what each attempt could prove about mutation, and the single admission verdict naming which authority is withholding the launch (capacity, branch, placement, provider or dependency). Read-only, derived from durable rows; no token is exposed and nothing here can move a placement. */
+        get: operations["getWorkflowPlacement"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/placement/override": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-E: ask for a particular execution placement for one task. This is a REQUEST, not a move: before anything is frozen it is the input the freeze uses; once a placement IS frozen it is recorded and changes nothing until a transition consumes it, and the response says which of the two happened. `auto` withdraws a standing override and defers to selection policy. */
+        post: operations["requestWorkflowPlacementOverride"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/placement/transition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-E: replace one frozen placement generation with another. Refused with 409 and the refusing AUTHORITY named unless every one of them has provably let go — the run is live, no authoritative provider attempt, no outstanding capacity claim, no runtime-bound claim, no held branch lock, and no outstanding integration authority. Quiescence is proved from durable rows, never inferred from the filesystem. Repeating a transition that already happened returns it rather than minting a second generation, and there is no operation here that re-points a running obligation. */
+        post: operations["transitionWorkflowPlacement"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a durable master plan and planned tasks */
+        get: operations["getWorkflowPlan"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve a validated plan and dispatch the first eligible task */
+        post: operations["approveWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Generate and deterministically validate a durable master plan */
+        post: operations["generateWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/regenerate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-B: mint a new durable plan revision for an objective whose plan cannot be reused. The superseded revision stays auditable and its tasks stop being authoritative. Bounded, and a compare-and-set on the revision the caller observed. P3-C: the optional body carries the authority proof from a GET /advice reading; a click computed against a state the run has moved past is refused 409 ACTION_SUPERSEDED. */
+        post: operations["regenerateWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject and cancel a master plan */
+        post: operations["rejectWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/reopen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reopen planning for an objective whose planner command was in flight when the daemon restarted, so AO could not prove whether it produced a plan. Planning starts over from scratch: nothing is adopted from the discarded planner. The request must carry the plan's observed updatedAt, and a reopen of a state that has since changed is refused. Human-only and bounded. */
+        post: operations["reopenAmbiguousWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/reuse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-B: execute this objective's existing durable plan revision as it stands. Refused unless the plan's identity and its project context both still hold — a stale plan is never run silently. */
+        post: operations["reuseWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List durable questions (Checkpoint 8K-A) captured for a workflow run */
+        get: operations["listWorkflowQuestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/questions/{questionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one durable question captured for a workflow run */
+        get: operations["getWorkflowQuestion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/questions/{questionId}/answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Submit a human answer for a question that is awaiting one (Checkpoint 8K-A) */
+        post: operations["answerWorkflowQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/recover/review-provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recover a run stopped because AO cannot prove which commit its approved review target was read at, and could not reconstruct it from the branch's history. Discards that unlocatable approval and asks for exactly one fresh independent review of the workspace as it stands. It never infers or attests an approved commit and never verifies code no reviewer has read. Human-only and bounded. */
+        post: operations["recoverWorkflowReviewProvenance"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P1-B: the deterministic recovery assessment for a run — the one recommended action, why, whether AO may take it automatically, whether the durable plan is reusable, and whether a bounded Repair Agent is available. Derived entirely from durable facts; no model is consulted. */
+        get: operations["getWorkflowRecovery"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/repair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-B: launch a bounded Repair Agent for a repairable technical stop. Refused with the full repair plan (and why) for any condition AO must not aim a code-writing agent at, for a spent repair budget, or under a disabled repair policy. P3-C: the optional body carries the authority proof from a GET /advice reading; a click computed against a state the run has moved past — or one that arrives while AO is already repairing — is refused 409 ACTION_SUPERSEDED instead of duplicated. */
+        post: operations["repairWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-B: discharge exactly the run's outstanding durable obligation, and report which one it was. Idempotent; an obligation only a person can discharge is reported rather than driven. */
+        post: operations["resumeWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start a pending workflow run: run its plan step and dispatch its work step's Codex worker */
+        post: operations["startWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/amend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Amend or declare obsolete one acceptance criterion of a planned task (migration 0132), with a named human approver, a reason and checkable evidence. Records the original text forever, applies the amendment, and re-opens an independent review — it never approves the work. */
+        post: operations["amendWorkflowTaskCriterion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Finish an acceptance-criterion amendment whose fresh independent review never opened: retire the superseded review dispatch and re-open the review. Records no second amendment; idempotent. */
+        post: operations["resumeAmendedWorkflowTaskReview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Authorize ONE additional integration fresh review for a task parked on integration_stale_review_after_rebase whose ordinary budget is spent, with a named human approver and a reason. The global bound is unchanged; the grant is recorded against this task and this workspace state, and a repeat request for the same state returns the existing grant rather than widening the budget again. */
+        post: operations["authorizeWorkflowTaskFreshReviewException"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/tasks/{taskId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume a planned task parked in needs_attention after a person has resolved what parked it (migration 0130). Idempotent: a task that is not parked is returned unchanged. */
+        post: operations["resumeWorkflowTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P3-E: the canonical token/cost ledger for one run — totals, the per-role and per-model breakdown, base execution vs repair, an autonomous parent's children, the roles whose spend AO cannot observe, and the frozen budget the run is measured against. Every figure carries its own provenance: `source` says whether tokens were reported by a provider or estimated by AO, and `cost.basis` says whether money was calculated (from the named rate card) or is simply unknown. `recorded: false` means no usage rows exist for the run and must be rendered as "no usage data recorded", never as zero. This is the ONLY total a client may present; the per-role `usage` block on the run detail is per-SESSION and several roles can share one session. */
+        get: operations["getWorkflowUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1624,11 +4181,99 @@ export interface components {
             name?: null | string;
             path: string;
             projectId?: null | string;
+            tenantId?: string;
+        };
+        AddSkillSigningKeyRequest: {
+            certificate?: components["schemas"]["SkillKeyCertificateInput"];
+            isRootKey?: boolean;
+            publicKey: string;
+            rotatedFromKeyId?: string;
+            trustRootId: string;
+            /** Format: date-time */
+            validFrom?: null | string;
+            /** Format: date-time */
+            validUntil?: null | string;
+        };
+        AddTeamMemberRequest: {
+            /** @enum {string} */
+            role: "maintainer" | "member";
+            userId: string;
+        };
+        AddTenantMemberRequest: {
+            /** @enum {string} */
+            role: "owner" | "admin" | "member" | "viewer";
+            userId: string;
+        };
+        AdminUserView: {
+            /** Format: date-time */
+            createdAt: string;
+            displayName: string;
+            email: string;
+            federated: boolean;
+            id: string;
+            /** @enum {string} */
+            role: "owner" | "admin" | "member" | "viewer";
+            /** @enum {string} */
+            status: "active" | "disabled";
+            /** Format: date-time */
+            updatedAt: string;
+            username: string;
         };
         AgentConfig: {
             mode?: string;
             model?: string;
             permissions?: string;
+        };
+        AgentExplorationResponse: {
+            activeSpanMs: components["schemas"]["ExplorationMetricResponse"];
+            aoContextBytes: components["schemas"]["ExplorationMetricResponse"];
+            aoContextRatio: components["schemas"]["ExplorationRatioResponse"];
+            /** Format: int64 */
+            approximateAttribution: number;
+            cacheWriteTokens: components["schemas"]["ExplorationMetricResponse"];
+            cachedInputTokens: components["schemas"]["ExplorationMetricResponse"];
+            callsBeforeFirstEdit: components["schemas"]["ExplorationMetricResponse"];
+            commands: components["schemas"]["ExplorationMetricResponse"];
+            /** Format: int64 */
+            cycle: number;
+            edits: components["schemas"]["ExplorationMetricResponse"];
+            explorationOps: components["schemas"]["ExplorationMetricResponse"];
+            explorationOpsAll: components["schemas"]["ExplorationMetricResponse"];
+            explorationRatio: components["schemas"]["ExplorationRatioResponse"];
+            explorationResultBytes: components["schemas"]["ExplorationMetricResponse"];
+            exploreCommands: components["schemas"]["ExplorationMetricResponse"];
+            fileReads: components["schemas"]["ExplorationMetricResponse"];
+            firstCallInputTokens: components["schemas"]["ExplorationMetricResponse"];
+            freshInputTokens: components["schemas"]["ExplorationMetricResponse"];
+            harness: string;
+            harnessContextBytes: components["schemas"]["ExplorationMetricResponse"];
+            harnessContextRatio: components["schemas"]["ExplorationRatioResponse"];
+            harnessTokensFirstCall: components["schemas"]["ExplorationMetricResponse"];
+            inputTokens: components["schemas"]["ExplorationMetricResponse"];
+            listings: components["schemas"]["ExplorationMetricResponse"];
+            modelCalls: components["schemas"]["ExplorationMetricResponse"];
+            models: string[];
+            opsBeforeFirstEdit: components["schemas"]["ExplorationMetricResponse"];
+            outputTokens: components["schemas"]["ExplorationMetricResponse"];
+            pathScopes: components["schemas"]["ExplorationPathScopeCountResponse"][];
+            repeatedReads: components["schemas"]["ExplorationMetricResponse"];
+            repoBytesObserved: components["schemas"]["ExplorationMetricResponse"];
+            role: string;
+            searches: components["schemas"]["ExplorationMetricResponse"];
+            shellEdits: components["schemas"]["ExplorationMetricResponse"];
+            /** Format: int64 */
+            sources: number;
+            subjectId: string;
+            subjectKind: string;
+            toolCalls: components["schemas"]["ExplorationMetricResponse"];
+            toolCoverage: components["schemas"]["ControllersExplorationCoverageResponse"];
+            topFiles: components["schemas"]["ExplorationFileCountResponse"][];
+            turnMix: components["schemas"]["ControllersExplorationTurnMixResponse"];
+            unattributedCommands: components["schemas"]["ExplorationMetricResponse"];
+            uncachedInputTokens: components["schemas"]["ExplorationMetricResponse"];
+            uniqueFilesEdited: components["schemas"]["ExplorationMetricResponse"];
+            uniqueFilesRead: components["schemas"]["ExplorationMetricResponse"];
+            unobservedResults: components["schemas"]["ExplorationMetricResponse"];
         };
         AgentInfo: {
             /**
@@ -1636,8 +4281,12 @@ export interface components {
              * @enum {string}
              */
             authStatus?: "authorized" | "unauthorized" | "unknown";
+            /** @description Resolved executable path from the last successful local probe. */
+            binaryPath?: string;
             id: string;
             label: string;
+            /** @description Best-effort CLI version string from the last successful local probe. */
+            version?: string;
         };
         AgentModelInfo: {
             id: string;
@@ -1685,6 +4334,26 @@ export interface components {
         AgentSwitchResponse: {
             switch: components["schemas"]["AgentSwitch"];
         };
+        AnswerWorkflowQuestionRequest: {
+            /** @description One of the question's structured choice ids. */
+            choiceId?: null | string;
+            /** @description Free-text human answer, when no structured choice applies. */
+            customText?: null | string;
+        };
+        ApproveSkillImageRequest: {
+            confirm: boolean;
+            digest: string;
+            /** Format: int64 */
+            expiresInSeconds?: number;
+            modeId: string;
+            note: string;
+            projectId: string;
+            reference: string;
+            skillId: string;
+            tenantId: string;
+            tool: string;
+            version: string;
+        };
         AttachmentInput: {
             data: string;
             mimeType?: string;
@@ -1717,6 +4386,33 @@ export interface components {
             ok: boolean;
             sessionId: string;
         };
+        CapacityClaimView: {
+            /** Format: date-time */
+            enqueuedAt: string;
+            /** Format: date-time */
+            heldAt?: null | string;
+            id: string;
+            /** @enum {string} */
+            kind: "planner" | "worker" | "reviewer" | "repair";
+            /** Format: int64 */
+            lifecycleGeneration: number;
+            /** Format: int64 */
+            priority: number;
+            projectId?: string;
+            runtimeHandle?: string;
+            /** @enum {string} */
+            state: "queued" | "held" | "released";
+            taskId?: string;
+            workflowRunId: string;
+            workflowStepId?: string;
+        };
+        CapacityUsageView: {
+            held: number;
+            /** @enum {string} */
+            kind?: "planner" | "worker" | "reviewer" | "repair";
+            limit: number;
+            queued: number;
+        };
         ClaimPRRequest: {
             allowTakeover?: null | boolean;
             pr: string;
@@ -1737,6 +4433,17 @@ export interface components {
             reason: string;
             sessionId: string;
         };
+        CommitPendingChangesRequest: {
+            authority?: components["schemas"]["ControllersWorkflowActionAuthorityRequest"];
+            message: string;
+        };
+        CommitPendingChangesResponse: {
+            clean: boolean;
+            commitSha?: string;
+            committed: boolean;
+            detail?: string;
+            resumed: boolean;
+        };
         CompactConversationResponse: {
             /** Format: int64 */
             tokensAfter?: number;
@@ -1752,6 +4459,1031 @@ export interface components {
         ContainerReapConfig: {
             disabled?: boolean;
         };
+        ControllersAdminResetPasswordRequest: {
+            email: string;
+            newPassword: string;
+        };
+        ControllersAdminResetPasswordResponse: {
+            ok: boolean;
+        };
+        ControllersAdmissionStateView: {
+            autoResume: boolean;
+            capacityClaimId?: string;
+            currentAttemptId?: string;
+            detail?: string;
+            /** Format: int64 */
+            placementGeneration?: number;
+            placementReady: boolean;
+            placementState?: string;
+            spendsRetryBudget: boolean;
+            /** @enum {string} */
+            waitingReason?: "capacity_wait" | "branch_wait" | "placement_wait" | "provider_wait" | "dependency_wait" | "lifecycle_superseded" | "strategy_refused";
+        };
+        ControllersAmendTaskCriterionRequest: {
+            amendedCriterion?: string;
+            approvedBy: string;
+            criterionIndex: number;
+            evidence: string[];
+            originalCriterion?: string;
+            reason: string;
+        };
+        ControllersAmendTaskCriterionResponse: {
+            amendment: components["schemas"]["ControllersWorkflowTaskCriterionAmendmentView"];
+            workflow: components["schemas"]["WorkflowRunDetailView"];
+        };
+        ControllersAuthProvidersResponse: {
+            /** @enum {string} */
+            mode: "trusted_local" | "oidc";
+            oidc?: components["schemas"]["ControllersOIDCProviderView"];
+            passwordEnabled: boolean;
+        };
+        ControllersAuthorizeFreshReviewExceptionRequest: {
+            approvedBy: string;
+            reason: string;
+            reauthorize?: boolean;
+        };
+        ControllersCapacitySnapshotResponse: {
+            /** @enum {string} */
+            certainty: "actual" | "inferred" | "unknown";
+            detectedAt: null | string;
+            harness: string;
+            model?: null | string;
+            provider?: string;
+            reason?: string;
+            resetAt: null | string;
+            /** @enum {string} */
+            state: "available" | "limited" | "cooldown" | "unavailable" | "unknown";
+        };
+        ControllersCompactRunUsageResponse: {
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            recorded: boolean;
+            source: string;
+            /** Format: int64 */
+            totalTokens: number;
+        };
+        ControllersContextMemoryResponse: {
+            /** Format: int64 */
+            cacheHits: number;
+            /** Format: int64 */
+            cacheMisses: number;
+            /** Format: int64 */
+            candidates: number;
+            /** Format: int64 */
+            canonicalItems: number;
+            /** Format: int64 */
+            estimatedPackTokens: number;
+            fallbackReasons?: string[];
+            /** Format: int64 */
+            fullSyncs: number;
+            /** Format: int64 */
+            generation: number;
+            /** Format: int64 */
+            incrementalSyncs: number;
+            indexedCommit?: string;
+            /** @enum {string} */
+            mode?: "off" | "assisted" | "preferred";
+            /** Format: int64 */
+            noOpSyncs: number;
+            /** Format: int64 */
+            packBytes: number;
+            /** Format: int64 */
+            packItems: number;
+            provider: string;
+            /** Format: int64 */
+            rejectedByBudget: number;
+            /** Format: int64 */
+            sharedCandidates: number;
+            /** Format: int64 */
+            sharedExcluded: number;
+            /** Format: int64 */
+            sharedSelected: number;
+            /** Format: int64 */
+            staleExcluded: number;
+            /** Format: int64 */
+            syncFilesRead: number;
+            /** Format: int64 */
+            syncs: number;
+            /** Format: int64 */
+            taskLocalItems: number;
+            /** Format: int64 */
+            workflowLocalItems: number;
+        };
+        ControllersContextRoleResponse: {
+            /** Format: int64 */
+            assembledBytes: number;
+            /** Format: int64 */
+            dispatches: number;
+            /** Format: int64 */
+            estimatedAssembledTokens: number;
+            role: string;
+        };
+        ControllersContextSourceResponse: {
+            /** Format: int64 */
+            bytes: number;
+            /** Format: int64 */
+            estimatedTokens: number;
+            /** @enum {string} */
+            source: "task_spec" | "project_memory" | "shared_knowledge" | "repo_content" | "index_reuse" | "other";
+        };
+        ControllersContextTrajectoryResponse: {
+            /** Format: int64 */
+            cumulativeInputTokens: number;
+            elapsedSeconds: null | number;
+            /** Format: int64 */
+            firstContextTokens: number;
+            firstObservedAt?: string;
+            growthPerCall: null | number;
+            /** Format: int64 */
+            growthTokens: number;
+            /** Format: int64 */
+            lastContextTokens: number;
+            lastObservedAt?: string;
+            meanContextPerCall: null | number;
+            observable: boolean;
+            /** Format: int64 */
+            peakContextTokens: number;
+            /** Format: int64 */
+            providerCalls: number;
+            turns?: components["schemas"]["ControllersTurnMixResponse"];
+            /** Format: int64 */
+            unplaceableEvents: number;
+        };
+        ControllersCreateProviderProfileRequest: {
+            defaultModel?: string;
+            displayName: string;
+            harness: string;
+            provider: string;
+        };
+        ControllersDecisionsUsageResponse: {
+            /** Format: int64 */
+            humanRequired: number;
+            /** Format: int64 */
+            policyResolved: number;
+            /** Format: int64 */
+            questionsAsked: number;
+            resolverDurationMs?: null | number;
+            /** Format: int64 */
+            resolverFailed: number;
+            resolverProvider?: string;
+            reusedDecision?: null | number;
+            /** Format: int64 */
+            technicalResolved: number;
+            /** Format: int64 */
+            waitingForCapacity: number;
+        };
+        ControllersEmailNotificationEventsPayload: {
+            /** @description A task or workflow finished the work it was given. */
+            completed: boolean;
+            /** @description A task or workflow ended without completing. */
+            failed: boolean;
+            /** @description A task or workflow stopped and needs a decision. */
+            needsAttention: boolean;
+        };
+        ControllersEmailNotificationSettingsEnvelope: {
+            emailNotifications: components["schemas"]["ControllersEmailNotificationSettingsResponse"];
+        };
+        ControllersEmailNotificationSettingsResponse: {
+            enabled: boolean;
+            events: components["schemas"]["ControllersEmailNotificationEventsPayload"];
+            host: string;
+            passwordSet: boolean;
+            port: number;
+            recipient: string;
+            /**
+             * @description How the SMTP connection is protected. starttls is the port-587 default (and what Gmail app passwords expect).
+             * @enum {string}
+             */
+            tls: "starttls" | "implicit" | "none";
+            username: string;
+        };
+        ControllersExecuteIncidentRequest: {
+            approve: boolean;
+            incidentId: string;
+        };
+        ControllersExecutionPlacementView: {
+            baseBranch?: string;
+            baseSha?: string;
+            current: boolean;
+            detail?: string;
+            executionBranch?: string;
+            integratedSha?: string;
+            /** Format: int64 */
+            lifecycleGeneration: number;
+            mergeTarget?: string;
+            /** Format: int64 */
+            placementGeneration: number;
+            /** @enum {string} */
+            provenance: "frozen_at_selection" | "recovered_from_durable_facts";
+            repoPath?: string;
+            /** @enum {string} */
+            state: "selected" | "waiting" | "preparing" | "ready" | "active" | "reviewing" | "integrating" | "integrated" | "conflict" | "preserved" | "terminal";
+            taskId?: string;
+            /** @enum {string} */
+            type: "direct_branch" | "isolated_worktree";
+            waitingReason?: string;
+            worktreePath?: string;
+        };
+        ControllersExecutionPolicyResponse: {
+            policy: components["schemas"]["ControllersExecutionPolicyView"];
+        };
+        ControllersExecutionPolicyView: {
+            autonomousMode: boolean;
+            decisionResolverPriority: string[];
+            /** @enum {string} */
+            fallbackBehavior: "use_next_available" | "wait_for_preferred";
+            plannerPriority: string[];
+            /** @enum {string} */
+            reviewIndependence: "require_different_provider" | "allow_same_provider_fallback";
+            reviewerPriority: string[];
+            updatedAt?: string;
+            workerPriority: string[];
+        };
+        ControllersExplorationCoverageResponse: {
+            complete: boolean;
+            extractorVersions: number[];
+            reason: string;
+        };
+        ControllersExplorationTurnCountResponse: {
+            class: string;
+            /** Format: int64 */
+            count: number;
+        };
+        ControllersExplorationTurnMixResponse: {
+            /** @enum {string} */
+            basis: "observed" | "derived" | "unavailable";
+            counts: components["schemas"]["ControllersExplorationTurnCountResponse"][];
+            method: string;
+        };
+        ControllersFixDeliveryView: {
+            acknowledged: boolean;
+            contextPack: boolean;
+            cycleNumber: number;
+            /** Format: date-time */
+            dispatchedAt: string;
+            findingsBytes: number;
+            findingsCount: number;
+            findingsDigest?: string;
+            findingsEmbedded: boolean;
+            findingsSnippet?: string;
+            /** @enum {string} */
+            findingsSource?: "" | "review_run" | "verification";
+            fixAttemptId?: string;
+            generation?: string;
+            nextAction?: string;
+            promptBytes: number;
+            promptReceipt?: string;
+            reason?: string;
+            /** @enum {string} */
+            receiptMatch?: "" | "match" | "other" | "none";
+            redelivery?: number;
+            reviewGeneration?: string;
+            reviewRunId?: string;
+            reviewTargetSha?: string;
+            /** @enum {string} */
+            reviewVerdict?: "" | "approved" | "changes_requested";
+            sessionId?: string;
+            /** @enum {string} */
+            state: "intent_recorded" | "dispatched" | "transport_retry" | "loaded_not_submitted";
+            submission?: string;
+            terminalErrorClass?: string;
+            terminalOutcome?: string;
+            transport?: string;
+            transportAttempt?: number;
+        };
+        ControllersIncidentActionSpecBody: {
+            detail?: string;
+            kind: string;
+            reason?: string;
+        };
+        ControllersIncidentActionView: {
+            describe: string;
+            endsWork: boolean;
+            executable: boolean;
+            kind: string;
+            needsApproval: boolean;
+            rationale?: string;
+            refusalReason?: string;
+            risk: string;
+            writesCode: boolean;
+        };
+        ControllersIncidentDiagnosisJobView: {
+            attempt?: number;
+            blockingInteraction?: string;
+            elapsedSeconds?: number;
+            harness?: string;
+            lastActivityAt?: string;
+            lastSignalAt?: string;
+            max?: number;
+            sessionId?: string;
+            startedAt?: string;
+            /** @enum {string} */
+            state: "queued" | "starting" | "running" | "waiting_for_provider" | "waiting_for_user" | "completed" | "failed";
+        };
+        ControllersIncidentDiagnosisSubmissionBody: {
+            classification: string;
+            evidence?: string[];
+            incidentId: string;
+            missingEvidence?: string[];
+            options?: components["schemas"]["ControllersIncidentOptionView"][];
+            packDigest: string;
+            proposedAction?: components["schemas"]["ControllersIncidentActionSpecBody"];
+            risk?: string;
+            summary: string;
+            whatHappened?: string;
+            whatIsStuck?: string;
+            whyAOStopped?: string;
+        };
+        ControllersIncidentDiagnosisView: {
+            classification: string;
+            evidence?: string[];
+            missingEvidence?: string[];
+            options?: components["schemas"]["ControllersIncidentOptionView"][];
+            proposedAction?: components["schemas"]["ControllersIncidentActionView"];
+            risk?: string;
+            summary: string;
+            whatHappened?: string;
+            whatIsStuck?: string;
+            whyAOStopped?: string;
+        };
+        ControllersIncidentOptionView: {
+            consequence?: string;
+            detail: string;
+            id: string;
+            label: string;
+        };
+        ControllersIncidentPackView: {
+            bytes: number;
+            digest: string;
+            droppedSections?: string[];
+            estimatedTokens: number;
+            maxBytes: number;
+            sections: string[];
+        };
+        ControllersIncidentRepairView: {
+            approvedBy?: string;
+            finalSha?: string;
+            generation?: number;
+            maxRepairs: number;
+            reviewerHarness?: string;
+            runId: string;
+            verifyResult?: string;
+        };
+        ControllersIncidentResponse: {
+            incident: components["schemas"]["ControllersIncidentView"];
+        };
+        ControllersIncidentView: {
+            canDiagnose: boolean;
+            canExecute: boolean;
+            capacityReasons?: string[];
+            closureCause?: string;
+            closureEvidence?: string[];
+            contextPack?: components["schemas"]["ControllersIncidentPackView"];
+            diagnosesUsed: number;
+            diagnosis?: components["schemas"]["ControllersIncidentDiagnosisView"];
+            diagnosisJob: components["schemas"]["ControllersIncidentDiagnosisJobView"];
+            diagnosticHarness?: string;
+            id: string;
+            launchOutcome?: string;
+            maxDiagnoses: number;
+            maxRepairs: number;
+            nextEvaluationAt?: string;
+            progress: string;
+            repair?: components["schemas"]["ControllersIncidentRepairView"];
+            repairsUsed: number;
+            runId: string;
+            stale: boolean;
+            state: string;
+            stopDetail?: string;
+            stopReason: string;
+        };
+        ControllersInvalidateProjectMemoryRequest: {
+            paths?: string[];
+            reason?: string;
+            repoPath: string;
+        };
+        ControllersInvalidateProjectMemoryResponse: {
+            driftChecked: number;
+            driftFound: number;
+            /** Format: int64 */
+            itemsInvalidated: number;
+            repoId: string;
+        };
+        ControllersListCapacityResponse: {
+            capacity: components["schemas"]["ControllersCapacitySnapshotResponse"][];
+        };
+        ControllersListProjectMemoryGraphResponse: {
+            repositories: components["schemas"]["ControllersProjectMemoryGraphStatusResponse"][];
+        };
+        ControllersListProjectMemoryItemsResponse: {
+            items: components["schemas"]["ControllersProjectMemoryItemResponse"][];
+            repoId: string;
+            total: number;
+            truncated: boolean;
+        };
+        ControllersListProjectMemoryKnowledgeResponse: {
+            entries: components["schemas"]["ControllersProjectMemoryKnowledgeResponse"][];
+            repoId?: string;
+            total: number;
+        };
+        ControllersListProjectMemoryManifestsResponse: {
+            entries: components["schemas"]["ControllersProjectMemoryManifestResponse"][];
+            total: number;
+        };
+        ControllersListProjectMemoryResponse: {
+            repositories: components["schemas"]["ControllersProjectMemoryStatusResponse"][];
+        };
+        ControllersListProviderProfilesResponse: {
+            profiles: components["schemas"]["ControllersProviderProfileView"][];
+        };
+        ControllersLoginRequest: {
+            password: string;
+            usernameOrEmail: string;
+        };
+        ControllersLoginResponse: {
+            user: components["schemas"]["ControllersUserView"];
+        };
+        ControllersLogoutResponse: {
+            ok: boolean;
+            providerEndSessionUrl?: string;
+        };
+        ControllersMeResponse: {
+            /** @enum {string} */
+            authMethod?: "trusted_local" | "password" | "oidc";
+            issuer?: string;
+            permissions: string[];
+            /** @enum {string} */
+            status: "authenticated" | "trusted-local" | "no_user";
+            user?: components["schemas"]["ControllersUserView"];
+        };
+        ControllersModelUsageLineResponse: {
+            /** Format: int64 */
+            approximateEvents: number;
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            harness?: string;
+            model: string;
+            provider?: string;
+            source: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+        };
+        ControllersNotificationUnreadCountResponse: {
+            unreadCount: number;
+        };
+        ControllersOIDCClaimRequest: {
+            flowId: string;
+            handoffSecret: string;
+        };
+        ControllersOIDCClaimResponse: {
+            /** @enum {string} */
+            status: "pending" | "complete";
+            user?: components["schemas"]["ControllersUserView"];
+        };
+        ControllersOIDCProviderView: {
+            displayName: string;
+            startPath: string;
+        };
+        ControllersOIDCStartRequest: {
+            /** @enum {string} */
+            clientKind?: "browser" | "desktop";
+            handoffSecret?: string;
+            returnTo?: string;
+        };
+        ControllersOIDCStartResponse: {
+            authorizationUrl: string;
+            /** Format: date-time */
+            expiresAt: string;
+            flowId: string;
+        };
+        ControllersProjectMemoryGraphAnswerResponse: {
+            callees: components["schemas"]["ControllersProjectMemoryGraphEdgeResponse"][];
+            callers: components["schemas"]["ControllersProjectMemoryGraphEdgeResponse"][];
+            consideredEdges: number;
+            consideredSymbols: number;
+            endpoints: components["schemas"]["ControllersProjectMemoryGraphSymbolResponse"][];
+            files: string[];
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            reason?: string;
+            repoId: string;
+            symbols: components["schemas"]["ControllersProjectMemoryGraphSymbolResponse"][];
+            tables: string[];
+            tests: components["schemas"]["ControllersProjectMemoryGraphSymbolResponse"][];
+            truncated?: boolean;
+        };
+        ControllersProjectMemoryGraphEdgeResponse: {
+            from: string;
+            kind: string;
+            line?: number;
+            to: string;
+        };
+        ControllersProjectMemoryGraphStatusResponse: {
+            architecture?: string;
+            backend: string;
+            drift?: string;
+            /** Format: int64 */
+            edges: number;
+            /** Format: int64 */
+            files: number;
+            /** Format: int64 */
+            filesParsed: number;
+            /** Format: int64 */
+            filesRemoved: number;
+            /** Format: int64 */
+            filesReused: number;
+            /** Format: int64 */
+            generation: number;
+            healthy: boolean;
+            indexedCommit?: string;
+            lastError?: string;
+            /** Format: int64 */
+            lastMillis: number;
+            lastSyncKind?: string;
+            phase: string;
+            repoId: string;
+            repoIdentity?: string;
+            repoPath: string;
+            /** Format: int64 */
+            symbols: number;
+            updatedAt?: string;
+        };
+        ControllersProjectMemoryGraphSymbolResponse: {
+            exported?: boolean;
+            id: string;
+            kind: string;
+            line: number;
+            name: string;
+            path: string;
+            reason?: string;
+            /** Format: double */
+            score?: number;
+            signature?: string;
+            summary?: string;
+        };
+        ControllersProjectMemoryGraphSyncResponse: {
+            edges: number;
+            edgesAdded: number;
+            edgesRemoved: number;
+            files: number;
+            filesParsed: number;
+            filesRemoved: number;
+            filesReused: number;
+            filesScanned: number;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            kind: string;
+            /** Format: int64 */
+            millis: number;
+            reason?: string;
+            repoId: string;
+            repoPath: string;
+            symbols: number;
+            symbolsAdded: number;
+            symbolsRemoved: number;
+            truncated?: boolean;
+        };
+        ControllersProjectMemoryItemResponse: {
+            /** @enum {string} */
+            authority: "authoritative" | "unprovable" | "legacy_unprovable";
+            authorityReason?: string;
+            /** Format: double */
+            confidence: number;
+            content?: string;
+            contentBytes: number;
+            /** @enum {string} */
+            evidenceClass?: "derived" | "observed" | "user_provided" | "workflow_verified";
+            /** Format: int64 */
+            generation: number;
+            id: string;
+            integratedCommit?: string;
+            invalidatedAt: null | string;
+            key?: string;
+            metadata?: {
+                [key: string]: string;
+            };
+            /** @enum {string} */
+            origin: "canonical" | "task_local";
+            originRef?: string;
+            promotionAuthority?: string;
+            /** @enum {string} */
+            provenanceKind?: "repo_derivation" | "task_outcome" | "workflow_knowledge" | "legacy";
+            repoId: string;
+            repoIdentity?: string;
+            /** @enum {string} */
+            scope: "project" | "repository" | "module" | "file" | "symbol" | "task";
+            servable: boolean;
+            sourceCommit?: string;
+            sourcePaths?: string[];
+            /** @enum {string} */
+            state: "valid" | "stale" | "invalidated" | "rebuilding";
+            stateReason?: string;
+            summary: string;
+            type: string;
+            updatedAt: string;
+            verifiedCommit?: string;
+        };
+        ControllersProjectMemoryKnowledgeResponse: {
+            /** Format: double */
+            confidence: number;
+            conflictsWith?: string;
+            content?: string;
+            id: string;
+            key?: string;
+            /** @enum {string} */
+            kind?: "risk" | "follow_up";
+            resolvedBy?: string;
+            scope: string;
+            /** @enum {string} */
+            share: "task" | "workflow" | "canonical";
+            sourceCommit?: string;
+            sourcePaths?: string[];
+            sourceTask?: string;
+            /** @enum {string} */
+            state: "valid" | "stale" | "invalidated" | "rebuilding";
+            stateReason?: string;
+            /** @enum {string} */
+            status: "active" | "superseded" | "resolved" | "obsolete" | "conflicting";
+            subject?: string;
+            summary: string;
+            supersededBy?: string;
+            supersedes?: string;
+            type: string;
+            updatedAt: string;
+        };
+        ControllersProjectMemoryManifestResponse: {
+            /** Format: date-time */
+            createdAt: string;
+            estimatedTokens: number;
+            /** Format: int64 */
+            generation: number;
+            id: string;
+            indexedCommit?: string;
+            itemCount: number;
+            itemIds: string[];
+            items?: components["schemas"]["ControllersProjectMemoryKnowledgeResponse"][];
+            missing?: string[];
+            packDigest?: string;
+            policyVersion: number;
+            /** @enum {string} */
+            role: "planner" | "worker" | "reviewer" | "repair";
+            selectedBytes: number;
+            taskRef?: string;
+            workflowRunId?: string;
+        };
+        ControllersProjectMemoryProvenanceResponse: {
+            authorityReasonClass?: string;
+            item: components["schemas"]["ControllersProjectMemoryItemResponse"];
+            relations: components["schemas"]["ControllersProjectMemoryRelationResponse"][];
+            servable: boolean;
+        };
+        ControllersProjectMemoryPruneCandidateResponse: {
+            items: number;
+            parentRepo?: string;
+            prunable: boolean;
+            purged: boolean;
+            reason: string;
+            relations: number;
+            repoId: string;
+            repoPath: string;
+        };
+        ControllersProjectMemoryRelationResponse: {
+            /** @enum {string} */
+            authority: "authoritative" | "unprovable" | "legacy_unprovable";
+            authorityReason?: string;
+            fromKey: string;
+            fromKind: string;
+            id: string;
+            kind: string;
+            sourceCommit?: string;
+            /** @enum {string} */
+            state: "valid" | "stale" | "invalidated" | "rebuilding";
+            stateReason?: string;
+            toKey: string;
+            toKind: string;
+        };
+        ControllersProjectMemoryReportResponse: {
+            cacheEnabled: boolean;
+            /** Format: int64 */
+            cacheHits: number;
+            /** Format: int64 */
+            cacheMisses: number;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            /** @enum {string} */
+            mode: "off" | "assisted" | "preferred";
+            repoId: string;
+            repoPath: string;
+            roles: components["schemas"]["ControllersProjectMemoryRoleReportResponse"][];
+            syncFilesRead: number;
+            /** @enum {string} */
+            syncKind: "none" | "incremental" | "full" | "coalesced" | "skipped";
+            /** Format: int64 */
+            syncMillis: number;
+            syncReason?: string;
+            syncTimeout: string;
+            warm: boolean;
+        };
+        ControllersProjectMemoryRoleReportResponse: {
+            budgetBytes: number;
+            budgetDocuments: number;
+            budgetItems: number;
+            candidates: number;
+            estimatedPackTokens: number;
+            fallbackReason?: string;
+            packBytes: number;
+            packItems: number;
+            reducedToSummary: number;
+            rejectedByBudget: number;
+            /** @enum {string} */
+            role: "planner" | "worker" | "reviewer" | "repair";
+            staleExcluded: number;
+        };
+        ControllersProjectMemoryStatusResponse: {
+            branch?: string;
+            byType?: {
+                [key: string]: number;
+            };
+            filesIndexed: number;
+            filesSkipped: number;
+            /** Format: int64 */
+            generation: number;
+            healthy: boolean;
+            indexedCommit: string;
+            invalidated: number;
+            items: number;
+            lastError?: string;
+            lastIndexedAt: null | string;
+            lastUpdatedAt: null | string;
+            /** @enum {string} */
+            phase: "idle" | "scanning" | "summarizing" | "linking" | "finalizing" | "failed";
+            rebuilding: number;
+            relations: number;
+            repoId: string;
+            repoPath: string;
+            resumeCursor?: string;
+            stale: number;
+            taskLocal: number;
+            valid: number;
+        };
+        ControllersProjectMemoryValidationFindingResponse: {
+            applied: boolean;
+            detail: string;
+            from: string;
+            itemId: string;
+            key?: string;
+            reasonClass: string;
+            scope: string;
+            summary: string;
+            to: string;
+            type: string;
+        };
+        ControllersProjectUsageResponse: {
+            averageTokensPerWorkflow: null | number;
+            budget: components["schemas"]["ControllersUsageBudgetResponse"];
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            from?: string;
+            models: components["schemas"]["ControllersModelUsageLineResponse"][];
+            period: string;
+            periodBasis: string;
+            projectId: string;
+            providers: components["schemas"]["ControllersProviderUsageLineResponse"][];
+            recorded: boolean;
+            roles: components["schemas"]["ControllersRoleUsageLineResponse"][];
+            runs?: components["schemas"]["ControllersRunUsageLineResponse"][];
+            source: string;
+            to: string;
+            totals: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            /** Format: int64 */
+            workflows: number;
+        };
+        ControllersProviderAttemptView: {
+            authoritative: boolean;
+            capacityClaimId?: string;
+            failureClass?: string;
+            failureReason?: string;
+            id: string;
+            /** Format: int64 */
+            lifecycleGeneration: number;
+            mutationEvidence?: string;
+            /** Format: int64 */
+            ordinal: number;
+            /** Format: int64 */
+            placementGeneration: number;
+            predecessorAttemptId?: string;
+            profile?: string;
+            provider?: string;
+            runtimeSessionId?: string;
+            /** @enum {string} */
+            safety?: "safe_before_execution" | "safe_after_proven_no_mutation" | "ambiguous_execution" | "completed_execution";
+            /** @enum {string} */
+            state: "planned" | "admitted" | "launching" | "running" | "completed" | "failed_safe" | "failed_ambiguous" | "superseded" | "abandoned";
+            successorAttemptId?: string;
+            workflowStepId?: string;
+        };
+        ControllersProviderDescriptorView: {
+            authMethods: string[];
+            available: boolean;
+            capabilities: string[];
+            displayName: string;
+            harness: string;
+            models: string[];
+            provider: string;
+            unavailable?: string;
+        };
+        ControllersProviderProfileResponse: {
+            profile: components["schemas"]["ControllersProviderProfileView"];
+        };
+        ControllersProviderProfileView: {
+            /** @enum {string} */
+            authMethod: "browser_oauth" | "device_flow" | "cli_bootstrap" | "api_key" | "external_login" | "unsupported";
+            /** @enum {string} */
+            authState: "unknown" | "authenticated" | "unauthenticated" | "error" | "not_installed";
+            capabilities: string[];
+            createdAt: string;
+            defaultModel?: string;
+            displayName: string;
+            enabled: boolean;
+            harness: string;
+            id: string;
+            provider: string;
+            updatedAt: string;
+        };
+        ControllersProviderRegistryResponse: {
+            providers: components["schemas"]["ControllersProviderDescriptorView"][];
+        };
+        ControllersProviderUsageLineResponse: {
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            provider: string;
+            source: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+        };
+        ControllersPruneProjectMemoryRequest: {
+            /** @description Purge the worktree-minted memories. Defaults to false, so the repair can be inspected before it changes anything. */
+            apply?: boolean;
+        };
+        ControllersPruneProjectMemoryResponse: {
+            applied: boolean;
+            candidates: components["schemas"]["ControllersProjectMemoryPruneCandidateResponse"][];
+            canonicalRepoIds: string[];
+            purgedItems: number;
+            purgedRelations: number;
+        };
+        ControllersPutExecutionPolicyRequest: {
+            autonomousMode: boolean;
+            decisionResolverPriority: string[];
+            fallbackBehavior: string;
+            plannerPriority: string[];
+            reviewIndependence: string;
+            reviewerPriority: string[];
+            workerPriority: string[];
+        };
+        ControllersRebuildProjectMemoryRequest: {
+            purge?: boolean;
+            repoPath: string;
+        };
+        ControllersRebuildProjectMemoryResponse: {
+            filesIndexed: number;
+            filesSkipped: number;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            itemsReconfirmed: number;
+            /** Format: int64 */
+            itemsRetired: number;
+            itemsWritten: number;
+            repoId: string;
+            skipReason?: string;
+            skipped: boolean;
+            truncated: boolean;
+            truncatedReason?: string;
+        };
+        ControllersRegisterRequest: {
+            displayName: string;
+            email: string;
+            password: string;
+        };
+        ControllersReopenAmbiguousPlanRequest: {
+            /**
+             * Format: date-time
+             * @description The plan's updatedAt as your view read it. A reopen carrying a version the row no longer has is refused.
+             */
+            observedPlanUpdatedAt: string;
+        };
+        ControllersResolveDecisionRequest: {
+            /** @description The resolver's answer. Required unless requiresHuman is true. */
+            answer?: string;
+            /**
+             * @description Required when answer is set.
+             * @enum {string}
+             */
+            certainty?: "" | "actual" | "inferred" | "unknown";
+            /** @description Bounded list of evidence references (file paths / line ranges), never a transcript. Max 10, 500 chars each. */
+            evidenceReferences?: string[];
+            /** @description Short reason summary, capped. */
+            reasonSummary?: string;
+            /** @description True when the resolver could not determine a safe answer. */
+            requiresHuman?: boolean;
+            /** @description Resolution run id (workflow_question_resolutions.id) this result is for. */
+            runId: string;
+        };
+        ControllersResolveDecisionResponse: {
+            resolution: components["schemas"]["ControllersWorkflowQuestionResolutionResponse"];
+        };
+        ControllersRoleUsageLineResponse: {
+            attemptId?: string;
+            /** Format: int64 */
+            attemptOrdinal: number;
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            /** Format: int64 */
+            cycle: number;
+            harness?: string;
+            model?: string;
+            observable: boolean;
+            openedAt?: string;
+            provider?: string;
+            repair: boolean;
+            role: string;
+            source: string;
+            taskId?: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            unobservableReason?: string;
+        };
+        ControllersRoleUsageResponse: {
+            completedAt?: null | string;
+            durationMs?: null | number;
+            harness?: string;
+            model?: string;
+            provider?: string;
+            role: string;
+            sessionId?: string;
+            startedAt?: null | string;
+            stepKind: string;
+            usage: components["schemas"]["SessionUsageResponse"];
+            verifyChecks?: null | number;
+        };
+        ControllersRoutingDecisionView: {
+            capacityByProfile?: {
+                [key: string]: string;
+            };
+            complexity?: string;
+            fallbackProfiles?: components["schemas"]["ControllersRoutingProfileView"][];
+            fallbackUsed: boolean;
+            policyVersion?: string;
+            preferredHarness?: string;
+            preferredProfile?: components["schemas"]["ControllersRoutingProfileView"];
+            reasonCodes?: string[];
+            role: string;
+            selectedHarness?: string;
+            selectedProfile?: components["schemas"]["ControllersRoutingProfileView"];
+            waiting: boolean;
+        };
+        ControllersRoutingProfileView: {
+            displayName: string;
+            harness: string;
+            id: string;
+            model?: string;
+            provider: string;
+        };
+        ControllersRoutingUsageResponse: {
+            capacityStateAtDecision?: {
+                [key: string]: string;
+            };
+            fallbackOrder?: string[];
+            fallbackUsed: boolean;
+            policyVersion: string;
+            preferredHarness?: string;
+            reasonCodes: string[];
+            role: string;
+            selectedHarness?: string;
+            stepKind: string;
+            waiting: boolean;
+        };
+        ControllersRunContextSourcesResponse: {
+            contextRouter: string;
+            externalContext: string;
+            memoryMode: string;
+            recorded: boolean;
+        };
+        ControllersRunMemoryPackResponse: {
+            createdAt: string;
+            estimatedTokens: number;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit: string;
+            itemCount: number;
+            packDigest: string;
+            policyVersion: number;
+            role: string;
+            selectedBytes: number;
+            taskRef: string;
+        };
+        ControllersRunUsageLineResponse: {
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            source: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            workflowRunId: string;
+        };
         ControllersSecurePairingStatus: {
             active: boolean;
             available: boolean;
@@ -1759,6 +5491,38 @@ export interface components {
             host: string;
             port: number;
             reason: string;
+        };
+        ControllersSendTestEmailResponse: {
+            recipient: string;
+            sent: boolean;
+        };
+        ControllersSessionLifecycleDecisionResponse: {
+            action: string;
+            contextPackHash?: string;
+            createdAt?: string;
+            fromSessionId?: string;
+            policyVersion: string;
+            reasons: string[];
+            role?: string;
+            toSessionId?: string;
+        };
+        ControllersSessionLifecycleUsageResponse: {
+            /** Format: int64 */
+            contextPacksCreated: number;
+            decisions?: components["schemas"]["ControllersSessionLifecycleDecisionResponse"][];
+            /** Format: int64 */
+            sessionSwitches: number;
+            /** Format: int64 */
+            sessionsCompacted: number;
+            /** Format: int64 */
+            sessionsCreated: number;
+            /** Format: int64 */
+            sessionsReused: number;
+        };
+        ControllersSessionRefreshAdvisoryResponse: {
+            reason: string;
+            recommendation: string;
+            signals?: string[];
         };
         ControllersSessionView: {
             activity: components["schemas"]["DomainActivity"];
@@ -1789,7 +5553,7 @@ export interface components {
             /** @enum {string} */
             scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged";
             /** @enum {string} */
-            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "exited" | "idle" | "terminated" | "no_signal";
+            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "exited" | "idle" | "completed" | "terminated" | "no_signal";
             terminalHandleId?: string;
             terminateOnPrMerge: boolean;
             /** Format: date-time */
@@ -1800,6 +5564,568 @@ export interface components {
         };
         ControllersSetSessionAutoReviewRequest: {
             enabled: boolean;
+        };
+        ControllersSetupStatusResponse: {
+            setupRequired: boolean;
+        };
+        ControllersSkillRunDetailView: {
+            children?: components["schemas"]["ControllersSkillRunSummaryView"][];
+            findings: components["schemas"]["ControllersSkillRunFindingView"][];
+            /** @enum {string} */
+            integrity: "verified" | "mismatch" | "none";
+            report?: unknown;
+            run: components["schemas"]["ControllersSkillRunSummaryView"];
+        };
+        ControllersSkillRunFindingView: {
+            category: string;
+            confidence: string;
+            line: number;
+            ordinal: number;
+            path: string;
+            recommendation: string;
+            ruleId: string;
+            severity: string;
+            title: string;
+        };
+        ControllersSkillRunListResponse: {
+            runs: components["schemas"]["ControllersSkillRunSummaryView"][];
+        };
+        ControllersSkillRunRequest: {
+            idempotencyKey?: string;
+            inputs?: {
+                [key: string]: string;
+            };
+            modeId?: string;
+            pentestAuthorizationId?: string;
+        };
+        ControllersSkillRunStartView: {
+            created: boolean;
+            run: components["schemas"]["ControllersSkillRunSummaryView"];
+        };
+        ControllersSkillRunSummaryView: {
+            approvalId?: string;
+            approvedBy?: string;
+            cancelRequested: boolean;
+            capabilities: string[];
+            /** Format: date-time */
+            createdAt: string;
+            durationMs?: null | number;
+            errorCode?: string;
+            errorMessage?: string;
+            findingCount: number;
+            /** Format: date-time */
+            finishedAt?: null | string;
+            id: string;
+            imageDigest?: string;
+            inputs: {
+                [key: string]: string;
+            } | null;
+            modeId: string;
+            packageDigest: string;
+            parentRunId?: string;
+            projectId: string;
+            reportSha256?: string;
+            requestedBy: string;
+            runnerControls: string[];
+            runnerId: string;
+            skillId: string;
+            /** Format: date-time */
+            startedAt?: null | string;
+            /** @enum {string} */
+            state: "queued" | "running" | "succeeded" | "partial" | "failed" | "refused" | "cancelled";
+            summary: string;
+            tool: string;
+            truncated: boolean;
+            version: string;
+        };
+        ControllersStartProviderSetupResponse: {
+            handleId: string;
+            instructions: string;
+        };
+        ControllersStepUsageResponse: {
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            /** Format: int64 */
+            cycle: number;
+            role: string;
+            source: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            trajectory: components["schemas"]["ControllersContextTrajectoryResponse"];
+            workflowStepId: string;
+        };
+        ControllersSubjectUsageHookRequest: {
+            /** @description The harness that invoked the hook. */
+            agent?: string;
+            /** @description The native hook event name. */
+            event?: string;
+            /** @description The provider harness whose transcript this is. */
+            harness?: string;
+            /** @description The model the pane reported. */
+            modelId?: string;
+            /** @description The harness's own conversation id, as the pane's hook reported it. */
+            nativeSessionId?: string;
+            /** @description The usage subject this pane's tokens belong to, as "<kind>:<id>". */
+            subject: string;
+            /** @description The provider transcript path, when the hook carries one. */
+            transcriptPath?: string;
+        };
+        ControllersSubjectUsageHookResponse: {
+            ok: boolean;
+        };
+        ControllersTaskCheckpointSummaryResponse: {
+            acceptanceCriteria?: string[];
+            activeErrors?: string[];
+            architecturalFacts?: string[];
+            currentFingerprint?: string;
+            decisions?: string[];
+            filesChanged?: string[];
+            latestReviewFindings?: string;
+            nextAction?: string;
+            objective: string;
+            relevantFiles?: string[];
+            task?: string;
+            tests?: string[];
+        };
+        ControllersTaskUsefulWorkMetricsResponse: {
+            /** Format: int64 */
+            attempts: number;
+            cachedTokens: null | number;
+            durationMs?: null | number;
+            /** Format: int64 */
+            fixCycles: number;
+            inputTokens: null | number;
+            outputTokens: null | number;
+            /** Format: int64 */
+            reviewRuns: number;
+            reviewsSkipped: boolean;
+            tokensCertainty: string;
+            verifyCheckCount?: null | number;
+            verifyDurationMs?: null | number;
+        };
+        ControllersTestProviderProfileResponse: {
+            message: string;
+            ok: boolean;
+            profile: components["schemas"]["ControllersProviderProfileView"];
+        };
+        ControllersTestRepoConnectionRequest: {
+            repo?: string;
+        };
+        ControllersTestRepoConnectionResponse: {
+            result: components["schemas"]["ProjectConnectionTestResult"];
+        };
+        ControllersTurnMixResponse: {
+            /** Format: int64 */
+            classified: number;
+            /** Format: int64 */
+            coordinationCalls: number;
+            coordinationPercent: null | number;
+            counts?: {
+                [key: string]: number;
+            };
+            /** Format: int64 */
+            unclassified: number;
+            /** Format: int64 */
+            workCalls: number;
+        };
+        ControllersUpdateEmailNotificationSettingsRequest: {
+            enabled: boolean;
+            events?: components["schemas"]["ControllersEmailNotificationEventsPayload"];
+            host: string;
+            password?: null | string;
+            port: number;
+            recipient: string;
+            /** @enum {string} */
+            tls?: "starttls" | "implicit" | "none";
+            username: string;
+        };
+        ControllersUpdateProviderProfileRequest: {
+            defaultModel?: string;
+            displayName: string;
+            enabled: boolean;
+        };
+        ControllersUsageAdvisoryResponse: {
+            /** @enum {string} */
+            code: "duration_above_profile" | "provider_calls_above_profile" | "context_growth_above_profile" | "cost_above_profile" | "growth_without_progress" | "cache_read_dominant" | "context_per_call_above_profile" | "coordination_turns_dominant" | "repeated_wait_check_shape";
+            /** Format: int64 */
+            observed: number;
+            profile?: string;
+            /** @enum {string} */
+            severity: "info" | "warn";
+            /** Format: int64 */
+            threshold: number;
+        };
+        ControllersUsageBudgetResponse: {
+            /** Format: double */
+            costBudget?: number;
+            costPercent: null | number;
+            parentScoped: boolean;
+            /** Format: double */
+            projectDailyCostBudget?: number;
+            /** Format: int64 */
+            projectDailyTokenBudget?: number;
+            reason?: string;
+            scope: string;
+            state: string;
+            /** Format: int64 */
+            tokenBudget?: number;
+            tokenPercent: null | number;
+            /** Format: int64 */
+            tokensUsed: number;
+            warnPercent: number;
+        };
+        ControllersUsageCostResponse: {
+            /** Format: double */
+            amount: number;
+            basis: string;
+            currency?: string;
+            effectiveDate?: string;
+            known: boolean;
+            pricingSource?: string;
+            pricingVersion?: string;
+            unpricedModels?: string[];
+        };
+        ControllersUsageTokenTotalsResponse: {
+            /** Format: int64 */
+            cacheRead: number;
+            /** Format: int64 */
+            cacheWrite: number;
+            /** Format: int64 */
+            events: number;
+            /** Format: int64 */
+            input: number;
+            /** Format: int64 */
+            output: number;
+            reasoning: null | number;
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            uncachedInput: number;
+        };
+        ControllersUserView: {
+            displayName: string;
+            email: string;
+            id: string;
+            /** @enum {string} */
+            role: "owner" | "admin" | "member" | "viewer";
+            /** @enum {string} */
+            status: "active" | "disabled";
+            username: string;
+        };
+        ControllersValidateProjectMemoryRequest: {
+            /** @description Write the demotions. Defaults to false, so the diagnostic can be run before anything changes. */
+            apply?: boolean;
+            /** @description Maximum facts to check. Defaults to 2000. */
+            limit?: null | number;
+            /** @description Repository root to validate. Defaults to the project's own root. */
+            repoPath?: string;
+        };
+        ControllersValidateProjectMemoryResponse: {
+            applied: boolean;
+            checked: number;
+            /** Format: int64 */
+            edgesRetired: number;
+            findings: components["schemas"]["ControllersProjectMemoryValidationFindingResponse"][];
+            /** Format: int64 */
+            identityWithheld: number;
+            /** Format: int64 */
+            legacyClassified: number;
+            provable: number;
+            repoId: string;
+            repoIdentity?: string;
+            truncated: boolean;
+        };
+        ControllersWorkerLivenessResponse: {
+            lastSignalAt?: string;
+            lastTransitionAt?: string;
+            observed: boolean;
+            sessionId?: string;
+            silentForSeconds: null | number;
+            state?: string;
+            stepId?: string;
+            stepKind?: string;
+        };
+        ControllersWorkflowActionAuthorityRequest: {
+            /** Format: int64 */
+            lifecycleGeneration?: number;
+            /** Format: int64 */
+            placementGeneration?: number;
+            repairGeneration?: number;
+            runState?: string;
+            stopPhase?: string;
+        };
+        ControllersWorkflowAdviceAuthorityView: {
+            /** Format: int64 */
+            lifecycleGeneration?: number;
+            /** Format: int64 */
+            placementGeneration?: number;
+            repairGeneration?: number;
+            runState?: string;
+            /** Format: date-time */
+            stopAt?: null | string;
+            stopPhase?: string;
+        };
+        ControllersWorkflowAdviceBlockedView: {
+            action: string;
+            reason: string;
+        };
+        ControllersWorkflowAdviceResponse: {
+            advice: components["schemas"]["ControllersWorkflowAdviceView"];
+        };
+        ControllersWorkflowAdviceView: {
+            authority: components["schemas"]["ControllersWorkflowAdviceAuthorityView"];
+            /** @enum {string} */
+            automaticAction?: "launch_repair" | "repair_in_flight" | "scheduled_retry" | "provider_failover" | "await_capacity" | "await_branch" | "resolve_question" | "fresh_review";
+            automaticActionActive: boolean;
+            automaticActionBlockedReason?: string;
+            availableActions?: string[];
+            blockedActions?: components["schemas"]["ControllersWorkflowAdviceBlockedView"][];
+            /** @enum {string} */
+            category: "no_action_required" | "auto_recoverable" | "wait_only" | "human_action" | "terminal";
+            expectedNextStage?: string;
+            explanation?: string;
+            reasonCode?: string;
+            recommendedAction?: string;
+            repairBudget: number;
+            /** @enum {string} */
+            repairEligibility?: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition" | "artifact_unprovable";
+            repairSpent: number;
+            repairable: boolean;
+            requiresHuman: boolean;
+            retryable: boolean;
+            stage?: string;
+            summary?: string;
+            summaryCode?: string;
+            targetRunId?: string;
+            version?: string;
+            waitReason?: string;
+            /** Format: date-time */
+            waitUntil?: null | string;
+        };
+        ControllersWorkflowBranchCessionChainView: {
+            /** @enum {string} */
+            blockedReason?: "holder_can_still_write" | "legacy_unprovable_branch_cession" | "previous_owner_not_authoritative" | "branch_moved_on";
+            branch?: string;
+            currentHolderRunId: string;
+            depth: number;
+            detail?: string;
+            /** @enum {string} */
+            kind?: "ceded" | "custody";
+            lockId?: string;
+            originRunId: string;
+            repoPath?: string;
+            returnable: boolean;
+        };
+        ControllersWorkflowContextResponse: {
+            /** Format: int64 */
+            assembledBytes: number;
+            /** Format: int64 */
+            avoidedAssembledBytes: number;
+            avoidedComparable: boolean;
+            /** @enum {string} */
+            basis: "ao_assembled";
+            byRole?: components["schemas"]["ControllersContextRoleResponse"][];
+            bySource?: components["schemas"]["ControllersContextSourceResponse"][];
+            complete: boolean;
+            /** Format: int64 */
+            dispatches: number;
+            estimateMethod: string;
+            /** Format: int64 */
+            estimatedAssembledTokens: number;
+            /** Format: int64 */
+            estimatedAvoidedTokens: number;
+            memory: components["schemas"]["ControllersContextMemoryResponse"];
+            recorded: boolean;
+            /** Format: int64 */
+            skippedRecords: number;
+            /** Format: int64 */
+            unmeasured: number;
+        };
+        ControllersWorkflowIntegrationStateView: {
+            currentSha?: string;
+            errorClass?: string;
+            latestTaskId?: string;
+            refName: string;
+            status: string;
+            tasksIntegrated: number;
+        };
+        ControllersWorkflowPlacementResponse: {
+            admission: components["schemas"]["ControllersAdmissionStateView"];
+            placements: components["schemas"]["ControllersExecutionPlacementView"][];
+            providerAttempts: components["schemas"]["ControllersProviderAttemptView"][];
+        };
+        ControllersWorkflowQuestionResolutionResponse: {
+            answer?: string;
+            /** @enum {string} */
+            certainty?: "" | "actual" | "inferred" | "unknown";
+            completedAt?: null | string;
+            createdAt: string;
+            evidenceReferences?: string[];
+            id: string;
+            reasonSummary?: string;
+            requiresHuman: boolean;
+            resolverHarness?: string;
+            resolverSessionId?: string;
+            /** @enum {string} */
+            status: "pending" | "running" | "complete" | "failed" | "cancelled";
+            updatedAt: string;
+            workflowQuestionId: string;
+            workflowRunId: string;
+        };
+        ControllersWorkflowRecoveryAttemptView: {
+            attemptId: string;
+            /** Format: int64 */
+            attemptNumber?: number;
+            errorClass?: string;
+            /** Format: date-time */
+            finishedAt?: null | string;
+            outcome?: string;
+            provider?: string;
+            /** Format: date-time */
+            startedAt?: null | string;
+        };
+        ControllersWorkflowRecoveryBranchView: {
+            branch?: string;
+            heldByRunId?: string;
+            heldBySessionId?: string;
+            waiting: boolean;
+        };
+        ControllersWorkflowRecoveryCapacityView: {
+            claimId?: string;
+            dispatchKey?: string;
+            fossilSuspected?: boolean;
+            held: number;
+            kinds?: string[];
+            read: boolean;
+            waiting: number;
+        };
+        ControllersWorkflowRecoveryDialogView: {
+            source?: string;
+            /** @enum {string} */
+            state?: "captured" | "resolving" | "delivery_pending" | "delivered" | "unreadable" | "human_required";
+            unreadable?: boolean;
+        };
+        ControllersWorkflowRecoveryEventView: {
+            /** Format: date-time */
+            at: string;
+            detail?: string;
+            kind: string;
+            phase?: string;
+            stepId?: string;
+        };
+        ControllersWorkflowRecoveryExecutionView: {
+            attemptId?: string;
+            /** Format: int64 */
+            attemptNumber?: number;
+            /** @enum {string} */
+            authority?: "active" | "concluded" | "superseded" | "legacy_unproven";
+            errorClass?: string;
+            finishedAt?: string;
+            lastEventAt?: string;
+            lastEventPhase?: string;
+            lifecycleState?: string;
+            outcome?: string;
+            provider?: string;
+            sessionId?: string;
+            startedAt?: string;
+            stepId: string;
+            stepKind?: string;
+        };
+        ControllersWorkflowRecoveryRepairView: {
+            active: boolean;
+            attempt: number;
+            budget: number;
+            detail?: string;
+            exhausted: boolean;
+            nextRetryPossible: boolean;
+            quiescent: boolean;
+            runId?: string;
+            whyStarted?: string;
+        };
+        ControllersWorkflowRecoveryStatusView: {
+            aoIsActing: boolean;
+            branch: components["schemas"]["ControllersWorkflowRecoveryBranchView"];
+            capacity: components["schemas"]["ControllersWorkflowRecoveryCapacityView"];
+            dialog: components["schemas"]["ControllersWorkflowRecoveryDialogView"];
+            execution?: components["schemas"]["ControllersWorkflowRecoveryExecutionView"];
+            failover?: components["schemas"]["ControllersWorkflowRecoveryAttemptView"][];
+            /** Format: date-time */
+            nextWakeAt?: null | string;
+            repair: components["schemas"]["ControllersWorkflowRecoveryRepairView"];
+            /** Format: int64 */
+            retryCount?: number;
+            runId: string;
+            /** @enum {string} */
+            state: "healthy_running" | "waiting_capacity" | "waiting_branch" | "waiting_provider" | "waiting_dialog_delivery" | "verifying_result" | "automatic_recovery_pending" | "repair_running" | "failover_running" | "restart_recovery" | "needs_human" | "terminal";
+            stopReason?: string;
+            summary: string;
+            taskId?: string;
+            timeline?: components["schemas"]["ControllersWorkflowRecoveryEventView"][];
+            version?: string;
+            waiting: boolean;
+        };
+        ControllersWorkflowRunOriginView: {
+            approvedBy?: string;
+            incidentId?: string;
+            kind: string;
+            sourceWorkflowId?: string;
+        };
+        ControllersWorkflowTaskCriterionAmendmentView: {
+            amendedCriterion?: string;
+            approvedBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: int64 */
+            criterionIndex: number;
+            /** @enum {string} */
+            disposition: "amended" | "declared_obsolete";
+            evidence: string[];
+            id: string;
+            originalCriterion: string;
+            reason: string;
+            supersededReviewRunId?: string;
+            taskId: string;
+        };
+        ControllersWorkflowUsageDynamicsResponse: {
+            recorded: boolean;
+            steps?: components["schemas"]["ControllersStepUsageResponse"][];
+            trajectory: components["schemas"]["ControllersContextTrajectoryResponse"];
+            warnings?: components["schemas"]["ControllersUsageAdvisoryResponse"][];
+        };
+        ControllersWorkflowUsageLedgerResponse: {
+            /** Format: int64 */
+            approximateEvents: number;
+            baseCost: components["schemas"]["ControllersUsageCostResponse"];
+            baseTokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            budget: components["schemas"]["ControllersUsageBudgetResponse"];
+            children?: components["schemas"]["ControllersRunUsageLineResponse"][];
+            complete: boolean;
+            context?: components["schemas"]["ControllersWorkflowContextResponse"];
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            dynamics?: components["schemas"]["ControllersWorkflowUsageDynamicsResponse"];
+            familyCost: components["schemas"]["ControllersUsageCostResponse"];
+            familyTotals: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            incompleteReason?: string;
+            models: components["schemas"]["ControllersModelUsageLineResponse"][];
+            providers: components["schemas"]["ControllersProviderUsageLineResponse"][];
+            recorded: boolean;
+            repairCost: components["schemas"]["ControllersUsageCostResponse"];
+            repairTokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            roles: components["schemas"]["ControllersRoleUsageLineResponse"][];
+            source: string;
+            /** Format: int64 */
+            totalEvents: number;
+            totals: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            unobservable?: components["schemas"]["ControllersRoleUsageLineResponse"][];
+            workflowRunId: string;
+        };
+        ControllersWorkflowUsageResponse: {
+            advisory: components["schemas"]["ControllersSessionRefreshAdvisoryResponse"];
+            checkpoint: components["schemas"]["ControllersTaskCheckpointSummaryResponse"];
+            decisions: components["schemas"]["ControllersDecisionsUsageResponse"];
+            metrics: components["schemas"]["ControllersTaskUsefulWorkMetricsResponse"];
+            roles: components["schemas"]["ControllersRoleUsageResponse"][];
+            routing?: components["schemas"]["ControllersRoutingUsageResponse"][];
+            sessionLifecycle: components["schemas"]["ControllersSessionLifecycleUsageResponse"];
+            tokens?: components["schemas"]["ControllersWorkflowUsageLedgerResponse"];
         };
         ConversationAccountPayload: {
             authMode?: string;
@@ -2032,6 +6358,61 @@ export interface components {
             /** Format: int64 */
             totalTokens: number;
         };
+        CreateTeamRequest: {
+            description: string;
+            name: string;
+        };
+        CreateTenantRequest: {
+            description: string;
+            name: string;
+        };
+        CreateUserRequest: {
+            displayName: string;
+            email: string;
+            password: string;
+            /** @enum {string} */
+            role: "admin" | "member" | "viewer";
+            username: string;
+        };
+        CreateWorkflowRunRequest: {
+            /** @description Acceptance criteria for a task-strategy run. */
+            acceptanceCriteria?: string[];
+            /** @enum {string} */
+            approvalPolicy?: "automatic" | "manual";
+            /** @description Explicit per-run autonomous/manual override; omit to inherit the caller's execution policy. */
+            autonomous?: null | boolean;
+            /** @enum {string} */
+            autonomyPolicy?: "ask_always" | "auto_decide_low_risk" | "full_autonomy";
+            /**
+             * Format: int64
+             * @description Per-run override of the context-pressure threshold, in tokens. Omit to keep the execution strategy default. Out-of-range values are refused.
+             */
+            contextPerCallWarnTokens?: number;
+            /** @description Generate a provider-neutral master plan before execution. */
+            masterPlan?: boolean;
+            /** @description The workflow run's objective. For the task strategy this is the task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long objective is refused. */
+            objective: string;
+            /**
+             * @description Where this run's work happens. direct_branch is binding: AO never falls back to a worktree.
+             * @enum {string}
+             */
+            placement?: "auto" | "direct_branch" | "isolated_worktree";
+            placementReason?: string;
+            /** @enum {string} */
+            planApprovalMode?: "manual" | "auto";
+            /** @enum {string} */
+            repairPolicy?: "disabled" | "suggest" | "automatic";
+            /** @enum {string} */
+            reviewDepth?: "auto" | "none" | "light" | "deep";
+            /** @description Per-run opt-in to P7 session compaction. Omit to keep the default (off); false records an explicit refusal; true applies to this run only. */
+            sessionCompaction?: null | boolean;
+            /** @enum {string} */
+            strategy?: "task" | "autonomous" | "master" | "auto";
+            strategySignals?: components["schemas"]["WorkflowStrategySignals"];
+            verification?: components["schemas"]["WorkflowVerificationPlan"];
+            /** @enum {string} */
+            writeIntent?: "mutating" | "read_only";
+        };
         DegradedProject: {
             id: string;
             /** @enum {string} */
@@ -2044,6 +6425,7 @@ export interface components {
             /** @enum {string} */
             agent?: "claude-code" | "codex" | "aider" | "opencode" | "grok" | "droid" | "amp" | "agy" | "crush" | "cursor" | "qwen" | "copilot" | "goose" | "auggie" | "continue" | "devin" | "cline" | "kimi" | "muse" | "kiro" | "kilocode" | "vibe" | "pi" | "kimchi" | "prime-agent" | "autohand" | "fake";
             attachments?: components["schemas"]["AttachmentInput"][];
+            /** @description The task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long brief is refused. */
             brief: string;
             /** @enum {string} */
             mode?: "tui" | "chat";
@@ -2081,6 +6463,8 @@ export interface components {
         DomainActivity: {
             /** Format: date-time */
             lastActivityAt: string;
+            /** Format: date-time */
+            lastSignalAt?: string;
             state: string;
         };
         DomainReviewerConfig: {
@@ -2097,6 +6481,92 @@ export interface components {
             /** @enum {string} */
             state?: "queued" | "running" | "completed" | "interrupted" | "failed";
             turnId?: string;
+        };
+        EnableSkillRequest: {
+            capabilities: string[];
+            version: string;
+        };
+        EnvironmentAgentCapability: {
+            /** @enum {string} */
+            authState: "authorized" | "unauthorized" | "unknown";
+            binaryPath?: string;
+            configuredRoles?: string[];
+            id: string;
+            installed: boolean;
+            /** Format: date-time */
+            lastCheckedAt: string;
+            model?: string;
+            source: string;
+            version?: string;
+        };
+        EnvironmentGitHubStatus: {
+            /** @enum {string} */
+            authState: "authenticated" | "unauthenticated" | "unknown";
+            binaryPath?: string;
+            errorCode?: string;
+            host?: string;
+            installed: boolean;
+            /** Format: date-time */
+            lastCheckedAt: string;
+            login?: string;
+            version?: string;
+        };
+        EnvironmentProjectsSummary: {
+            count: number;
+        };
+        EnvironmentReadiness: {
+            claude: string;
+            codex: string;
+            github: string;
+            headless: string;
+            /** @enum {string} */
+            overall: "ready" | "setup_required";
+            projects: string;
+        };
+        EnvironmentStatus: {
+            claude: components["schemas"]["EnvironmentAgentCapability"];
+            codex: components["schemas"]["EnvironmentAgentCapability"];
+            github: components["schemas"]["EnvironmentGitHubStatus"];
+            projects: components["schemas"]["EnvironmentProjectsSummary"];
+            readiness: components["schemas"]["EnvironmentReadiness"];
+        };
+        ExplorationFileCountResponse: {
+            path: string;
+            /** Format: int64 */
+            reads: number;
+        };
+        ExplorationMetricResponse: {
+            /** @enum {string} */
+            basis: "observed" | "derived" | "unavailable";
+            lowerBound: boolean;
+            method: string;
+            value: null | number;
+        };
+        ExplorationPathScopeCountResponse: {
+            /** Format: int64 */
+            count: number;
+            scope: string;
+        };
+        ExplorationRatioResponse: {
+            /** @enum {string} */
+            basis: "observed" | "derived" | "unavailable";
+            method: string;
+            value: null | number;
+        };
+        GitPolicy: {
+            /** @enum {string} */
+            localCommit?: "automatic" | "require_approval" | "never";
+            /** @enum {string} */
+            merge?: "automatic" | "require_approval" | "never";
+            /** @enum {string} */
+            push?: "automatic" | "require_approval" | "never";
+        };
+        GrantProjectAccessRequest: {
+            /** @enum {string} */
+            role: "admin" | "member" | "viewer";
+            subjectId: string;
+            /** @enum {string} */
+            subjectKind: "user" | "team";
         };
         ImportReport: {
             dryRun: boolean;
@@ -2117,6 +6587,17 @@ export interface components {
         InitializeRepositoryResult: {
             path: string;
         };
+        InstallSkillReleaseRequest: {
+            acknowledgeMovedTag?: boolean;
+            allowOfflineFromCache?: boolean;
+            asUpdate?: boolean;
+            registryId: string;
+            skillId: string;
+            version: string;
+        };
+        InstallSkillRequest: {
+            sourceDir: string;
+        };
         KillReviewResponse: {
             reviewerHandleId: string;
             reviewerHarness?: string;
@@ -2127,6 +6608,11 @@ export interface components {
             freed?: boolean;
             ok: boolean;
             sessionId: string;
+        };
+        LiftSkillExternalRevocationRequest: {
+            /** @enum {string} */
+            subject: "external_owner" | "external_repository" | "external_commit";
+            subjectId: string;
         };
         ListAgentSwitchesResponse: {
             switches: components["schemas"]["AgentSwitch"][];
@@ -2166,6 +6652,30 @@ export interface components {
         };
         ListShellTerminalsResponse: {
             shellTerminals: components["schemas"]["ShellTerminalResponse"][];
+        };
+        ListTeamMembersResponse: {
+            members: components["schemas"]["TeamMemberView"][];
+        };
+        ListTeamsResponse: {
+            teams: components["schemas"]["TeamView"][];
+        };
+        ListTenantMembersResponse: {
+            members: components["schemas"]["TenantMemberView"][];
+        };
+        ListTenantsResponse: {
+            tenants: components["schemas"]["TenantView"][];
+        };
+        ListUsersResponse: {
+            users: components["schemas"]["AdminUserView"][];
+        };
+        ListWorkflowQuestionsResponse: {
+            questions: components["schemas"]["WorkflowQuestionResponse"][];
+        };
+        ListWorkflowsResponse: {
+            limit: number;
+            offset: number;
+            total: number;
+            workflows: components["schemas"]["WorkflowRunView"][];
         };
         ListWorkspaceFilesResponse: {
             compareBaseRef?: string;
@@ -2248,23 +6758,34 @@ export interface components {
             prUrl: string;
             projectId: string;
             /** Format: date-time */
+            readAt?: null | string;
+            /** Format: date-time */
             resolvedAt?: null | string;
             sessionId: string;
+            /** @enum {string} */
+            severity: "info" | "warning" | "critical";
+            source?: string;
             /**
              * @description Seen state. unread means the user has not opened the notification panel since it arrived.
              * @enum {string}
              */
             status: "unread" | "read";
             target: components["schemas"]["NotificationTarget"];
+            taskId?: string;
             title: string;
             /** @enum {string} */
-            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged";
+            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "task_completed" | "workflow_completed" | "task_needs_attention" | "workflow_needs_attention" | "task_failed" | "workflow_failed" | "human_question_required" | "repair_exhausted" | "integration_failed";
+            workflowRunId?: string;
         };
         NotificationTarget: {
             /** @enum {string} */
-            kind: "session" | "pr";
+            kind: "session" | "pr" | "workflow";
             prUrl?: string;
             sessionId: string;
+            workflowRunId?: string;
+        };
+        OKResponse: {
+            ok: boolean;
         };
         OpenShellTerminalRequest: {
             /** @description Project whose root the shell starts in. Omitted opens the shell in the daemon data dir. */
@@ -2286,6 +6807,107 @@ export interface components {
             status: "needs_review" | "running" | "up_to_date" | "changes_requested" | "ineligible";
             targetSha: string;
             title: string;
+        };
+        PentestAuthorizationListResponse: {
+            authorizations: components["schemas"]["PentestAuthorizationView"][];
+        };
+        PentestAuthorizationRequest: {
+            authorizationRef: string;
+            confirm: boolean;
+            pentestType: string;
+            scopePaths?: string[];
+            target: string;
+            ttlSeconds: number;
+        };
+        PentestAuthorizationView: {
+            active: boolean;
+            authorizationRef: string;
+            confirmed: boolean;
+            createdAt: string;
+            expiresAt: string;
+            id: string;
+            inactiveReason?: string;
+            pentestType: string;
+            projectId: string;
+            requestedBy: string;
+            revokedAt?: string;
+            scopePaths: string[];
+            skillId: string;
+            target: string;
+        };
+        PlacementOverrideRequestBody: {
+            /** @enum {string} */
+            placement: "auto" | "direct_branch" | "isolated_worktree";
+            reason?: string;
+            taskId?: string;
+        };
+        PlacementOverrideResponse: {
+            appliesAtFreeze: boolean;
+            currentPlacement?: components["schemas"]["ControllersExecutionPlacementView"];
+            override: components["schemas"]["PlacementOverrideView"];
+            requiresTransition: boolean;
+        };
+        PlacementOverrideView: {
+            /** Format: int64 */
+            appliedGeneration?: number;
+            detail?: string;
+            /** @enum {string} */
+            placement: "auto" | "direct_branch" | "isolated_worktree";
+            reason?: string;
+            requestedBy?: string;
+            /** @enum {string} */
+            state: "requested" | "applied" | "superseded" | "refused";
+            taskId?: string;
+        };
+        PlacementQuiescenceView: {
+            digest?: string;
+            noBranchAuthority: boolean;
+            noCapacityClaim: boolean;
+            noIntegrationAuthority: boolean;
+            noLiveRuntime: boolean;
+            noProviderAttempt: boolean;
+            quiesced: boolean;
+            runActive: boolean;
+        };
+        PlacementTransitionRequestBody: {
+            /** Format: int64 */
+            expectedGeneration?: number;
+            /** @enum {string} */
+            expectedState?: "selected" | "waiting" | "preparing" | "ready" | "active" | "reviewing" | "integrating" | "integrated" | "conflict" | "preserved" | "terminal";
+            /** @enum {string} */
+            placement: "auto" | "direct_branch" | "isolated_worktree";
+            reason?: string;
+            taskId?: string;
+        };
+        PlacementTransitionResponse: {
+            alreadyApplied: boolean;
+            applied: boolean;
+            from?: components["schemas"]["ControllersExecutionPlacementView"];
+            quiescence: components["schemas"]["PlacementQuiescenceView"];
+            to?: components["schemas"]["ControllersExecutionPlacementView"];
+            transition: components["schemas"]["PlacementTransitionView"];
+        };
+        PlacementTransitionView: {
+            detail?: string;
+            expectedState?: string;
+            /** Format: int64 */
+            fromGeneration: number;
+            /** @enum {string} */
+            fromType?: "direct_branch" | "isolated_worktree";
+            /** @enum {string} */
+            placement: "auto" | "direct_branch" | "isolated_worktree";
+            quiescence?: string;
+            reason?: string;
+            /** @enum {string} */
+            refusalReason?: "no_operator_authority" | "unknown_placement_request" | "no_frozen_placement" | "placement_not_current" | "lifecycle_state_drifted" | "active_provider_attempt" | "held_capacity_claim" | "live_runtime" | "held_branch_authority" | "outstanding_integration" | "run_is_terminal" | "authority_unreadable";
+            requestedBy?: string;
+            /** @enum {string} */
+            state: "requested" | "applied" | "refused";
+            taskId?: string;
+            /** Format: int64 */
+            toGeneration?: number;
+            /** @enum {string} */
+            toType?: "direct_branch" | "isolated_worktree";
         };
         PreviewServerStatusResponse: {
             configuration?: string;
@@ -2310,13 +6932,38 @@ export interface components {
             agent?: string;
             config?: components["schemas"]["ProjectConfig"];
             defaultBranch: string;
+            /** @enum {string} */
+            executionMode: "isolated_worktree" | "direct_branch" | "smart_parallel_worktrees";
             id: string;
             /** @enum {string} */
             kind: "single_repo" | "workspace" | "scratch";
             name: string;
             path: string;
             repo: string;
+            repositories?: components["schemas"]["ProjectRepositoryExecution"][];
+            /** @enum {string} */
+            transport?: "https" | "ssh" | "unknown";
             workspaceRepos?: components["schemas"]["WorkspaceRepo"][];
+        };
+        ProjectAccessResponse: {
+            grants: components["schemas"]["ProjectGrantView"][];
+            ownerUserId?: string;
+            permissions: string[];
+            projectId: string;
+        };
+        ProjectBrowseEntry: {
+            isGitRepo: boolean;
+            name: string;
+            path: string;
+        };
+        ProjectBrowseResult: {
+            entries: components["schemas"]["ProjectBrowseEntry"][];
+            path: string;
+        };
+        ProjectCloneInput: {
+            destinationName?: null | string;
+            repo: string;
+            tenantId?: string;
         };
         ProjectConfig: {
             agentConfig?: components["schemas"]["AgentConfig"];
@@ -2327,6 +6974,9 @@ export interface components {
             env?: {
                 [key: string]: string;
             };
+            /** @enum {string} */
+            executionMode?: "isolated_worktree" | "direct_branch" | "smart_parallel_worktrees";
+            git?: components["schemas"]["GitPolicy"];
             orchestrator?: components["schemas"]["RoleOverride"];
             orchestratorRules?: string;
             postCreate?: string[];
@@ -2336,24 +6986,359 @@ export interface components {
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
             worker?: components["schemas"]["RoleOverride"];
         };
+        ProjectConnectionTestResult: {
+            /** Format: int64 */
+            latencyMs?: number;
+            message?: string;
+            /** @enum {string} */
+            status: "ok" | "error";
+        };
         ProjectGetResponse: {
             project: components["schemas"]["ProjectOrDegraded"];
             /** @enum {string} */
             status: "ok" | "degraded";
         };
+        ProjectGitHubComment: {
+            author?: string;
+            body?: string;
+            createdAt?: string;
+            truncated?: boolean;
+        };
+        ProjectGitHubCommit: {
+            author?: string;
+            date?: string;
+            sha: string;
+            subject?: string;
+        };
+        ProjectGitHubIntelligence: {
+            authenticated: boolean;
+            /** @enum {string} */
+            availability: "ready" | "degraded" | "unavailable";
+            currentPr?: components["schemas"]["ProjectGitHubPullRequest"];
+            detail?: string;
+            issues?: components["schemas"]["ProjectGitHubIssue"][];
+            observedAt?: string;
+            projectId: string;
+            pullRequests?: components["schemas"]["ProjectGitHubPullRequest"][];
+            reason?: string;
+            repository: components["schemas"]["ProjectGitHubRepository"];
+            stale?: boolean;
+        };
+        ProjectGitHubIssue: {
+            assignees?: string[];
+            body?: string;
+            commentCount?: number;
+            comments?: components["schemas"]["ProjectGitHubComment"][];
+            labels?: string[];
+            linkedPrs?: components["schemas"]["ProjectGitHubLinkedPR"][];
+            milestone?: string;
+            number: number;
+            state?: string;
+            title: string;
+            updatedAt?: string;
+            url?: string;
+        };
+        ProjectGitHubLinkedPR: {
+            number: number;
+            state?: string;
+            title?: string;
+            url?: string;
+        };
+        ProjectGitHubPullRequest: {
+            additions: number;
+            author?: string;
+            baseBranch?: string;
+            changedFiles: number;
+            checksFailed: number;
+            checksPassed: number;
+            checksPending: number;
+            checksSummary?: string;
+            deletions: number;
+            draft?: boolean;
+            failingChecks?: string[];
+            headBranch?: string;
+            headRepo?: string;
+            headSha?: string;
+            latestReviews?: components["schemas"]["ProjectGitHubReview"][];
+            mergeBlockers?: string[];
+            mergeable?: string;
+            number: number;
+            requestedReviewers?: string[];
+            reviewDecision?: string;
+            state?: string;
+            title: string;
+            updatedAt?: string;
+            url: string;
+        };
+        ProjectGitHubRepository: {
+            ahead: number;
+            aliasResolved?: boolean;
+            archived?: boolean;
+            behind: number;
+            currentBranch?: string;
+            defaultBranch?: string;
+            detached?: boolean;
+            dirty?: boolean;
+            headSha?: string;
+            host?: string;
+            originUrl?: string;
+            private?: boolean;
+            provider?: string;
+            recentCommits?: components["schemas"]["ProjectGitHubCommit"][];
+            remoteHeadRef?: string;
+            remoteHeadSha?: string;
+            repo?: string;
+            upstreamRef?: string;
+            url?: string;
+        };
+        ProjectGitHubReview: {
+            author?: string;
+            body?: string;
+            state?: string;
+            url?: string;
+        };
+        ProjectGrantView: {
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string} */
+            role: "admin" | "member" | "viewer";
+            subjectId: string;
+            /** @enum {string} */
+            subjectKind: "user" | "team";
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ProjectIntelligenceArchitecture: {
+            architecture: {
+                [key: string]: unknown;
+            } | null;
+            rendered?: string;
+        };
+        ProjectIntelligenceContextGraph: {
+            architecture?: string;
+            backend?: string;
+            bytes: number;
+            consideredEdges: number;
+            consideredSymbols: number;
+            endpoints?: string[];
+            estimatedTokens: number;
+            files?: string[];
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            selectedEdges: number;
+            selectedSymbols: number;
+            symbols?: string[];
+            tables?: string[];
+            tests?: string[];
+        };
+        ProjectIntelligenceContextItem: {
+            bodyIncluded: boolean;
+            content?: string;
+            reason?: string;
+            /** Format: double */
+            score: number;
+            sourceCommit?: string;
+            sourcePaths?: string[];
+            state?: string;
+            summary: string;
+            type?: string;
+        };
+        ProjectIntelligenceContextPreview: {
+            candidateBytes: number;
+            candidateItems: number;
+            digest?: string;
+            droppedItems: number;
+            droppedToSummary: number;
+            empty: boolean;
+            estimatedTokens: number;
+            fallbackReason?: string;
+            /** Format: int64 */
+            generation: number;
+            graph: components["schemas"]["ProjectIntelligenceContextGraph"];
+            indexedCommit?: string;
+            projectId: string;
+            repoId?: string;
+            /** @enum {string} */
+            role: "planner" | "worker" | "reviewer" | "repair";
+            sections: components["schemas"]["ProjectIntelligenceContextSection"][];
+            selectedBytes: number;
+            selectedItems: number;
+            sourcesReused?: string[];
+            staleExcluded: number;
+        };
+        ProjectIntelligenceContextSection: {
+            items: components["schemas"]["ProjectIntelligenceContextItem"][];
+            title: string;
+            type?: string;
+        };
+        ProjectIntelligenceMemorySync: {
+            error?: string;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            insightsDerived: number;
+            insightsGraphBacked: boolean;
+            insightsSkipReason?: string;
+            /** Format: int64 */
+            itemsInvalidated: number;
+            itemsReconfirmed: number;
+            itemsWritten: number;
+            kind?: string;
+            /** Format: int64 */
+            millis: number;
+            skipReason?: string;
+            skipped?: boolean;
+            /** @enum {string} */
+            state?: "pending" | "deriving" | "ready" | "stale" | "failed";
+        };
+        ProjectIntelligenceOverview: {
+            projectId: string;
+            repos: components["schemas"]["ProjectIntelligenceRepoStatus"][];
+        };
+        ProjectIntelligenceRepoStatus: {
+            backend?: string;
+            branch?: string;
+            drift?: string;
+            /** Format: int64 */
+            edges: number;
+            /** Format: int64 */
+            files: number;
+            /** Format: int64 */
+            filesParsed: number;
+            /** Format: int64 */
+            filesRemoved: number;
+            /** Format: int64 */
+            filesReused: number;
+            /** Format: int64 */
+            generation: number;
+            headCommit?: string;
+            indexedCommit?: string;
+            lastError?: string;
+            /** Format: int64 */
+            lastMillis: number;
+            lastSyncKind?: string;
+            memoryCommit?: string;
+            memoryError?: string;
+            /** Format: int64 */
+            memoryItems: number;
+            /** Format: int64 */
+            memoryStale: number;
+            /** @enum {string} */
+            memoryState?: "pending" | "deriving" | "ready" | "stale" | "failed";
+            memoryUpdated?: string;
+            /** Format: int64 */
+            memoryValid: number;
+            repoId: string;
+            repoPath: string;
+            /** @enum {string} */
+            state: "pending" | "indexing" | "ready" | "stale" | "failed";
+            /** Format: int64 */
+            symbols: number;
+            updatedAt?: string;
+        };
+        ProjectIntelligenceSearchHit: {
+            /** Format: double */
+            confidence?: number;
+            detail?: string;
+            /** @enum {string} */
+            evidenceClass?: "derived" | "observed" | "user_provided" | "workflow_verified";
+            /** @enum {string} */
+            kind: "memory" | "symbol";
+            /** Format: int64 */
+            line?: number;
+            memoryType?: string;
+            path?: string;
+            /** @enum {string} */
+            provenance?: "repo_derivation" | "task_outcome" | "workflow_knowledge" | "legacy";
+            score: number;
+            sourceCommit?: string;
+            state?: string;
+            symbolKind?: string;
+            title: string;
+        };
+        ProjectIntelligenceSearchResult: {
+            /** Format: int64 */
+            generation: number;
+            hits: components["schemas"]["ProjectIntelligenceSearchHit"][];
+            indexedCommit?: string;
+            memoryHits: number;
+            query: string;
+            symbolHits: number;
+            truncated: boolean;
+        };
+        ProjectIntelligenceSubgraph: {
+            edges: components["schemas"]["ProjectIntelligenceSubgraphEdge"][];
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            nodes: components["schemas"]["ProjectIntelligenceSubgraphNode"][];
+            seeds: string[];
+            truncated: boolean;
+        };
+        ProjectIntelligenceSubgraphEdge: {
+            from: string;
+            kind: string;
+            /** Format: int64 */
+            line?: number;
+            path?: string;
+            to: string;
+        };
+        ProjectIntelligenceSubgraphNode: {
+            depth: number;
+            exported: boolean;
+            key: string;
+            kind?: string;
+            language?: string;
+            /** Format: int64 */
+            line?: number;
+            name: string;
+            path?: string;
+            signature?: string;
+            summary?: string;
+        };
+        ProjectIntelligenceSyncResponse: {
+            graph: components["schemas"]["ControllersProjectMemoryGraphSyncResponse"];
+            memory: components["schemas"]["ProjectIntelligenceMemorySync"];
+        };
         ProjectOrDegraded: components["schemas"]["Project"] | components["schemas"]["DegradedProject"];
+        ProjectRepositoryExecution: {
+            branch: string;
+            /** @enum {string} */
+            executionMode: "isolated_worktree" | "direct_branch" | "smart_parallel_worktrees";
+            lock?: components["schemas"]["ProjectRepositoryLock"];
+            name: string;
+            path: string;
+            relativePath?: string;
+        };
+        ProjectRepositoryLock: {
+            /** Format: date-time */
+            acquiredAt: string;
+            sessionId?: string;
+            workflowRunId: string;
+        };
         ProjectResponse: {
             project: components["schemas"]["Project"];
         };
+        ProjectSkillsResponse: {
+            activations: components["schemas"]["SkillActivationView"][];
+            installed: components["schemas"]["SkillInstallView"][];
+            permissions: string[];
+            projectId: string;
+        };
         ProjectSummary: {
+            defaultBranch?: string;
             id: string;
             /** @enum {string} */
             kind: "single_repo" | "workspace" | "scratch";
             name: string;
             orchestratorAgent?: string;
             path: string;
+            repo?: string;
             resolveError?: string;
             sessionPrefix: string;
+            tenantId?: string;
+            valid: boolean;
         };
         PromoteQueuedTurnResponse: {
             activityId: string;
@@ -2434,6 +7419,10 @@ export interface components {
             session: components["schemas"]["ControllersSessionView"];
             sessionId: string;
         };
+        RetireSkillSigningKeyRequest: {
+            /** Format: date-time */
+            validUntil?: null | string;
+        };
         ReviewRun: {
             autoInjectReview: boolean;
             batchId: string;
@@ -2445,10 +7434,15 @@ export interface components {
             githubReviewId: string;
             harness: string;
             id: string;
+            lateVerdict?: string;
+            /** Format: date-time */
+            lateVerdictAt?: null | string;
+            lateVerdictBody?: string;
             prUrl: string;
             reviewId: string;
             sessionId: string;
             status: string;
+            supersededBy?: string;
             targetSha: string;
             /** @enum {string} */
             triggerSource: "manual" | "auto";
@@ -2458,6 +7452,18 @@ export interface components {
             review: components["schemas"]["ReviewRun"];
             reviewerHandleId: string;
             reviews: components["schemas"]["ReviewRun"][];
+        };
+        RevokeSkillExternalRequest: {
+            reason: string;
+            /** @enum {string} */
+            subject: "external_owner" | "external_repository" | "external_commit";
+            subjectId: string;
+        };
+        RevokeSkillTrustRequest: {
+            reason: string;
+            /** @enum {string} */
+            subject: "signing_key" | "publisher" | "trust_root";
+            subjectId: string;
         };
         RoleOverride: {
             agent?: string;
@@ -2471,6 +7477,90 @@ export interface components {
             killed?: boolean;
             ok: boolean;
             sessionId: string;
+        };
+        RunQualitySignalsResponse: {
+            attempts: components["schemas"]["ExplorationMetricResponse"];
+            checksFailed: components["schemas"]["ExplorationMetricResponse"];
+            checksPassed: components["schemas"]["ExplorationMetricResponse"];
+            completed: boolean;
+            durationMs: components["schemas"]["ExplorationMetricResponse"];
+            failedAttempts: components["schemas"]["ExplorationMetricResponse"];
+            finalReviewVerdict: string;
+            finalState: string;
+            fixCycles: components["schemas"]["ExplorationMetricResponse"];
+            providerFailovers: components["schemas"]["ExplorationMetricResponse"];
+            retries: components["schemas"]["ExplorationMetricResponse"];
+            reviewRuns: components["schemas"]["ExplorationMetricResponse"];
+            verifyPassed: null | boolean;
+            verifyRuns: components["schemas"]["ExplorationMetricResponse"];
+        };
+        RuntimeGCFindingView: {
+            class?: string;
+            /** @enum {string} */
+            disposition: "cleaned" | "candidate" | "live" | "unprovable" | "foreign" | "absent" | "error";
+            error?: string;
+            handle?: string;
+            instanceId?: string;
+            ownershipProven: boolean;
+            reason?: string;
+            recommendedAction?: string;
+            workflowRunId?: string;
+        };
+        RuntimeGCReportResponse: {
+            absent: number;
+            candidates: number;
+            cleaned: number;
+            dryRun: boolean;
+            errors: number;
+            findings: components["schemas"]["RuntimeGCFindingView"][];
+            /** Format: date-time */
+            finishedAt: string;
+            skippedForeign: number;
+            skippedLive: number;
+            skippedUnprovable: number;
+            /** Format: date-time */
+            startedAt: string;
+            trigger?: string;
+        };
+        RuntimeGCRequest: {
+            dryRun?: boolean;
+        };
+        SaveSkillRegistryRequest: {
+            allowedOwners?: string[];
+            apiKeyHeader?: string;
+            /** @enum {string} */
+            authType?: "none" | "bearer" | "api_key_header";
+            credentialSecretName?: string;
+            displayName: string;
+            enabled: boolean;
+            location: string;
+            owner?: string;
+            permittedPrivateCidrs?: string[];
+            pinnedPublisher?: string;
+            priority?: number;
+            repository?: string;
+            tenantId?: string;
+            /** @enum {string} */
+            trustPolicy: "digest" | "pinned_publisher" | "signed" | "official" | "external_integrity" | "external_signed" | "external_org_allowlist" | "external_deny";
+            /** @enum {string} */
+            type: "local" | "https" | "git" | "github";
+        };
+        SaveSkillTrustRootRequest: {
+            displayName: string;
+            publisher: string;
+            /** Format: date-time */
+            validFrom?: null | string;
+            /** Format: date-time */
+            validUntil?: null | string;
+        };
+        SchedulerStatusResponse: {
+            global: components["schemas"]["CapacityUsageView"];
+            held: components["schemas"]["CapacityClaimView"][];
+            /** Format: date-time */
+            observedAt: string;
+            perKind: components["schemas"]["CapacityUsageView"][];
+            perWorkflowLimit: number;
+            queued: components["schemas"]["CapacityClaimView"][];
         };
         SendConversationMessageRequest: {
             attachments?: components["schemas"]["ConversationImageContentRequest"][];
@@ -2734,10 +7824,20 @@ export interface components {
             /** @enum {string} */
             harness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "kiro" | "pi" | "qwen" | "agy" | "continue" | "goose" | "vibe" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
         };
+        SetUserRoleRequest: {
+            /** @enum {string} */
+            role: "owner" | "admin" | "member" | "viewer";
+        };
+        SetUserStatusRequest: {
+            /** @enum {string} */
+            status: "active" | "disabled";
+        };
         SettingsResponse: {
             chatHarnesses: string[];
             /** @enum {string} */
             defaultSessionMode: "chat" | "tui";
+            /** @enum {string} */
+            memoryMode?: "off" | "assisted" | "preferred";
         };
         ShellTerminalEnvelope: {
             shellTerminal: components["schemas"]["ShellTerminalResponse"];
@@ -2750,6 +7850,535 @@ export interface components {
             sessionId?: string;
             title: string;
             workingDir: string;
+        };
+        SkillActivationView: {
+            /** Format: date-time */
+            approvedAt: string;
+            approvedBy?: string;
+            available: boolean;
+            enabled: boolean;
+            grantedCapabilities: string[];
+            requestedCapabilities: string[];
+            skillId: string;
+            skillName: string;
+            unavailable?: string;
+            /** Format: date-time */
+            updatedAt: string;
+            version: string;
+        };
+        SkillAuditResponse: {
+            entries: components["schemas"]["SkillAuditView"][];
+        };
+        SkillAuditView: {
+            /** @enum {string} */
+            action: "install" | "uninstall" | "enable" | "disable" | "grant_changed" | "install_rejected";
+            actor?: string;
+            capabilities: string[];
+            detail?: string;
+            digest?: string;
+            id: string;
+            /** Format: date-time */
+            occurredAt: string;
+            projectId?: string;
+            skillId?: string;
+            version?: string;
+        };
+        SkillCapabilityDecisionView: {
+            capability: string;
+            denialReason?: string;
+            description: string;
+            detail?: string;
+            missingControl?: string;
+            requiredPermission: string;
+            requiresControls: string[];
+            /** @enum {string} */
+            risk: "low" | "medium" | "high" | "critical";
+            satisfied: boolean;
+        };
+        SkillCapabilityView: {
+            description: string;
+            /** @enum {string} */
+            minApproval: "none" | "per_activation" | "per_run" | "per_target";
+            name: string;
+            requiredPermission: string;
+            requiresControls: string[];
+            /** @enum {string} */
+            risk: "low" | "medium" | "high" | "critical";
+        };
+        SkillDryRunRequest: {
+            authorizedTargets?: string[];
+            inputs?: {
+                [key: string]: string;
+            };
+            modeId?: string;
+        };
+        SkillDryRunResponse: {
+            decisions: components["schemas"]["SkillCapabilityDecisionView"][];
+            /** @enum {string} */
+            effectiveRisk?: "low" | "medium" | "high" | "critical";
+            missingPermissions: string[];
+            modeId: string;
+            modeName: string;
+            /** @enum {string} */
+            modeRisk: "low" | "medium" | "high" | "critical";
+            reasons: string[];
+            /** @enum {string} */
+            requiredApproval: "none" | "per_activation" | "per_run" | "per_target";
+            runner: components["schemas"]["SkillRunnerStatusView"];
+            skillId: string;
+            skillName: string;
+            /** @enum {string} */
+            verdict: "executable" | "requires_approval" | "blocked";
+            version: string;
+        };
+        SkillExternalRevocationListResponse: {
+            policy: string;
+            revocations: components["schemas"]["SkillExternalRevocationView"][];
+        };
+        SkillExternalRevocationView: {
+            reason: string;
+            /** Format: date-time */
+            revokedAt: string;
+            revokedBy?: string;
+            /** @enum {string} */
+            subject: "external_owner" | "external_repository" | "external_commit";
+            subjectId: string;
+        };
+        SkillImageApprovalListResponse: {
+            approvals: components["schemas"]["SkillImageApprovalView"][];
+            revocationPolicy: string;
+            trustModel: string;
+        };
+        SkillImageApprovalView: {
+            active: boolean;
+            approvedAt: string;
+            approvedBy: string;
+            digest: string;
+            expiresAt?: string;
+            id: string;
+            inactiveReason?: string;
+            modeId: string;
+            note: string;
+            projectId: string;
+            reference: string;
+            revokedAt?: string;
+            skillId: string;
+            tenantId: string;
+            tool: string;
+            version: string;
+        };
+        SkillInstallOriginView: {
+            artifactDigest: string;
+            /** @enum {string} */
+            compatibility: "compatible" | "ao-too-old" | "ao-too-new" | "unknown";
+            identityExplanation?: string;
+            /** Format: date-time */
+            installedAt: string;
+            installedBy?: string;
+            manifestDigest: string;
+            /** Format: date-time */
+            metadataAsOf?: string;
+            provenance?: components["schemas"]["SkillProvenanceView"];
+            publisher: string;
+            registryId: string;
+            registryName?: string;
+            registryType: string;
+            revocationReason?: string;
+            revocationStateObserved?: string;
+            revoked?: boolean;
+            skillId: string;
+            sourceCommit?: string;
+            /** Format: date-time */
+            sourceFetchedAt?: null | string;
+            sourceOwner?: string;
+            sourcePath?: string;
+            /** @enum {string} */
+            sourceProvider?: "" | "github";
+            sourceRepository?: string;
+            sourceShortCommit?: string;
+            sourceTag?: string;
+            sourceUrl?: string;
+            /** @enum {string} */
+            sourceVisibility?: "" | "public" | "private";
+            /** @enum {string} */
+            trust: "revoked" | "unverified" | "verified" | "trusted";
+            trustExplanation: string;
+            trustPolicy: string;
+            version: string;
+        };
+        SkillInstallOutcomeView: {
+            fromCache?: boolean;
+            install: components["schemas"]["SkillInstallView"];
+            nextStep: string;
+            offline?: boolean;
+            origin: components["schemas"]["SkillInstallOriginView"];
+            updated: boolean;
+        };
+        SkillInstallView: {
+            /** @enum {string} */
+            approval: "none" | "per_activation" | "per_run" | "per_target";
+            capabilities: string[];
+            description: string;
+            digest: string;
+            id: string;
+            /** Format: date-time */
+            installedAt: string;
+            installedBy?: string;
+            modes: components["schemas"]["SkillModeView"][];
+            name: string;
+            origin?: components["schemas"]["SkillInstallOriginView"];
+            originRef?: string;
+            /** @enum {string} */
+            originType: "builtin" | "local" | "git";
+            publisher: string;
+            requiresIsolatedRunner: boolean;
+            /** @enum {string} */
+            riskLevel: "low" | "medium" | "high" | "critical";
+            sourceUrl?: string;
+            version: string;
+        };
+        SkillKeyCertificateInput: {
+            keyId: string;
+            publicKey: string;
+            publisher: string;
+            rootKeyId: string;
+            scheme: string;
+            trustRootId: string;
+            /** Format: date-time */
+            validFrom: string;
+            /** Format: date-time */
+            validUntil?: null | string;
+            value: string;
+        };
+        SkillListResponse: {
+            capabilities: components["schemas"]["SkillCapabilityView"][];
+            skills: components["schemas"]["SkillInstallView"][];
+        };
+        SkillMarketplaceSearchResponse: {
+            externalNotice: string;
+            freshnessNotice?: string;
+            installNotice: string;
+            notes: components["schemas"]["SkillRegistryNoteView"][];
+            offline: boolean;
+            releases: components["schemas"]["SkillReleaseView"][];
+            sources: components["schemas"]["SkillRegistryFreshnessView"][];
+        };
+        SkillModeView: {
+            /** @enum {string} */
+            approval: "none" | "per_activation" | "per_run" | "per_target";
+            capabilities: string[];
+            description: string;
+            id: string;
+            name: string;
+            /** @enum {string} */
+            riskLevel: "low" | "medium" | "high" | "critical";
+        };
+        SkillMovedTagListResponse: {
+            policy: string;
+            tags: components["schemas"]["SkillMovedTagView"][];
+        };
+        SkillMovedTagView: {
+            commit: string;
+            explanation: string;
+            /** Format: date-time */
+            firstSeenAt: string;
+            /** Format: date-time */
+            movedAt?: null | string;
+            owner: string;
+            previousCommit: string;
+            registryId: string;
+            repository: string;
+            tag: string;
+        };
+        SkillProvenanceView: {
+            algorithm?: string;
+            keyFingerprint?: string;
+            keyFingerprintShort?: string;
+            keyId?: string;
+            /** @enum {string} */
+            keyOrigin?: "certificate" | "administrative" | "built-in";
+            publisher?: string;
+            refusal?: string;
+            refusalCode?: string;
+            scheme?: string;
+            /** Format: date-time */
+            signedAt: string;
+            trustRootId?: string;
+            trustRootName?: string;
+            /** @enum {string} */
+            trustRootTier?: "official" | "enterprise" | "external";
+            verified: boolean;
+            /** Format: date-time */
+            verifiedAt: string;
+        };
+        SkillRegistryFreshnessView: {
+            explanation: string;
+            /** Format: date-time */
+            fetchedAt?: string;
+            /** @enum {string} */
+            freshness: "live" | "cached" | "stale" | "offline";
+            offline: boolean;
+            registryId: string;
+            registryName?: string;
+        };
+        SkillRegistryListResponse: {
+            registries: components["schemas"]["SkillRegistryView"][];
+            trustModel: string;
+        };
+        SkillRegistryNoteView: {
+            /** @enum {string} */
+            metadataFreshness: "live" | "cached" | "stale" | "offline";
+            metadataOffline: boolean;
+            reason: string;
+            registryId: string;
+        };
+        SkillRegistryProbeView: {
+            assurance: string;
+            authType?: string;
+            detail: string;
+            /** Format: int64 */
+            latencyMs: number;
+            origin?: string;
+            protocolVersion?: string;
+            registryId: string;
+            reportedRegistryId?: string;
+            secretRef?: string;
+            /** @enum {string} */
+            state: "CONNECTED" | "AUTH_FAILED" | "TLS_FAILED" | "UNREACHABLE" | "INVALID_RESPONSE" | "POLICY_BLOCKED";
+            /** Format: date-time */
+            testedAt: string;
+        };
+        SkillRegistryRevocationSyncView: {
+            affectedInstalls: string[];
+            fetched: number;
+            newlyRecorded: number;
+            policy: string;
+            registryId: string;
+            revocations: components["schemas"]["SkillRegistryRevocationView"][];
+            /** Format: date-time */
+            syncedAt: string;
+            unreachable?: string;
+        };
+        SkillRegistryRevocationView: {
+            installed: boolean;
+            /** Format: date-time */
+            observedAt: string;
+            reason: string;
+            registryId: string;
+            /** Format: date-time */
+            revokedAt?: null | string;
+            skillId: string;
+            version: string;
+        };
+        SkillRegistryStatusView: {
+            /** Format: date-time */
+            lastProbeAt?: null | string;
+            lastProbeDetail?: string;
+            /** Format: int64 */
+            lastProbeLatencyMs?: number;
+            /** @enum {string} */
+            lastProbeState: "" | "CONNECTED" | "AUTH_FAILED" | "TLS_FAILED" | "UNREACHABLE" | "INVALID_RESPONSE" | "POLICY_BLOCKED";
+            /** Format: date-time */
+            lastRevocationSyncAt?: null | string;
+            /** Format: date-time */
+            lastSyncAt?: null | string;
+        };
+        SkillRegistryView: {
+            allowedOwners?: string[];
+            apiKeyHeader?: string;
+            /** @enum {string} */
+            authType: "none" | "bearer" | "api_key_header";
+            /** Format: date-time */
+            createdAt: string;
+            credentialSecretName?: string;
+            displayName: string;
+            enabled: boolean;
+            external: boolean;
+            id: string;
+            location: string;
+            networkPolicySummary: string;
+            owner?: string;
+            permittedPrivateCidrs?: string[];
+            pinnedPublisher?: string;
+            priority: number;
+            repository?: string;
+            status: components["schemas"]["SkillRegistryStatusView"];
+            tenantId?: string;
+            /** @enum {string} */
+            trustPolicy: "digest" | "pinned_publisher" | "signed" | "official" | "external_integrity" | "external_signed" | "external_org_allowlist" | "external_deny";
+            trustPolicyEnforceable: boolean;
+            /** @enum {string} */
+            type: "local" | "https" | "git" | "github";
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        SkillReleaseDetailResponse: {
+            freshnessNotice?: string;
+            installNotice: string;
+            offline: boolean;
+            release: components["schemas"]["SkillReleaseView"];
+            source: components["schemas"]["SkillRegistryFreshnessView"];
+            versions: components["schemas"]["SkillReleaseView"][];
+        };
+        SkillReleaseModeView: {
+            capabilities: string[];
+            description: string;
+            id: string;
+            name: string;
+            /** @enum {string} */
+            riskLevel: "low" | "medium" | "high" | "critical";
+        };
+        SkillReleaseView: {
+            aoMaxVersion?: string;
+            aoMinVersion: string;
+            artifactDigest: string;
+            attestationUrl?: string;
+            changelog?: string;
+            changelogUrl?: string;
+            /** @enum {string} */
+            compatibility: "compatible" | "ao-too-old" | "ao-too-new" | "unknown";
+            deprecated?: boolean;
+            deprecationNote?: string;
+            description: string;
+            executionModes: components["schemas"]["SkillReleaseModeView"][];
+            externalRevoked?: boolean;
+            externalRevokedReason?: string;
+            installed: boolean;
+            installedVersion?: string;
+            keyId?: string;
+            manifestDigest: string;
+            /** Format: date-time */
+            metadataAsOf?: string;
+            /** @enum {string} */
+            metadataFreshness: "live" | "cached" | "stale" | "offline";
+            metadataOffline: boolean;
+            name: string;
+            /** Format: date-time */
+            publishedAt: string;
+            publisher: string;
+            registryId: string;
+            registryName: string;
+            requestedCapabilities: string[];
+            revocationReason?: string;
+            revoked?: boolean;
+            /** @enum {string} */
+            riskLevel: "low" | "medium" | "high" | "critical";
+            signatureFormat?: string;
+            signatureKeyId?: string;
+            signatureScheme?: string;
+            signed: boolean;
+            skillId: string;
+            sourceCommit?: string;
+            sourceOwner?: string;
+            sourcePath?: string;
+            /** @enum {string} */
+            sourceProvider?: "" | "github";
+            sourceRepository?: string;
+            sourceShortCommit?: string;
+            sourceTag?: string;
+            sourceUrl?: string;
+            /** @enum {string} */
+            sourceVisibility?: "" | "public" | "private";
+            tagMoved?: boolean;
+            /** Format: date-time */
+            tagMovedAt?: null | string;
+            tagMovedExplanation?: string;
+            tagMovedFromCommit?: string;
+            /** @enum {string} */
+            trust: "revoked" | "unverified" | "verified" | "trusted";
+            trustExplanation: string;
+            updateAvailable: boolean;
+            version: string;
+        };
+        SkillRunnerStatusView: {
+            available: boolean;
+            controls: string[];
+            egressControlled: boolean;
+            isolated: boolean;
+            missingControls: string[];
+            needsEgressControl: boolean;
+            needsIsolation: boolean;
+            runnerId: string;
+            unavailable?: string;
+        };
+        SkillSigningKeyView: {
+            algorithm: string;
+            /** Format: date-time */
+            createdAt: string;
+            createdBy?: string;
+            fingerprint: string;
+            fingerprintShort: string;
+            isRootKey: boolean;
+            keyId: string;
+            /** @enum {string} */
+            origin: "certificate" | "administrative" | "built-in";
+            publicKey: string;
+            publisher: string;
+            revocationReason?: string;
+            /** Format: date-time */
+            revokedAt?: null | string;
+            rotatedFromKeyId?: string;
+            /** @enum {string} */
+            status: "active" | "retired" | "revoked";
+            trustRootId: string;
+            /** Format: date-time */
+            validFrom: string;
+            /** Format: date-time */
+            validUntil?: null | string;
+        };
+        SkillTrustListResponse: {
+            officialRootAvailable: boolean;
+            officialRootNote?: string;
+            revocations: components["schemas"]["SkillTrustRevocationView"][];
+            roots: components["schemas"]["SkillTrustRootView"][];
+            trustModel: string;
+        };
+        SkillTrustRevocationView: {
+            reason: string;
+            /** Format: date-time */
+            revokedAt: string;
+            revokedBy?: string;
+            /** @enum {string} */
+            subject: "signing_key" | "publisher" | "trust_root";
+            subjectId: string;
+        };
+        SkillTrustRootView: {
+            builtIn: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            createdBy?: string;
+            displayName: string;
+            keys: components["schemas"]["SkillSigningKeyView"][];
+            publisher: string;
+            revocationReason?: string;
+            /** Format: date-time */
+            revokedAt?: null | string;
+            /** @enum {string} */
+            status: "active" | "retired" | "revoked";
+            /** @enum {string} */
+            tier: "official" | "enterprise" | "external";
+            trustRootId: string;
+            /** Format: date-time */
+            updatedAt: string;
+            updatedBy?: string;
+            /** Format: date-time */
+            validFrom: string;
+            /** Format: date-time */
+            validUntil?: null | string;
+        };
+        SkillUpdateCheckResponse: {
+            revocationPolicy: string;
+            statuses: components["schemas"]["SkillUpdateStatusView"][];
+        };
+        SkillUpdateStatusView: {
+            latestVersion?: string;
+            origin: components["schemas"]["SkillInstallOriginView"];
+            revocationReason?: string;
+            revokedNow: boolean;
+            skillId: string;
+            unreachable?: string;
+            updateAvailable: boolean;
+            version: string;
         };
         SpawnOrchestratorRequest: {
             clean?: boolean;
@@ -2772,6 +8401,7 @@ export interface components {
             /** @enum {string} */
             mode?: "chat" | "tui";
             projectId: string;
+            /** @description The session's task specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long prompt is refused. */
             prompt?: string;
             /** @enum {string} */
             trackerProvider?: "github" | "gitlab";
@@ -2839,6 +8469,27 @@ export interface components {
             /** @description Review verdict: approved or changes_requested. */
             verdict: string;
         };
+        SubmitWorkReportCriterion: {
+            addressed: boolean;
+            criterion: string;
+            note?: string;
+        };
+        SubmitWorkReportRequest: {
+            claimedChangedPaths?: string[];
+            commit?: string;
+            criteria?: components["schemas"]["SubmitWorkReportCriterion"][];
+            followUp?: string[];
+            limitations?: string[];
+            risks?: string[];
+            summary?: string;
+            testsReported?: components["schemas"]["SubmitWorkReportTestClaim"][];
+        };
+        SubmitWorkReportTestClaim: {
+            /** @enum {string} */
+            claimedOutcome?: "claimed_passed" | "claimed_failed" | "claimed_skipped";
+            command: string;
+            note?: string;
+        };
         SwitchAgentRequest: {
             /** @description Optional retry key. Reusing it with a different request is rejected. */
             idempotencyKey?: string;
@@ -2849,6 +8500,54 @@ export interface components {
              * @enum {string}
              */
             targetHarness: "claude-code" | "codex";
+        };
+        TeamMemberView: {
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string} */
+            role: "maintainer" | "member";
+            teamId: string;
+            userId: string;
+        };
+        TeamResponse: {
+            team: components["schemas"]["TeamView"];
+        };
+        TeamView: {
+            /** Format: date-time */
+            createdAt: string;
+            description: string;
+            id: string;
+            name: string;
+            slug: string;
+            /** @enum {string} */
+            status: "active" | "archived";
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        TenantMemberView: {
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string} */
+            role: "owner" | "admin" | "member" | "viewer";
+            tenantId: string;
+            userId: string;
+        };
+        TenantResponse: {
+            tenant: components["schemas"]["TenantView"];
+        };
+        TenantView: {
+            /** Format: date-time */
+            createdAt: string;
+            description: string;
+            id: string;
+            name: string;
+            /** @enum {string} */
+            role?: "owner" | "admin" | "member" | "viewer";
+            slug: string;
+            /** @enum {string} */
+            status: "active" | "archived";
+            /** Format: date-time */
+            updatedAt: string;
         };
         TrackerIntakeConfig: {
             assignee?: string;
@@ -2884,6 +8583,16 @@ export interface components {
             /** @description New tab title for the shell terminal. Trimmed; must be non-empty. */
             title: string;
         };
+        UpdateTeamRequest: {
+            archived?: null | boolean;
+            description: string;
+            name: string;
+        };
+        UpdateTenantRequest: {
+            archived?: null | boolean;
+            description: string;
+            name: string;
+        };
         UsageHarnessResponse: {
             harness: string;
             models: components["schemas"]["UsageModelResponse"][];
@@ -2908,6 +8617,985 @@ export interface components {
             outputTokens: null | number;
             reasoningTokens: null | number;
             uncachedInputTokens: null | number;
+        };
+        UserResponse: {
+            user: components["schemas"]["AdminUserView"];
+        };
+        WorkItemLinkRequest: {
+            create?: boolean;
+            description?: string;
+            reference?: string;
+            /** @enum {string} */
+            scope: "project" | "run" | "task";
+            scopeId?: string;
+            syncEnabled: boolean;
+            title?: string;
+        };
+        WorkItemLinkResponse: {
+            createdAt: string;
+            externalItemId: string;
+            externalItemKey?: string;
+            externalProjectId: string;
+            id: string;
+            lastSeenAt?: string;
+            liveError?: string;
+            /** @enum {string} */
+            origin: "manual" | "created";
+            projectId: string;
+            /** @enum {string} */
+            provider: "plane";
+            /** @enum {string} */
+            readiness?: "ready" | "deferred" | "done" | "unknown";
+            /** @enum {string} */
+            scope: "project" | "run" | "task";
+            scopeId?: string;
+            stale: boolean;
+            state?: string;
+            stateName?: string;
+            syncEnabled: boolean;
+            title?: string;
+            url?: string;
+            workspace: string;
+        };
+        WorkItemLinkSyncRequest: {
+            enabled: boolean;
+        };
+        WorkItemLinksResponse: {
+            links: components["schemas"]["WorkItemLinkResponse"][];
+        };
+        WorkItemsAuditEntry: {
+            /** Format: int64 */
+            attempts: number;
+            createdAt: string;
+            detail?: string;
+            /** Format: int64 */
+            durationMs: number;
+            errorKind?: string;
+            externalItemId?: string;
+            externalItemKey?: string;
+            id: string;
+            operation: string;
+            /** @enum {string} */
+            outcome: "ok" | "retryable" | "failed" | "skipped";
+            provider: string;
+        };
+        WorkItemsAuditResponse: {
+            entries: components["schemas"]["WorkItemsAuditEntry"][];
+        };
+        WorkItemsConfigResponse: {
+            baseUrl?: string;
+            connected: boolean;
+            degraded: boolean;
+            enabled: boolean;
+            externalProjectId?: string;
+            externalProjectKey?: string;
+            externalProjectName?: string;
+            lastCheckAt?: string;
+            lastCheckError?: string;
+            projectId: string;
+            /** @enum {string} */
+            provider: "plane";
+            syncComments: boolean;
+            syncStates: boolean;
+            tokenConfigured: boolean;
+            tokenFromEnv: boolean;
+            workspace?: string;
+        };
+        WorkItemsConfigUpdate: {
+            apiToken?: null | string;
+            baseUrl?: null | string;
+            enabled?: null | boolean;
+            externalProjectId?: null | string;
+            syncComments?: null | boolean;
+            syncStates?: null | boolean;
+            workspace?: null | string;
+        };
+        WorkItemsConnectionResponse: {
+            projects: number;
+            /** @enum {string} */
+            provider: "plane";
+            workspace: string;
+            workspaceName?: string;
+        };
+        WorkItemsHealthResponse: {
+            configured: boolean;
+            connected: boolean;
+            degraded: boolean;
+            enabled: boolean;
+            /** Format: int64 */
+            failed: number;
+            lastCheckAt?: string;
+            lastCheckError?: string;
+            links: number;
+            /** Format: int64 */
+            pending: number;
+        };
+        WorkItemsProviderProject: {
+            description?: string;
+            id: string;
+            identifier?: string;
+            name: string;
+        };
+        WorkItemsProviderProjectsResponse: {
+            projects: components["schemas"]["WorkItemsProviderProject"][];
+        };
+        WorkItemsSyncResponse: {
+            claimed: number;
+            deferred: number;
+            delivered: number;
+            failed: number;
+            skipped: number;
+        };
+        WorkReportResponse: {
+            superseded?: boolean;
+            truncated?: string[];
+            version: string;
+            workflowRunId: string;
+            workflowStepId: string;
+        };
+        WorkflowAttemptView: {
+            /** Format: int64 */
+            attemptNumber: number;
+            /** @enum {string} */
+            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state" | "reviewer_launch_failed" | "fix_budget_exhausted" | "verify_command_failed" | "verify_timeout" | "verify_environment_error" | "verify_artifact_missing" | "verify_artifact_mismatch" | "verify_workspace_changed" | "verify_ambiguous" | "capacity_exhausted" | "binary_missing" | "provider_auth_required" | "provider_workspace_trust_required" | "provider_preflight_failed";
+            /** Format: date-time */
+            finishedAt?: null | string;
+            harness?: string;
+            id: string;
+            model?: string;
+            /** @enum {string} */
+            outcome?: "succeeded" | "failed" | "cancelled";
+            /** Format: date-time */
+            retryAfter?: null | string;
+            /** Format: date-time */
+            startedAt: string;
+        };
+        WorkflowBoardCountsView: {
+            active: number;
+            archived: number;
+            completed: number;
+            needsAttention: number;
+            waiting: number;
+            working: number;
+        };
+        WorkflowBoardEntryView: {
+            /** Format: date-time */
+            archivedAt?: null | string;
+            /** @enum {string} */
+            attention?: "ao_internal" | "human_decision";
+            attentionAction?: string;
+            attentionReason?: string;
+            automaticActionActive: boolean;
+            branchWait?: components["schemas"]["WorkflowBranchWaitView"];
+            /** Format: int64 */
+            currentTaskOrdinal?: number;
+            currentTaskTitle?: string;
+            errorClass?: string;
+            /** @enum {string} */
+            executionMode: "autonomous" | "manual";
+            harness?: string;
+            /** Format: date-time */
+            lastActivityAt: string;
+            /** Format: date-time */
+            lastMeaningfulActivityAt: string;
+            model?: string;
+            /** Format: date-time */
+            nextWakeAt?: null | string;
+            objective: string;
+            objectiveTruncated?: boolean;
+            /** @enum {string} */
+            phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "retrying" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
+            presentation?: components["schemas"]["WorkflowPresentationView"];
+            projectId: string;
+            repairGeneration?: number;
+            repairOfWorkflowId?: string;
+            repairs?: components["schemas"]["WorkflowBoardRepairView"][];
+            requiresHuman: boolean;
+            reviewCycles: number;
+            sessionId?: string;
+            /** @enum {string} */
+            stage: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
+            /** @enum {string} */
+            state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
+            steps?: components["schemas"]["WorkflowStepProgressView"][];
+            /** @enum {string} */
+            strategy?: "task" | "autonomous" | "master";
+            tasks?: components["schemas"]["WorkflowBoardTaskView"][];
+            tasksBlocked: number;
+            tasksCompleted: number;
+            tasksEligible: number;
+            tasksFailed: number;
+            tasksNeedsAttention: number;
+            tasksRunning: number;
+            tasksTotal: number;
+            usage?: components["schemas"]["ControllersCompactRunUsageResponse"];
+            waitReason?: string;
+            workflowId: string;
+        };
+        WorkflowBoardRepairView: {
+            active: boolean;
+            attempt: number;
+            budget: number;
+            failed?: boolean;
+            /** Format: date-time */
+            lastMeaningfulActivityAt: string;
+            requiresHuman: boolean;
+            /** @enum {string} */
+            stage: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
+            /** @enum {string} */
+            state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
+            succeeded?: boolean;
+            summaryCode?: string;
+            workflowId: string;
+        };
+        WorkflowBoardResponse: {
+            counts: components["schemas"]["WorkflowBoardCountsView"];
+            limit: number;
+            matched: number;
+            offset: number;
+            workflows: components["schemas"]["WorkflowBoardEntryView"][];
+        };
+        WorkflowBoardTaskView: {
+            id?: string;
+            /** Format: int64 */
+            ordinal: number;
+            phase?: string;
+            planner?: components["schemas"]["WorkflowTaskPlannerView"];
+            /** @enum {string} */
+            state: "blocked" | "eligible" | "running" | "needs_attention" | "completed" | "failed" | "cancelled";
+            steps?: components["schemas"]["WorkflowStepProgressView"][];
+            title: string;
+            /** @enum {string} */
+            waitReason?: "waiting_for_dependencies" | "waiting_for_write_conflict";
+            workflowId?: string;
+        };
+        WorkflowBranchWaitView: {
+            autoResume?: boolean;
+            branch: string;
+            heldByReason?: string;
+            heldBySessionId?: string;
+            /** @enum {string} */
+            heldByState?: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
+            heldByWorkflowRunId?: string;
+            repoPath?: string;
+        };
+        WorkflowCapacityWaitProviderView: {
+            /** @enum {string} */
+            capacity: "available" | "limited" | "cooldown" | "unavailable" | "unknown";
+            /** Format: date-time */
+            cooldownUntil?: null | string;
+            displayName?: string;
+            failureClass?: string;
+            harness?: string;
+            /** Format: int64 */
+            healthAgeSeconds?: number;
+            healthReason?: string;
+            /** @enum {string} */
+            healthState?: "available" | "cooldown" | "unavailable" | "unknown";
+            /** Format: date-time */
+            observedAt?: null | string;
+            probeEligible?: boolean;
+            profileId: string;
+            provider?: string;
+            /** @enum {string} */
+            recovery?: "cooldown" | "probe" | "manual";
+        };
+        WorkflowCapacityWaitView: {
+            /** Format: int64 */
+            attempt?: number;
+            independenceRequired?: boolean;
+            /** Format: date-time */
+            knownResetAt?: null | string;
+            /** Format: date-time */
+            nextAttemptAt?: null | string;
+            probing?: boolean;
+            providers?: components["schemas"]["WorkflowCapacityWaitProviderView"][];
+            /** @enum {string} */
+            reason: "provider_health_stale" | "provider_cooldown" | "provider_unavailable" | "no_eligible_provider";
+            role?: string;
+        };
+        WorkflowContextEconomyView: {
+            compactionParentRunId?: string;
+            compactionRequestedBy?: string;
+            /** @enum {string} */
+            compactionSource?: "explicit" | "inherited";
+            contextPerCallOverridden?: boolean;
+            /** Format: int64 */
+            contextPerCallWarnTokens?: number;
+            sessionCompactionEnabled: boolean;
+        };
+        WorkflowExecutionStrategyView: {
+            depth?: number;
+            /** @enum {string} */
+            effectiveStrategy: "task" | "autonomous" | "master";
+            parentRunId?: string;
+            policyVersion?: string;
+            reasonCode?: string;
+            /** @enum {string} */
+            requestedStrategy?: "task" | "autonomous" | "master" | "auto";
+            /** @enum {string} */
+            selectionSource: "explicit" | "policy" | "inherited" | "recovered";
+        };
+        WorkflowExplorationResponse: {
+            agents: components["schemas"]["AgentExplorationResponse"][];
+            contextSources: components["schemas"]["ControllersRunContextSourcesResponse"];
+            memoryPacks: components["schemas"]["ControllersRunMemoryPackResponse"][];
+            projectId: string;
+            quality: components["schemas"]["RunQualitySignalsResponse"];
+            recorded: boolean;
+            runId: string;
+            totals: components["schemas"]["AgentExplorationResponse"];
+        };
+        WorkflowIntegrationFreshReviewException: {
+            approvedBy: string;
+            childRunId?: string;
+            fingerprint: string;
+            generation: number;
+            /** Format: date-time */
+            grantedAt: string;
+            masterRunId?: string;
+            priorAttempts: number;
+            reason: string;
+            reauthorized?: boolean;
+            taskId: string;
+        };
+        WorkflowMasterPlan: {
+            objective: string;
+            steps: components["schemas"]["WorkflowPlannedStep"][];
+            summary: string;
+            version: string;
+        };
+        WorkflowPendingChangeView: {
+            path: string;
+            status?: string;
+        };
+        WorkflowPendingChangesResponse: {
+            available: boolean;
+            branch?: string;
+            changes?: components["schemas"]["WorkflowPendingChangeView"][];
+            dirty: boolean;
+            headSha?: string;
+            historical?: boolean;
+            /** @enum {string} */
+            placement?: "direct_branch" | "isolated_worktree";
+            proposedMessage?: string;
+            repoPath?: string;
+            unavailable?: string;
+            worktreePath?: string;
+        };
+        WorkflowPlanReuseView: {
+            contextDrift?: string;
+            planHash?: string;
+            reason?: string;
+            /** @enum {string} */
+            reusability: "not_applicable" | "exact" | "stale_but_revalidatable" | "not_reusable";
+            /** Format: int64 */
+            revision: number;
+            taskCount: number;
+        };
+        WorkflowPlanValidation: {
+            errors: string[];
+            valid: boolean;
+        };
+        WorkflowPlanView: {
+            approvalMode: string;
+            commandStatus?: string;
+            errorClass?: string;
+            generated?: components["schemas"]["WorkflowMasterPlan"];
+            model?: string;
+            planHash?: string;
+            promptContextVersion: string;
+            provider?: string;
+            status: string;
+            /** Format: date-time */
+            updatedAt: string;
+            validation?: components["schemas"]["WorkflowPlanValidation"];
+        };
+        WorkflowPlannedSafeOverlap: {
+            paths?: string[];
+            reason: string;
+            with: string;
+        };
+        WorkflowPlannedStep: {
+            acceptanceCriteria: string[];
+            dependencies: string[];
+            description: string;
+            files?: string[];
+            id: string;
+            packages?: string[];
+            safeWriteOverlaps?: components["schemas"]["WorkflowPlannedSafeOverlap"][];
+            title: string;
+            verify: components["schemas"]["WorkflowVerificationPlanType2"];
+            writeIntent?: string;
+        };
+        WorkflowPresentationAction: {
+            disabledReason?: string;
+            enabled: boolean;
+            /** @enum {string} */
+            id: "continue" | "cancel" | "repair" | "commit_and_continue" | "view_changes" | "view_blocking_workflow" | "wait" | "authenticate" | "revalidate_plan" | "regenerate_plan" | "open_session" | "integrate" | "use_isolated_worktree";
+            primary?: boolean;
+            target?: string;
+        };
+        WorkflowPresentationEvent: {
+            /** Format: date-time */
+            at: string;
+            detail?: string;
+            /** @enum {string} */
+            kind: "started" | "planned" | "worker_launched" | "work_completed" | "review_started" | "review_verdict" | "fix_started" | "repair_started" | "verified" | "integrated" | "provider_failed" | "stopped" | "completed" | "cancelled" | "failed";
+        };
+        WorkflowPresentationPlacement: {
+            baseBranch?: string;
+            choiceReason?: string;
+            /** @enum {string} */
+            chosenBy: "user" | "automatic" | "unknown";
+            executionBranch?: string;
+            /** Format: int64 */
+            generation?: number;
+            integratedSha?: string;
+            /** @enum {string} */
+            integration: "not_required" | "pending" | "in_progress" | "integrated" | "failed";
+            integrationRequired: boolean;
+            mergeTarget?: string;
+            repoPath?: string;
+            /** @enum {string} */
+            state?: "selected" | "waiting" | "preparing" | "ready" | "active" | "reviewing" | "integrating" | "integrated" | "conflict" | "preserved" | "terminal";
+            /** @enum {string} */
+            type: "direct_branch" | "isolated_worktree";
+            worktreePath?: string;
+        };
+        WorkflowPresentationStage: {
+            optional?: boolean;
+            /** @enum {string} */
+            stage: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
+            /** @enum {string} */
+            state: "completed" | "current" | "future" | "blocked" | "skipped";
+        };
+        WorkflowPresentationTechnical: {
+            attemptId?: string;
+            /** Format: int64 */
+            attemptNumber?: number;
+            attention?: string;
+            attentionDetail?: string;
+            attentionReason?: string;
+            /** @enum {string} */
+            authority?: "active" | "concluded" | "superseded" | "legacy_unproven";
+            /** Format: date-time */
+            dispatchedAt?: null | string;
+            errorClass?: string;
+            /** Format: date-time */
+            lastEventAt?: null | string;
+            lastEventPhase?: string;
+            /** Format: int64 */
+            lifecycleGeneration?: number;
+            /** Format: date-time */
+            nextWakeAt?: null | string;
+            phase?: string;
+            /** Format: int64 */
+            placementGeneration?: number;
+            provider?: string;
+            repairRunId?: string;
+            runState?: string;
+            sessionId?: string;
+            waitReason?: string;
+        };
+        WorkflowPresentationView: {
+            actions?: components["schemas"]["WorkflowPresentationAction"][];
+            automaticActionActive: boolean;
+            placement?: components["schemas"]["WorkflowPresentationPlacement"];
+            progress?: components["schemas"]["WorkflowPresentationStage"][];
+            recommendedAction?: string;
+            requiresHuman: boolean;
+            /** @enum {string} */
+            stage: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
+            summaryCode: string;
+            technical: components["schemas"]["WorkflowPresentationTechnical"];
+            timeline?: components["schemas"]["WorkflowPresentationEvent"][];
+        };
+        WorkflowQuestionChoiceResponse: {
+            id: string;
+            label: string;
+        };
+        WorkflowQuestionResponse: {
+            /** @enum {string} */
+            answerSource?: "" | "policy" | "human" | "resolver" | "autonomous";
+            answerText?: string;
+            answeredAt?: null | string;
+            askingHarness?: string;
+            askingRole?: string;
+            /** @enum {string} */
+            autonomyMode?: "" | "ask_always" | "auto_decide_low_risk" | "full_autonomy";
+            /** @enum {string} */
+            certainty: "actual" | "inferred" | "unknown";
+            /** @enum {string} */
+            classification: "policy_resolvable" | "auto_resolvable" | "human_required" | "ambiguous";
+            classificationReason?: string;
+            createdAt: string;
+            delivered: boolean;
+            deliveredAt?: null | string;
+            id: string;
+            questionText: string;
+            resolverAdvisoryAnswer?: string;
+            resolverEvidenceReferences?: string[];
+            resolverHarness?: string;
+            resolverProvider?: string;
+            resolverReasonSummary?: string;
+            sessionId?: string;
+            /** @enum {string} */
+            state: "pending" | "resolving" | "answered" | "human_required" | "cancelled";
+            structuredChoices?: components["schemas"]["WorkflowQuestionChoiceResponse"][];
+            workflowRunId: string;
+            workflowStepId?: string;
+        };
+        WorkflowQuestionResponseBody: {
+            question: components["schemas"]["WorkflowQuestionResponse"];
+        };
+        WorkflowRecoveryResponse: {
+            plan: components["schemas"]["WorkflowPlanReuseView"];
+            recovery: components["schemas"]["WorkflowRecoveryView"];
+            repair: components["schemas"]["WorkflowRepairPlanView"];
+            status?: components["schemas"]["ControllersWorkflowRecoveryStatusView"];
+            workerOwnership?: components["schemas"]["WorkflowWorkerOwnershipView"][];
+        };
+        WorkflowRecoveryView: {
+            automaticAllowed: boolean;
+            blockingCondition?: string;
+            execution?: components["schemas"]["ControllersWorkflowRecoveryExecutionView"];
+            explanation?: string;
+            /** @enum {string} */
+            obligation?: "none" | "plan_generation" | "plan_approval" | "plan_dispatch" | "work_dispatch" | "work_observation" | "review_dispatch" | "review_observation" | "fix_delivery" | "fix_observation" | "verify" | "convergence" | "terminal";
+            obligationDetail?: string;
+            /** @enum {string} */
+            planReusable: "not_applicable" | "exact" | "stale_but_revalidatable" | "not_reusable";
+            reasonCode?: string;
+            /** @enum {string} */
+            recommendedAction: "resume" | "reuse_plan" | "regenerate_plan" | "repair" | "authenticate" | "inspect_repository" | "operator_action" | "restart_required" | "abandon" | "terminal" | "unrecoverable";
+            repairAvailable: boolean;
+            /** @enum {string} */
+            repairEligibility: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition" | "artifact_unprovable";
+            stepId?: string;
+            /** @enum {string} */
+            strategy?: "task" | "autonomous" | "master";
+            targetRunId?: string;
+            taskId?: string;
+            version?: string;
+        };
+        WorkflowRepairArtifactView: {
+            baseSha?: string;
+            branch?: string;
+            changedFiles?: string[];
+            detail?: string;
+            findingsCount?: number;
+            hasArtifact: boolean;
+            originRunId?: string;
+            originTaskId?: string;
+            /** @enum {string} */
+            placement?: "direct_branch" | "isolated_worktree";
+            /** @enum {string} */
+            refusal?: "repair_artifact_unavailable" | "repair_artifact_uncommitted" | "repair_workspace_mismatch";
+            resolved: boolean;
+            reviewRunId?: string;
+            /** @enum {string} */
+            source?: "observed_worktree" | "reconstructed_from_ledger" | "shared_checkout" | "no_artifact";
+        };
+        WorkflowRepairIntentView: {
+            acceptanceCriteria?: string[];
+            authorizedBy?: string;
+            conditionReason: string;
+            evidenceDigest: string;
+            generation: number;
+            id: string;
+            /** @enum {string} */
+            mode?: "disabled" | "suggest" | "automatic";
+            policyVersion?: string;
+            projectId: string;
+            repairRunId?: string;
+            /** @enum {string} */
+            strategy: "task" | "autonomous" | "master";
+            targetRunId: string;
+            targetStepId?: string;
+        };
+        WorkflowRepairPlanView: {
+            artifact?: components["schemas"]["WorkflowRepairArtifactView"];
+            automaticAllowed: boolean;
+            budget: number;
+            /** @enum {string} */
+            eligibility: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition" | "artifact_unprovable";
+            intent?: components["schemas"]["WorkflowRepairIntentView"];
+            /** @enum {string} */
+            mode: "disabled" | "suggest" | "automatic";
+            reason?: string;
+            spent: number;
+        };
+        WorkflowRepairResponse: {
+            intent?: components["schemas"]["WorkflowRepairIntentView"];
+            repair: components["schemas"]["WorkflowRepairPlanView"];
+            workflow: components["schemas"]["WorkflowRunDetailView"];
+        };
+        WorkflowRepairStateView: {
+            active: boolean;
+            attempt: number;
+            budget: number;
+            cessionChain?: components["schemas"]["ControllersWorkflowBranchCessionChainView"];
+            exhausted: boolean;
+            quiescenceReason?: string;
+            quiescent: boolean;
+            runId?: string;
+            waitingForFreshReview: boolean;
+        };
+        WorkflowResumeView: {
+            /** @enum {string} */
+            obligation: "none" | "plan_generation" | "plan_approval" | "plan_dispatch" | "work_dispatch" | "work_observation" | "review_dispatch" | "review_observation" | "fix_delivery" | "fix_observation" | "verify" | "convergence" | "terminal";
+            obligationDetail?: string;
+            performed: boolean;
+        };
+        WorkflowReviewDepthView: {
+            policyVersion?: string;
+            /** @enum {string} */
+            requestedDepth: "none" | "light" | "deep";
+            /** @enum {string} */
+            source?: "explicit" | "policy" | "recovered";
+        };
+        WorkflowReviewPolicyDecision: {
+            complexity: string;
+            decision: string;
+            /** Format: date-time */
+            evaluatedAt: string;
+            facts: components["schemas"]["WorkflowReviewRiskFacts"];
+            policyVersion: string;
+            reasons: string[];
+        };
+        WorkflowReviewRiskFacts: {
+            acceptanceCriteriaEmpty: boolean;
+            changeSetBaseFrom?: string;
+            changeSetBaseSha?: string;
+            changeSetHeadSha?: string;
+            changedFileCount: number;
+            changedFilePaths: string[];
+            changedFilesSource?: string;
+            changedFilesUnprovable?: boolean;
+            committedChangedFileCount?: number;
+            hasExactContentCheckForSoleChangedFile: boolean;
+            priorWorkProviderAttempts: number;
+            unprovableChangeSetReason?: string;
+            verifyCommandCount: number;
+            verifyFileCheckCount: number;
+        };
+        WorkflowRunDetailView: {
+            advice?: components["schemas"]["ControllersWorkflowAdviceView"];
+            integrationState?: components["schemas"]["ControllersWorkflowIntegrationStateView"];
+            plan?: components["schemas"]["WorkflowPlanView"];
+            planReuse?: components["schemas"]["WorkflowPlanReuseView"];
+            presentation?: components["schemas"]["WorkflowPresentationView"];
+            questions?: components["schemas"]["WorkflowQuestionResponse"][];
+            resume?: components["schemas"]["WorkflowResumeView"];
+            run: components["schemas"]["WorkflowRunView"];
+            steps: components["schemas"]["WorkflowStepView"][];
+            tasks?: components["schemas"]["WorkflowTaskView"][];
+            usage?: components["schemas"]["ControllersWorkflowUsageResponse"];
+        };
+        WorkflowRunResponse: {
+            workflow: components["schemas"]["WorkflowRunDetailView"];
+        };
+        WorkflowRunView: {
+            /** Format: date-time */
+            archivedAt?: null | string;
+            /** @enum {string} */
+            attention?: "ao_internal" | "human_decision";
+            attentionAction?: string;
+            attentionReason?: string;
+            attentionWorkflowId?: string;
+            automaticActionActive?: boolean;
+            branchWait?: components["schemas"]["WorkflowBranchWaitView"];
+            canContinue: boolean;
+            /** Format: date-time */
+            cancelledAt?: null | string;
+            capacityWait?: components["schemas"]["WorkflowCapacityWaitView"];
+            /** Format: date-time */
+            completedAt?: null | string;
+            contextEconomy?: components["schemas"]["WorkflowContextEconomyView"];
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string} */
+            executionMode: "autonomous" | "manual";
+            executionStrategy?: components["schemas"]["WorkflowExecutionStrategyView"];
+            id: string;
+            /** Format: date-time */
+            lastActivityAt: string;
+            /** Format: date-time */
+            lastMeaningfulActivityAt?: null | string;
+            maxFixCycles?: null | number;
+            nextAction?: string;
+            /** Format: date-time */
+            nextWakeAt?: null | string;
+            objective: string;
+            origin?: components["schemas"]["ControllersWorkflowRunOriginView"];
+            /** @enum {string} */
+            phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "retrying" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
+            projectId: string;
+            /** @enum {string} */
+            recommendedAction?: "continue" | "cancel" | "repair" | "commit_and_continue" | "view_changes" | "view_blocking_workflow" | "wait" | "authenticate" | "revalidate_plan" | "regenerate_plan" | "open_session" | "integrate" | "use_isolated_worktree";
+            recovery?: components["schemas"]["WorkflowRecoveryView"];
+            repair?: components["schemas"]["WorkflowRepairStateView"];
+            repairOfWorkflowId?: string;
+            requiresHuman?: boolean;
+            reviewDepth?: components["schemas"]["WorkflowReviewDepthView"];
+            /** @enum {string} */
+            stage?: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
+            /** @enum {string} */
+            state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
+            summaryCode?: string;
+            /** Format: date-time */
+            updatedAt: string;
+            waitReason?: string;
+            /** Format: int64 */
+            wakeAttemptCount?: number;
+            workerLiveness?: components["schemas"]["ControllersWorkerLivenessResponse"];
+        };
+        WorkflowStepProgressView: {
+            /** @enum {string} */
+            kind: "plan" | "work" | "review" | "fix" | "verify";
+            /** @enum {string} */
+            state: "pending" | "ready" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+        };
+        WorkflowStepView: {
+            assignedHarness?: string;
+            attempts: components["schemas"]["WorkflowAttemptView"][];
+            branch?: string;
+            /** Format: date-time */
+            completedAt?: null | string;
+            /** Format: date-time */
+            createdAt: string;
+            dependsOnStepId?: string;
+            findingsSummary?: string;
+            fixDelivery?: components["schemas"]["ControllersFixDeliveryView"];
+            headSha?: string;
+            id: string;
+            /** @enum {string} */
+            kind: "plan" | "work" | "review" | "fix" | "verify" | "advance";
+            nextAction?: string;
+            /** Format: int64 */
+            ordinal: number;
+            reviewPolicy?: components["schemas"]["WorkflowReviewPolicyDecision"];
+            reviewRunId?: string;
+            reviewer?: string;
+            routing?: components["schemas"]["ControllersRoutingDecisionView"];
+            sessionId?: string;
+            /** @enum {string} */
+            state: "pending" | "ready" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+            target?: string;
+            /** Format: date-time */
+            updatedAt: string;
+            /** @enum {string} */
+            verdict?: "" | "approved" | "changes_requested";
+            verification?: components["schemas"]["WorkflowVerifyResult"];
+            worktreePath?: string;
+        };
+        WorkflowStrategySignals: {
+            /** @description Caller's step estimate; 0 means no estimate. */
+            expectedSteps?: number;
+            /** @description Several coordinated workstreams under one initiative. */
+            multiWorkstream?: boolean;
+            /** @description How many repositories the work spans. */
+            repositoryCount?: number;
+            /** @description The objective must be broken down before anything can execute. */
+            requiresDecomposition?: boolean;
+            /** @enum {string} */
+            size?: "small" | "medium" | "large";
+            /** @description The caller already supplied a plan/objective hierarchy. */
+            suppliedPlanHierarchy?: boolean;
+        };
+        WorkflowTaskDowngradeView: {
+            conflicts?: string[];
+            detail?: string;
+            from: string;
+            reason?: string;
+            serial?: boolean;
+            to: string;
+        };
+        WorkflowTaskIntegrationStateView: {
+            attentionReason?: string;
+            baseSha?: string;
+            conflictFiles?: string[];
+            /** @enum {string} */
+            outcome?: "attempting" | "integrated" | "needs_attention";
+            replayed?: boolean;
+            sourceSha?: string;
+            /** @enum {string} */
+            strategy?: "fast_forward" | "rebase_fast_forward" | "cherry_pick" | "merge_commit" | "no_op";
+            targetAfterSha?: string;
+            targetBeforeSha?: string;
+        };
+        WorkflowTaskPlannerView: {
+            dependencies: string[];
+            downgrade?: components["schemas"]["WorkflowTaskDowngradeView"];
+            /** @enum {string} */
+            executionMode?: "direct_branch" | "isolated_worktree" | "smart_parallel_worktrees";
+            /** @enum {string} */
+            executionStrategy?: "parallel" | "sequential" | "serialized";
+            integration?: components["schemas"]["WorkflowTaskIntegrationStateView"];
+            integrationDependencies: string[];
+            parallelGroup: number;
+            parallelGroupSize: number;
+            /** @enum {string} */
+            status?: "running_in_parallel" | "waiting_for_dependency" | "waiting_for_conflict" | "ready_to_integrate" | "integrating" | "conflict" | "integrated";
+            /** @enum {string} */
+            waitingReason?: "waiting_for_dependencies" | "waiting_for_write_conflict";
+            worktree?: components["schemas"]["WorkflowTaskWorktreeView"];
+            writeScope: components["schemas"]["WorkflowTaskWriteScopeView"];
+        };
+        WorkflowTaskView: {
+            acceptanceCriteria: string[];
+            dependencies: string[];
+            description: string;
+            executionWorkflowId?: string;
+            id: string;
+            /** Format: int64 */
+            number: number;
+            planner?: components["schemas"]["WorkflowTaskPlannerView"];
+            state: string;
+            title: string;
+            verify: components["schemas"]["WorkflowVerificationPlanType2"];
+        };
+        WorkflowTaskWorktreeView: {
+            baseSha?: string;
+            branch?: string;
+            branchDeleted?: boolean;
+            integratedSha?: string;
+            path?: string;
+            /** @enum {string} */
+            state?: "creating" | "active" | "integrated" | "released" | "preserved" | "failed";
+            targetBranch?: string;
+        };
+        WorkflowTaskWriteScopeView: {
+            components: string[];
+            files: string[];
+            packages: string[];
+            readPaths: string[];
+            /** @enum {string} */
+            source?: "estimated" | "observed";
+            writePaths: string[];
+        };
+        WorkflowVerificationCommand: {
+            args?: string[];
+            command: string;
+            requiredExitCode: number;
+            retrySafe: boolean;
+            timeoutSeconds?: number;
+            workingDirectory?: string;
+        };
+        WorkflowVerificationCommandCheck: {
+            args?: string[];
+            command: string;
+            requiredExitCode: number;
+            retrySafe: boolean;
+            timeoutSeconds?: number;
+            workingDirectory?: string;
+        };
+        WorkflowVerificationFile: {
+            exactContent?: null | string;
+            exists: boolean;
+            path: string;
+            sha256?: string;
+        };
+        WorkflowVerificationFileCheck: {
+            exactContent?: null | string;
+            exists: boolean;
+            path: string;
+            sha256?: string;
+        };
+        WorkflowVerificationPlan: {
+            commands?: components["schemas"]["WorkflowVerificationCommand"][];
+            files?: components["schemas"]["WorkflowVerificationFile"][];
+        };
+        WorkflowVerificationPlanType2: {
+            commands?: components["schemas"]["WorkflowVerificationCommandCheck"][];
+            files?: components["schemas"]["WorkflowVerificationFileCheck"][];
+        };
+        WorkflowVerifiedWorkspaceState: {
+            branch?: string;
+            changes?: string[];
+            dirty: boolean;
+            fingerprint: string;
+            headSHA?: string;
+            staged: boolean;
+            untracked: boolean;
+            worktreePath?: string;
+        };
+        WorkflowVerifyCheckResult: {
+            /** Format: int64 */
+            durationMs?: number;
+            exitCode?: null | number;
+            failureReason?: string;
+            kind: string;
+            label: string;
+            passed: boolean;
+            resolvedPath?: string;
+            stderrTail?: string;
+            stdoutTail?: string;
+        };
+        WorkflowVerifyContextResolution: {
+            label: string;
+            reason: string;
+            repaired?: boolean;
+            requested: string;
+            resolved: string;
+            rewrittenArgs?: string[];
+        };
+        WorkflowVerifyInfraFailure: {
+            command: string;
+            detail: string;
+            directory?: string;
+            kind: string;
+            repairable?: boolean;
+            transient?: boolean;
+        };
+        WorkflowVerifyResult: {
+            checks: components["schemas"]["WorkflowVerifyCheckResult"][];
+            contextResolutions?: components["schemas"]["WorkflowVerifyContextResolution"][];
+            errorClass?: string;
+            infraFailure?: components["schemas"]["WorkflowVerifyInfraFailure"];
+            passed: boolean;
+            pathContext?: string;
+            postFingerprint: string;
+            preFingerprint: string;
+            recoveryGeneration?: number;
+            reusedCheckCount?: number;
+            reviewedFingerprint: string;
+            scope?: components["schemas"]["WorkflowVerifyScopeDecision"];
+            scopeAppliedTransforms?: string[];
+            stopReason?: string;
+            supersededByFreshReview?: boolean;
+            targetKey: string;
+            verifiedState?: components["schemas"]["WorkflowVerifiedWorkspaceState"];
+            version: string;
+        };
+        WorkflowVerifyScopeDecision: {
+            changedFiles: string[];
+            packageDir?: string;
+            policyVersion: string;
+            reasons: string[];
+            scope: string;
+        };
+        WorkflowWorkerOwnershipView: {
+            attemptId?: string;
+            detail?: string;
+            dispatchGeneration?: string;
+            dispatchPhase?: string;
+            /** Format: date-time */
+            lastSignalAt?: null | string;
+            launchState?: string;
+            observedInstallationId?: string;
+            observedInstanceId?: string;
+            /** @enum {string} */
+            ownership: "proven" | "unproven" | "legacy_unknown" | "not_applicable";
+            proof?: string;
+            recoveryDecision?: string;
+            recoveryReason?: string;
+            runtimeInstanceId?: string;
+            sessionId?: string;
+            stepId: string;
+            stepKind: string;
+            stepState: string;
         };
         WorkspaceFileResponse: {
             additions: number;
@@ -2942,10 +9630,13 @@ export interface components {
             status: "unmodified" | "modified" | "added" | "deleted" | "renamed";
         };
         WorkspaceRepo: {
+            defaultBranch?: string;
             gitStatus?: string;
             name: string;
             relativePath: string;
             repo: string;
+            /** @enum {string} */
+            transport?: "https" | "ssh" | "unknown";
         };
     };
     responses: never;
@@ -3208,6 +9899,442 @@ export interface operations {
             };
         };
     };
+    adminResetPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersAdminResetPasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersAdminResetPasswordResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersLoginResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    logout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersLogoutResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getCurrentUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersMeResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    completeOIDCLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Found */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    claimOIDCLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersOIDCClaimRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersOIDCClaimResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    startOIDCLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersOIDCStartRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersOIDCStartResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getAuthProviders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersAuthProvidersResponse"];
+                };
+            };
+        };
+    };
+    registerFirstUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersRegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersLoginResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getAuthSetupStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSetupStatusResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     executeBrowserCommand: {
         parameters: {
             query?: never;
@@ -3369,6 +10496,44 @@ export interface operations {
             };
         };
     };
+    listCapacity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListCapacityResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     runDevImportProjects: {
         parameters: {
             query?: never;
@@ -3420,6 +10585,64 @@ export interface operations {
             };
         };
     };
+    testGitHubConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnvironmentGitHubStatus"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getEnvironmentStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnvironmentStatus"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     streamEvents: {
         parameters: {
             query?: {
@@ -3452,6 +10675,104 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getExecutionPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersExecutionPolicyResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    putExecutionPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersPutExecutionPolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersExecutionPolicyResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4082,6 +11403,44 @@ export interface operations {
             };
         };
     };
+    notificationUnreadCount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersNotificationUnreadCountResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     listOrchestrators: {
         parameters: {
             query?: never;
@@ -4524,6 +11883,173 @@ export interface operations {
             };
         };
     };
+    getProjectAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectAccessResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    grantProjectAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GrantProjectAccessRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectAccessResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeProjectAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Grant subject kind: user or team. */
+                subjectKind: string;
+                /** @description Grant subject identifier. */
+                subjectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     setProjectConfig: {
         parameters: {
             query?: never;
@@ -4560,6 +12086,2859 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectGitHub: {
+        parameters: {
+            query?: {
+                /** @description Branch whose pull request to identify. Defaults to whatever branch the project checkout is on. */
+                branch?: string;
+                /** @description Focus one issue, returned with bounded comments and GitHub's own linked pull requests instead of a list of recent issues. */
+                issue?: number;
+                /** @description Bypass the short-lived snapshot cache and read GitHub again. */
+                refresh?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectGitHubIntelligence"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectIntelligence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceOverview"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectIntelligenceArchitecture: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceArchitecture"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    previewProjectIntelligenceContext: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root; a planner preview may span every repository. */
+                repoPath?: string;
+                /** @description Which agent's pack to assemble: planner, worker, reviewer or repair. */
+                role?: "planner" | "worker" | "reviewer" | "repair";
+                /** @description Comma-separated repo-relative paths the work touches. The strongest relevance signal there is. */
+                changedPaths?: string;
+                /** @description Comma-separated free-text terms from the objective. The weakest signal, used to break ties. */
+                keywords?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceContextPreview"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectIntelligenceGraph: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root. */
+                repoPath?: string;
+                /** @description Declaration to start the walk from, by name or by full symbol id. One of symbol or path is required: there is no whole-graph export. */
+                symbol?: string;
+                /** @description Repo-relative file to start the walk from. Every symbol declared in it seeds the traversal. */
+                path?: string;
+                /** @description Hops to walk outward. Capped at 2 — three hops from a densely-connected symbol is already tens of thousands of nodes. */
+                depth?: number;
+                /** @description Comma-separated symbol kinds to keep (func, type, method, ...). Empty keeps every kind. */
+                nodeKinds?: string;
+                /** @description Comma-separated relation kinds to keep (calls, imports, ...). Empty keeps every kind. */
+                edgeKinds?: string;
+                /** @description Node ceiling for this walk. Clamped to the server's hard maximum; a caller cannot raise it. */
+                maxNodes?: number;
+                /** @description Edge ceiling for this walk. Clamped to the server's hard maximum. */
+                maxEdges?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceSubgraph"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    rebuildProjectIntelligence: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceSyncResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    searchProjectIntelligence: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root. */
+                repoPath?: string;
+                /** @description The question, in any language. Terms shorter than three characters are ignored because they match everything. */
+                q?: string;
+                /** @description Maximum hits. Clamped to the server's maximum. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceSearchResult"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    syncProjectIntelligence: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceSyncResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectMemoryStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectMemoryGraphStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryGraphResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    queryProjectMemoryGraph: {
+        parameters: {
+            query?: {
+                /** @description Repository root to query. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+                /** @description A declaration to start from, by name ("Records.MayExport") or by full symbol id. Ranks above every other signal. */
+                symbol?: string;
+                /** @description A repo-relative file to anchor on. Every symbol declared in it becomes a candidate. */
+                path?: string;
+                /** @description Free text from an objective, space- or comma-separated. The weakest signal, and the one that finds a starting point when nothing else is known. */
+                terms?: string;
+                /** @description Maximum symbols to return. Zero uses the retrieval default. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryGraphAnswerResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    syncProjectMemoryGraph: {
+        parameters: {
+            query?: {
+                /** @description Repository root to sync. Defaults to the project's own root. */
+                repoPath?: string;
+                /** @description Force a full rebuild instead of applying the diff since the indexed commit. It is the repair for a graph an operator has reason to distrust; an ordinary sync picks incremental whenever it can prove a change set. */
+                full?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryGraphSyncResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    invalidateProjectMemory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersInvalidateProjectMemoryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersInvalidateProjectMemoryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectMemoryItems: {
+        parameters: {
+            query?: {
+                /** @description Repository root to inspect. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+                /** @description Narrow to one state. Omit to see every state, including the facts AO can no longer vouch for. */
+                state?: "valid" | "stale" | "invalidated" | "rebuilding";
+                /** @description Narrow to one item type (module, convention, architecture, ...). */
+                type?: string;
+                /** @description Narrow to facts about a subtree, by repo-relative path prefix. */
+                path?: string;
+                /** @description Maximum items to return. Defaults to 200. */
+                limit?: null | number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryItemsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectMemoryKnowledge: {
+        parameters: {
+            query?: {
+                /** @description Repository root to read. Defaults to every repository of the project. */
+                repoPath?: string;
+                /** @description Narrow to one kind of shared knowledge. Omit for all three. */
+                type?: "task_result" | "decision" | "known_risk";
+                /** @description Narrow to one lifecycle status. Defaults to active, which is what retrieval would actually serve. */
+                status?: "active" | "superseded" | "resolved" | "obsolete" | "conflicting";
+                /** @description Narrow to what one task produced. When set, every status is returned: a decision this task made that a later one replaced is still something this task produced. */
+                task?: string;
+                /** @description Maximum entries to return. Defaults to 200. */
+                limit?: null | number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryKnowledgeResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectMemoryContextManifests: {
+        parameters: {
+            query?: {
+                /** @description The task whose frozen context to read. One of task or run is required. */
+                task?: string;
+                /** @description The workflow run whose executions to read. One of task or run is required. */
+                run?: string;
+                /** @description Resolve each manifest's item ids back into the facts they name, and report the ones that no longer exist. */
+                expand?: "true" | "false";
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryManifestsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectMemoryProvenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Derived project-memory item id, as returned by the items or validate routes. */
+                itemId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryProvenanceResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    pruneProjectMemory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersPruneProjectMemoryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersPruneProjectMemoryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    rebuildProjectMemory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersRebuildProjectMemoryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersRebuildProjectMemoryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectMemoryReport: {
+        parameters: {
+            query?: {
+                /** @description Repository root to report on. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryReportResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    validateProjectMemory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersValidateProjectMemoryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersValidateProjectMemoryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    testRepoConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersTestRepoConnectionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersTestRepoConnectionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectSkillsResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    enableProjectSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnableSkillRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillActivationView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    disableProjectSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    dryRunProjectSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillDryRunRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillDryRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listPentestAuthorizations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PentestAuthorizationListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createPentestAuthorization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PentestAuthorizationRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PentestAuthorizationView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokePentestAuthorization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+                /** @description Pentest authorization identifier (skpen-...). */
+                authId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PentestAuthorizationView"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    runProjectSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersSkillRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSkillRunStartView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectSkillRuns: {
+        parameters: {
+            query?: {
+                /** @description Maximum runs to return, newest first. Defaults to 50. */
+                limit?: null | number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSkillRunListResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectSkillRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill run identifier (skr-...). */
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSkillRunDetailView"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cancelProjectSkillRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill run identifier (skr-...). */
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSkillRunSummaryView"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectWorkItemsConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsConfigResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    putProjectWorkItemsConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkItemsConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsConfigResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    deleteProjectWorkItemsConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectWorkItemsAudit: {
+        parameters: {
+            query?: {
+                /** @description How many recent operations to return. Defaults to 50. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsAuditResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectWorkItemsHealth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsHealthResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectWorkItemLinks: {
+        parameters: {
+            query?: {
+                /** @description Refresh each link from the provider. Slower, and degrades to the cached values when the provider cannot be reached. */
+                live?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemLinksResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createProjectWorkItemLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkItemLinkRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemLinkResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    deleteProjectWorkItemLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description The work item link's id. */
+                linkId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    setProjectWorkItemLinkSync: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description The work item link's id. */
+                linkId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkItemLinkSyncRequest"];
+            };
+        };
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectWorkItemsProviderProjects: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsProviderProjectsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    syncProjectWorkItems: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsSyncResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    testProjectWorkItemsConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsConnectionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    refreshWorkspaceRepos: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectBoard: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated derived stages to keep (preparing, working, reviewing, correcting, verifying, integrating, waiting, needs_attention, completed, cancelled, failed). */
+                stage?: string;
+                /** @description Keep only runs that do (true) or do not (false) need a person. */
+                requiresHuman?: "true" | "false";
+                /** @description Recorded execution strategy filter. */
+                strategy?: "task" | "autonomous" | "master";
+                /** @description Case-insensitive substring of the objective or the run id. */
+                search?: string;
+                /** @description Zero-based offset into the ordered result. */
+                offset?: string;
+                /** @description Page size; defaults to 50 and is capped at 200. */
+                limit?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowBoardResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectBoardHistory: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated derived stages to keep (preparing, working, reviewing, correcting, verifying, integrating, waiting, needs_attention, completed, cancelled, failed). */
+                stage?: string;
+                /** @description Keep only runs that do (true) or do not (false) need a person. */
+                requiresHuman?: "true" | "false";
+                /** @description Recorded execution strategy filter. */
+                strategy?: "task" | "autonomous" | "master";
+                /** @description Case-insensitive substring of the objective or the run id. */
+                search?: string;
+                /** @description Zero-based offset into the ordered result. */
+                offset?: string;
+                /** @description Page size; defaults to 50 and is capped at 200. */
+                limit?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowBoardResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectUsage: {
+        parameters: {
+            query?: {
+                /** @description Rollup period. Defaults to 7d. Buckets by dispatch time, not by any provider billing period. */
+                range?: "today" | "7d" | "30d" | "all" | null;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectUsageResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWorkflowRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    browseProjectRoot: {
+        parameters: {
+            query?: {
+                /** @description Absolute directory path, previously returned as an entry's own path, to list. Empty lists the top level (the configured allowed roots, or their contents directly when only one root is configured). */
+                path?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectBrowseResult"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cloneProjectFromGitHub: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectCloneInput"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4620,6 +14999,494 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProviderProfiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProviderProfilesResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersCreateProviderProfileRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProviderProfileResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider profile identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProviderProfileResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    updateProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider profile identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersUpdateProviderProfileRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProviderProfileResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    connectProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider profile identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProviderProfileResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    disconnectProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider profile identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProviderProfileResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    startProviderProfileSetup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider profile identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersStartProviderSetupResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    stopProviderProfileSetup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider profile identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    testProviderProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider profile identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersTestProviderProfileResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProviderRegistry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProviderRegistryResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4882,6 +15749,47 @@ export interface operations {
             };
         };
     };
+    listPendingDecisions: {
+        parameters: {
+            query?: {
+                /** @description Filter to one or more of human_required, resolving, waiting_for_capacity. Omit for the default (human_required + resolving). */
+                state?: "human_required" | "resolving" | "waiting_for_capacity";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListWorkflowQuestionsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     setReviewActivity: {
         parameters: {
             query?: never;
@@ -4932,6 +15840,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getRuntimeCapacity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SchedulerStatusResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    runRuntimeGC: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RuntimeGCRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeGCReportResponse"];
                 };
             };
             /** @description Not Implemented */
@@ -5034,6 +16004,78 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    resolveDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Decision Resolver session identifier baked into the resolver's launch prompt. */
+                resolverSessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersResolveDecisionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersResolveDecisionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8511,6 +19553,69 @@ export interface operations {
             };
         };
     };
+    submitWorkReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubmitWorkReportRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkReportResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     streamSessionWorkspaceChanges: {
         parameters: {
             query?: never;
@@ -8730,6 +19835,142 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SettingsResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getEmailNotificationSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersEmailNotificationSettingsEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    updateEmailNotificationSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersUpdateEmailNotificationSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersEmailNotificationSettingsEnvelope"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    sendTestEmail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSendTestEmailResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
                 };
             };
             /** @description Internal Server Error */
@@ -9021,6 +20262,2497 @@ export interface operations {
             };
         };
     };
+    listSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    installSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallSkillRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillInstallView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSkillAudit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillAuditResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+                /** @description Installed version (MAJOR.MINOR.PATCH). */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillInstallView"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    uninstallSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+                /** @description Installed version (MAJOR.MINOR.PATCH). */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillExternalRevocations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillExternalRevocationListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeSkillExternal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevokeSkillExternalRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillExternalRevocationView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    liftSkillExternalRevocation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LiftSkillExternalRevocationRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillMovedTags: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillMovedTagListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillImageApprovals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillImageApprovalListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    approveSkillImage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApproveSkillImageRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillImageApprovalView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeSkillImageApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Image approval identifier. */
+                approvalId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    searchSkillMarketplace: {
+        parameters: {
+            query?: {
+                /** @description Free text matched against a release's id, name, description and publisher. */
+                q?: null | string;
+                /** @description Search only this registry. Omit to search every enabled registry you can see. */
+                registryId?: null | string;
+                /** @description Exact publisher match. */
+                publisher?: null | string;
+                /** @description Keep only releases that request this AO capability. */
+                capability?: null | string;
+                /** @description Include releases the publisher superseded. Off by default, so the ordinary listing is the installable one. */
+                includeDeprecated?: null | boolean;
+                /** @description Include withdrawn releases. They can never be installed; showing them answers "where did that version go". */
+                includeRevoked?: null | boolean;
+                /** @description Maximum releases to return. Defaults to 100. */
+                limit?: null | number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillMarketplaceSearchResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSkillRelease: {
+        parameters: {
+            query?: {
+                /** @description Which version to feature. Omit for the newest the registry offers. */
+                version?: null | string;
+            };
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillReleaseDetailResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    installSkillRelease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallSkillReleaseRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillInstallOutcomeView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillRegistries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillRegistryListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    saveSkillRegistry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveSkillRegistryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillRegistryView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    removeSkillRegistry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    syncSkillRegistryRevocations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillRegistryRevocationSyncView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    testSkillRegistryConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillRegistryProbeView"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillTrust: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillTrustListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    addSkillSigningKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Signing key identifier. Permanent: the public key under a given id never changes. */
+                keyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddSkillSigningKeyRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillSigningKeyView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    retireSkillSigningKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Signing key identifier. Permanent: the public key under a given id never changes. */
+                keyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RetireSkillSigningKeyRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeSkillTrust: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevokeSkillTrustRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillTrustRevocationView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    saveSkillTrustRoot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Trust root identifier (kebab-case). 'ao-official' is reserved for the build-embedded root and is refused here. */
+                trustRootId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveSkillTrustRootRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillTrustRootView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    checkSkillUpdates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillUpdateCheckResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listTeams: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListTeamsResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTeamRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TeamResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TeamResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    deleteTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    updateTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTeamRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TeamResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listTeamMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListTeamMembersResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    addTeamMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddTeamMemberRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListTeamMembersResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    removeTeamMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team identifier. */
+                id: string;
+                /** @description User identifier. */
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listTenants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListTenantsResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTenantRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    updateTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTenantRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listTenantMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListTenantMembersResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    addTenantMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddTenantMemberRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantMemberView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    removeTenantMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization identifier. */
+                id: string;
+                /** @description User identifier. */
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     listCompactSessionUsage: {
         parameters: {
             query?: {
@@ -9094,6 +22826,2227 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    recordSubjectUsageHook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersSubjectUsageHookRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSubjectUsageHookResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listUsers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListUsersResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUserRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    setUserRole: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetUserRoleRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    setUserStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetUserStatusRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listUserTeams: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListTeamMembersResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listWorkflowRuns: {
+        parameters: {
+            query?: {
+                /** @description Project id filter. */
+                projectId?: string;
+                /** @description Zero-based offset into the result. */
+                offset?: string;
+                /** @description Page size; defaults to 200 and is capped there. */
+                limit?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListWorkflowsResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowAdvice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersWorkflowAdviceResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cancelWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cancelAndArchiveWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    continueWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersWorkflowActionAuthorityRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowExploration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowExplorationResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersIncidentResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    diagnoseWorkflowIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersIncidentResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    submitWorkflowIncidentDiagnosis: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersIncidentDiagnosisSubmissionBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersIncidentResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    executeWorkflowIncidentAction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersExecuteIncidentRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersIncidentResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowPendingChanges: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowPendingChangesResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    commitWorkflowPendingChanges: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CommitPendingChangesRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommitPendingChangesResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowPlacement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersWorkflowPlacementResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    requestWorkflowPlacementOverride: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlacementOverrideRequestBody"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlacementOverrideResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    transitionWorkflowPlacement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlacementTransitionRequestBody"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlacementTransitionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    approveWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    generateWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    regenerateWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersWorkflowActionAuthorityRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    rejectWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    reopenAmbiguousWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersReopenAmbiguousPlanRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    reuseWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listWorkflowQuestions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListWorkflowQuestionsResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+                /** @description Workflow question identifier. */
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowQuestionResponseBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    answerWorkflowQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+                /** @description Workflow question identifier. */
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnswerWorkflowQuestionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowQuestionResponseBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    recoverWorkflowReviewProvenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowRecovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRecoveryResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    repairWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersWorkflowActionAuthorityRequest"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRepairResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    resumeWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    startWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    amendWorkflowTaskCriterion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Master workflow run identifier. */
+                workflowId: string;
+                /** @description Planned task identifier (workflow_tasks.id). */
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersAmendTaskCriterionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersAmendTaskCriterionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    resumeAmendedWorkflowTaskReview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Master workflow run identifier. */
+                workflowId: string;
+                /** @description Planned task identifier (workflow_tasks.id). */
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    authorizeWorkflowTaskFreshReviewException: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Master workflow run identifier. */
+                workflowId: string;
+                /** @description Planned task identifier (workflow_tasks.id). */
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersAuthorizeFreshReviewExceptionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowIntegrationFreshReviewException"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    resumeWorkflowTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Master workflow run identifier. */
+                workflowId: string;
+                /** @description Planned task identifier (workflow_tasks.id). */
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowUsage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersWorkflowUsageLedgerResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

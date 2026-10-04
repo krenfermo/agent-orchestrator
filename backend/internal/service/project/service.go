@@ -46,6 +46,27 @@ type Manager interface {
 	// Remove unregisters a project, stopping its sessions and reclaiming
 	// managed workspaces.
 	Remove(ctx context.Context, id domain.ProjectID) (RemoveResult, error)
+
+	// ListAllowedRootEntries lists directory entries for the web Import
+	// Project/Workspace folder-browser UX (Checkpoint 8P-E.4): path is
+	// empty for the top level, or an absolute directory previously
+	// returned as some entry's own Path.
+	ListAllowedRootEntries(ctx context.Context, path string) (BrowseResult, error)
+
+	// CloneFromGitHub clones a repository into the first allowed project root
+	// and registers it.
+	CloneFromGitHub(ctx context.Context, in CloneInput) (Project, error)
+
+	// TestRepoConnection runs a non-destructive `git ls-remote` probe against
+	// a project's root repo (repoName == "") or a named workspace child repo,
+	// using that repository's own existing Git configuration.
+	TestRepoConnection(ctx context.Context, id domain.ProjectID, repoName string) (ConnectionTestResult, error)
+
+	// RefreshWorkspaceRepos re-detects a workspace project's child
+	// repositories from disk, correcting stale per-repo metadata (e.g. a
+	// DefaultBranch captured before the repo was checked out onto a
+	// different branch).
+	RefreshWorkspaceRepos(ctx context.Context, id domain.ProjectID) (Project, error)
 }
 
 // SessionTeardowner is the narrow session-service surface project removal
@@ -61,11 +82,19 @@ type Service struct {
 	clock          func() time.Time
 	telemetry      ports.EventSink
 	defaultHarness domain.AgentHarness
+	// allowedRoots confines Add/ListAllowedRootEntries/CloneFromGitHub to these
+	// absolute directories when non-empty. Empty preserves the historical
+	// desktop behavior (any path the OS file picker can reach).
+	allowedRoots []string
 	// addMu serialises the whole body of Add. Workspace registration performs
 	// filesystem mutations (git init, .gitignore writes, commits) that are not
 	// covered by the store's own writeMu, so path/id conflict checks plus the
 	// subsequent mutation must be atomic from the perspective of concurrent callers.
 	addMu sync.Mutex
+	// cloneRunner executes `gh repo clone`. See Deps.CloneRunner.
+	cloneRunner func(ctx context.Context, args ...string) ([]byte, error)
+	// branchLocks reads direct-branch execution-lock occupancy. Optional.
+	branchLocks BranchLockReader
 }
 
 const maxDisplayNameLen = 20
@@ -81,6 +110,24 @@ type Deps struct {
 	Sessions       SessionTeardowner
 	Clock          func() time.Time
 	Telemetry      ports.EventSink
+	// AllowedRoots confines web-originated project registration/browsing/
+	// cloning to these absolute directories. See config.AllowedProjectRoots.
+	AllowedRoots []string
+	// CloneRunner executes "gh repo clone <slug> <destPath>" and returns its
+	// combined output. Nil uses the real `gh` binary via aoprocess; tests
+	// inject a fake so CloneFromGitHub never shells out.
+	CloneRunner func(ctx context.Context, args ...string) ([]byte, error)
+	// BranchLocks reads direct-branch execution-lock occupancy for the
+	// project detail view (Checkpoint 8P-E.11). Optional: nil simply means no
+	// lock is ever shown, which is always correct for an installation with no
+	// direct-branch projects.
+	BranchLocks BranchLockReader
+}
+
+// BranchLockReader is the read-only occupancy surface the project detail view
+// needs. Satisfied by *storage/sqlite/store.Store.
+type BranchLockReader interface {
+	ListHeldBranchLocksByProject(ctx context.Context, projectID domain.ProjectID) ([]domain.BranchLock, error)
 }
 
 // New returns a project service backed by the given durable store.
@@ -100,9 +147,15 @@ func NewWithDeps(d Deps) *Service {
 		clock:          d.Clock,
 		telemetry:      d.Telemetry,
 		defaultHarness: defaultHarness,
+		allowedRoots:   d.AllowedRoots,
+		cloneRunner:    d.CloneRunner,
+		branchLocks:    d.BranchLocks,
 	}
 	if s.clock == nil {
 		s.clock = time.Now
+	}
+	if s.cloneRunner == nil {
+		s.cloneRunner = defaultCloneRunner
 	}
 	return s
 }
@@ -115,13 +168,22 @@ func (m *Service) List(ctx context.Context) ([]Summary, error) {
 	}
 	out := make([]Summary, 0, len(projects))
 	for _, row := range projects {
+		kind := row.Kind.WithDefault()
+		defaultBranch := ""
+		if kind != domain.ProjectKindScratch {
+			defaultBranch = row.Config.WithDefaults().DefaultBranch
+		}
 		out = append(out, Summary{
 			ID:                domain.ProjectID(row.ID),
 			Name:              displayName(row),
 			Path:              row.Path,
-			Kind:              row.Kind.WithDefault(),
+			Kind:              kind,
 			SessionPrefix:     resolveSessionPrefix(row),
 			OrchestratorAgent: row.Config.Orchestrator.Harness,
+			Repo:              row.RepoOriginURL,
+			DefaultBranch:     defaultBranch,
+			Valid:             pathLooksValid(row.Path, kind),
+			TenantID:          row.TenantID,
 		})
 	}
 	return out, nil
@@ -140,14 +202,77 @@ func (m *Service) Get(ctx context.Context, id domain.ProjectID) (GetResult, erro
 		return GetResult{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
 	}
 	p := m.projectFromRow(row)
+	var repos []domain.WorkspaceRepoRecord
 	if row.Kind.WithDefault() == domain.ProjectKindWorkspace {
-		repos, err := m.store.ListWorkspaceRepos(ctx, row.ID)
+		repos, err = m.store.ListWorkspaceRepos(ctx, row.ID)
 		if err != nil {
 			return GetResult{}, apierr.Internal("PROJECT_LOAD_FAILED", "Failed to load workspace repositories")
 		}
 		p.WorkspaceRepos = workspaceReposFromRecords(repos)
 	}
+	// Checkpoint 8P-E.11: the per-repository execution view, including which
+	// workflow currently occupies each repository+branch. Occupancy is a live
+	// read; a failure to load it degrades to "no lock shown" rather than
+	// failing the whole project detail, since it is informational.
+	p.Repositories = m.repositoryExecutions(ctx, row, repos)
 	return GetResult{Status: "ok", Project: &p}, nil
+}
+
+// repositoryExecutions describes every repository a direct-branch project
+// executes in. Each registered repository keeps its own configured branch, so a
+// workspace project reports one row per repository rather than one project-wide
+// branch -- the same boundary the branch locks themselves are keyed on.
+//
+// Isolated-worktree projects report nothing: their sessions get their own
+// worktrees, so there is no shared repository whose occupancy could matter, and
+// inventing rows for them would suggest a constraint that does not exist.
+func (m *Service) repositoryExecutions(ctx context.Context, row domain.ProjectRecord, repos []domain.WorkspaceRepoRecord) []RepositoryExecution {
+	mode := domain.ResolveExecutionMode(row.Kind, row.Config)
+	if mode != domain.ExecutionDirectBranch {
+		return nil
+	}
+	rootBranch := row.Config.WithDefaults().DefaultBranch
+	out := []RepositoryExecution{{
+		Name:          domain.RootWorkspaceRepoName,
+		Path:          row.Path,
+		Branch:        rootBranch,
+		ExecutionMode: mode,
+	}}
+	for _, repo := range repos {
+		if repo.GitStatus.WithDefault() == domain.GitStatusNeedsInit {
+			continue
+		}
+		out = append(out, RepositoryExecution{
+			Name:          repo.Name,
+			RelativePath:  repo.RelativePath,
+			Path:          filepath.Join(row.Path, filepath.FromSlash(repo.RelativePath)),
+			Branch:        repo.DefaultBranch,
+			ExecutionMode: mode,
+		})
+	}
+	if m.branchLocks == nil {
+		return out
+	}
+	held, err := m.branchLocks.ListHeldBranchLocksByProject(ctx, domain.ProjectID(row.ID))
+	if err != nil {
+		return out
+	}
+	byKey := make(map[string]domain.BranchLock, len(held))
+	for _, lock := range held {
+		byKey[lock.LockKey] = lock
+	}
+	for i := range out {
+		lock, ok := byKey[domain.BranchLockKey(out[i].Path, out[i].Branch)]
+		if !ok {
+			continue
+		}
+		out[i].Lock = &RepositoryLock{
+			WorkflowRunID: lock.WorkflowRunID,
+			SessionID:     lock.SessionID,
+			AcquiredAt:    lock.AcquiredAt,
+		}
+	}
+	return out
 }
 
 // Add registers a local git repository as a project.
@@ -157,8 +282,11 @@ func (m *Service) Get(ctx context.Context, id domain.ProjectID) (GetResult, erro
 // check and the store write — two concurrent calls for the same path would both
 // pass FindProjectByPath and then race on those mutations.
 func (m *Service) Add(ctx context.Context, in AddInput) (Project, error) {
-	path, err := normalizePath(in.Path)
+	path, err := m.resolveInputPath(in.Path)
 	if err != nil {
+		return Project{}, err
+	}
+	if err := validateWithinAllowedRoots(path, m.allowedRoots); err != nil {
 		return Project{}, err
 	}
 	id := defaultProjectID(path)
@@ -723,9 +851,11 @@ func (m *Service) projectFromRow(row domain.ProjectRecord) Project {
 		Name:          displayName(row),
 		Kind:          kind,
 		Path:          row.Path,
-		Repo:          row.RepoOriginURL,
+		Repo:          sanitizeRemoteURL(row.RepoOriginURL),
+		Transport:     classifyTransport(row.RepoOriginURL),
 		DefaultBranch: defaultBranch,
 		Agent:         string(m.defaultHarness),
+		ExecutionMode: domain.ResolveExecutionMode(row.Kind, row.Config),
 	}
 	p.Config = projectConfigPtr(row.Config)
 	return p
@@ -788,6 +918,17 @@ func repoHasCommit(ctx context.Context, path string) bool {
 func isBareGitRepository(ctx context.Context, path string) bool {
 	out, err := gitOutput(ctx, path, "rev-parse", "--is-bare-repository")
 	return err == nil && strings.TrimSpace(out) == "true"
+}
+
+// pathLooksValid is the cheap (stat-only) check backing Summary.Valid. Scratch
+// projects are intentionally not Git repositories, so their validity is just
+// "the directory still exists"; every other kind also expects Git metadata.
+func pathLooksValid(path string, kind domain.ProjectKind) bool {
+	if kind == domain.ProjectKindScratch {
+		info, err := os.Stat(path)
+		return err == nil && info.IsDir()
+	}
+	return hasGitMetadata(path)
 }
 
 func hasGitMetadata(path string) bool {

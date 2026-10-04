@@ -12,7 +12,6 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/legacyimport"
-	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
@@ -52,12 +51,14 @@ func (c *commandContext) runImport(cmd *cobra.Command, opts importOptions) error
 	}
 
 	// The daemon is the sole writer; refuse to open the store underneath a live
-	// one. A stale run-file (dead PID) is treated as safe.
-	if live, err := runfile.CheckStale(cfg.RunFilePath); err != nil {
-		return fmt.Errorf("inspect run-file: %w", err)
-	} else if live != nil {
-		return usageError{fmt.Errorf("the AO daemon is running (pid %d); stop it first with `ao stop` before importing", live.PID)}
+	// one. P10 closes the P9 debt here: both run-file conventions, the SQLite
+	// probe, and the data dir's daemon.lock held for the whole import, the same
+	// guard the other offline writers use. A stale run-file (dead PID) is safe.
+	release, err := holdDataDirOffline(cfg, "importing")
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	root := opts.from
 	if root == "" {

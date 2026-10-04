@@ -25,6 +25,7 @@ const englishLabels: Record<SessionPresentationMessageKey, string> = {
 	"activity.unknown": "Unknown",
 	"status.working": "Working",
 	"status.idle": "Idle",
+	"status.completed": "Completed",
 	"status.needs_input": "Input needed",
 	"status.exited": "Exited",
 	"status.no_signal": "No signal",
@@ -135,6 +136,9 @@ export type SessionStatusView = {
 const sessionStatusStyles: Record<SessionStatus, Omit<SessionStatusView, "label">> = {
 	working: { className: "text-status-working" },
 	idle: { className: "text-status-idle" },
+	// A finished task is a good outcome, so it borrows the same "ready" green
+	// the merge-side statuses use rather than idle's grey. No new token.
+	completed: { className: "text-status-ready" },
 	needs_input: { className: "text-status-needs-you" },
 	exited: { className: "text-status-exited" },
 	no_signal: { className: "text-status-unknown" },
@@ -253,8 +257,24 @@ export function attentionZone(input: SessionStatus | SessionStatusModel): Attent
 			return "pending";
 		case "working":
 		case "idle":
+		// Attention-wise a finished task is at rest, not mergeable: keeping it
+		// out of the "merge" zone stops the palette and tray from urging the
+		// user to merge a task that has no SCM outcome at all. The board places
+		// it separately -- see boardColumnZone.
+		case "completed":
 			return "working";
 	}
+}
+
+/**
+ * Column placement on the board, which is not the same question as attention.
+ * A finished ordinary task is done, so it belongs on the finished side of the
+ * board rather than under "Idle" -- but in its own Completed section, never
+ * relabelled as ready to merge or merged.
+ */
+export function boardColumnZone(input: SessionStatus | SessionStatusModel): AttentionZone {
+	const status = typeof input === "string" ? input : input.status;
+	return status === "completed" ? "merge" : attentionZone(status);
 }
 
 export function getAttentionZoneView(

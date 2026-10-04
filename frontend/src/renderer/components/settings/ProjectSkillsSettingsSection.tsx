@@ -1,0 +1,1229 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CircleAlert, Loader2, ShieldAlert, ShieldCheck } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { apiClient, apiErrorMessage } from "../../lib/api-client";
+import type { components } from "../../../api/schema";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "../ui/select";
+import { Switch } from "../ui/switch";
+import { SettingsSection } from "./SettingsSection";
+
+type ProjectSkills = components["schemas"]["ProjectSkillsResponse"];
+type SkillCatalog = components["schemas"]["SkillListResponse"];
+type SkillInstall = components["schemas"]["SkillInstallView"];
+type SkillCapability = components["schemas"]["SkillCapabilityView"];
+type SkillActivation = components["schemas"]["SkillActivationView"];
+type SkillDryRun = components["schemas"]["SkillDryRunResponse"];
+type SkillRunStart = components["schemas"]["ControllersSkillRunStartView"];
+type SkillRunSummary = components["schemas"]["ControllersSkillRunSummaryView"];
+type SkillRunDetail = components["schemas"]["ControllersSkillRunDetailView"];
+type PentestAuthorization = components["schemas"]["PentestAuthorizationView"];
+
+// hostPortOfTarget turns the authorization's canonical URL (scheme://host:port)
+// into the host:port the manifest's `target` input carries, which the daemon
+// cross-checks against the authorization before it will run.
+function hostPortOfTarget(target: string): string {
+	try {
+		const u = new URL(target);
+		// URL.host drops a default port (443/80); the daemon's target input is
+		// always explicit host:port, so reconstruct it with the port present.
+		const port = u.port || (u.protocol === "https:" ? "443" : "80");
+		return `${u.hostname}:${port}`;
+	} catch {
+		return target;
+	}
+}
+
+const TERMINAL_RUN_STATES = new Set(["succeeded", "partial", "failed", "refused", "cancelled"]);
+const isTerminalRun = (state: string | undefined) => state !== undefined && TERMINAL_RUN_STATES.has(state);
+
+/**
+ * The static scan's report, as this panel reads it.
+ *
+ * The wire type is an opaque JSON document on purpose — the report belongs to
+ * the tool, and a generated TypeScript mirror of it would go stale the moment a
+ * rule was added. Only the fields this panel renders are named here, and every
+ * one is optional: a report missing a field renders as missing, never as zero.
+ */
+type StaticScanReport = {
+	imageDigest?: string;
+	approvalId?: string;
+	approvedBy?: string;
+	approvalRevokedDuringRun?: boolean;
+	truncated?: boolean;
+	coverage?: {
+		filesStaged?: number;
+		filesVisible?: number;
+		filesScanned?: number;
+		rulesRun?: string[];
+		skipped?: { path: string; reason: string }[];
+		limitations?: string[];
+	};
+	findings?: {
+		ruleId: string;
+		severity: string;
+		category: string;
+		title: string;
+		path: string;
+		line: number;
+		recommendation: string;
+		confidence: string;
+	}[];
+};
+
+// An agent run's report is the package's findings.v1 document, validated and
+// redacted by the daemon before it was stored (Frente 2 / 2C). It carries no
+// image or container evidence, so it is rendered from its own shape.
+const SKILL_AGENT_TOOL = "ao.skill-agent/v1";
+
+// A full security audit (Frente 2 / 2E) is a parent run whose report is the
+// consolidated ao.security-audit/v1 document. It ends "partial" -- never
+// "succeeded" -- when not every mode it planned produced a verified report.
+const SKILL_AUDIT_TOOL = "ao.security-audit/v1";
+
+type AuditReport = {
+	completeness?: string;
+	summary?: { modesPlanned?: number; modesVerified?: number; statements?: string[] };
+	modes?: {
+		mode: string;
+		status: string;
+		verified: boolean;
+		runId?: string;
+		errorCode?: string;
+		coverage?: { statement: string };
+	}[];
+	findings?: {
+		id: string;
+		severity: string;
+		confidence: string;
+		title: string;
+		path: string;
+		line?: number;
+		sources: { mode: string; ruleId: string }[];
+	}[];
+	limitations?: string[];
+};
+
+type AgentReport = {
+	coverage?: {
+		examined?: string[];
+		skipped?: { path: string; reason: string }[];
+	};
+	findings?: {
+		id: string;
+		title: string;
+		severity: string;
+		confidence: string;
+		category: string;
+		evidence?: { locations?: { path: string; line?: number }[] };
+		recommendation: string;
+	}[];
+};
+
+/**
+ * Project settings → Skills. Which skills are enabled on THIS project, with
+ * what capabilities, and what a run of each mode would need.
+ *
+ * Three things about this screen are deliberate:
+ *
+ * The capability list, its risk ratings and the permission each one is gated on
+ * all come from the daemon's response, never from a table in React. A manifest
+ * may not describe its own capability as cheaper than it is, and neither may
+ * this component — if the capability policy changes in Go, this screen follows
+ * without an edit.
+ *
+ * The controls render from `permissions` in the response — the caller's own
+ * effective permissions on this project — rather than from a role name this
+ * component would have to interpret. A viewer sees the state read-only.
+ *
+ * The dry run runs nothing: it reports what a run of a mode would need, and a
+ * mode that cannot run shows the reason plainly instead of being hidden --
+ * "this cannot run yet, and here is exactly what is missing" is the answer
+ * somebody came to this screen for. Only a mode the dry run calls executable
+ * offers Run.
+ *
+ * A run is durable (Frente 2 / 2B): Run returns the run the daemon accepted,
+ * this panel follows it until it ends, and the project's run history keeps
+ * every result. A report is shown only when the daemon verified its stored
+ * bytes against their digest.
+ */
+export function ProjectSkillsSettingsSection({ projectId }: { projectId: string }) {
+	const { t } = useTranslation();
+	const queryClient = useQueryClient();
+	const skillsKey = ["skills", "project", projectId] as const;
+	const [error, setError] = useState<string | null>(null);
+	const [selectedSkill, setSelectedSkill] = useState<string>("");
+	const [grant, setGrant] = useState<Record<string, boolean>>({});
+	const [dryRunMode, setDryRunMode] = useState<Record<string, string>>({});
+	const [dryRun, setDryRun] = useState<SkillDryRun | null>(null);
+	const [activeRunId, setActiveRunId] = useState<string>("");
+	// Active-pentest (2F) is a distinct, deliberate flow: a per-target
+	// authorization is created first, then a confirmed run references it. These
+	// hold the operator's inputs and the created authorization, per skill row.
+	const [pentestTarget, setPentestTarget] = useState<Record<string, string>>({});
+	const [pentestRef, setPentestRef] = useState<Record<string, string>>({});
+	const [pentestAuth, setPentestAuth] = useState<Record<string, PentestAuthorization>>({});
+	const runsKey = ["skills", "project", projectId, "runs"] as const;
+
+	const skills = useQuery({
+		queryKey: skillsKey,
+		queryFn: async (): Promise<ProjectSkills> => {
+			const { data, error: apiError } = await apiClient.GET("/api/v1/projects/{id}/skills", {
+				credentials: "include",
+				params: { path: { id: projectId } },
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+	});
+
+	// The capability policy is installation-wide and gated on settings.read. A
+	// project administrator may not hold it, so a refused read simply leaves
+	// the grant editor showing capability names without their risk copy rather
+	// than breaking the screen.
+	const catalog = useQuery({
+		queryKey: ["skills", "catalog"] as const,
+		queryFn: async (): Promise<SkillCatalog> => {
+			const { data, error: apiError } = await apiClient.GET("/api/v1/skills", {
+				credentials: "include",
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		enabled: skills.isSuccess,
+		retry: false,
+	});
+
+	// The run this panel is following, re-read until it reaches a terminal state.
+	const activeRun = useQuery({
+		queryKey: [...runsKey, activeRunId] as const,
+		queryFn: async (): Promise<SkillRunDetail> => {
+			const { data, error: apiError } = await apiClient.GET("/api/v1/projects/{id}/skills/runs/{runId}", {
+				credentials: "include",
+				params: { path: { id: projectId, runId: activeRunId } },
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		enabled: activeRunId !== "",
+		refetchInterval: (query) => (isTerminalRun(query.state.data?.run.state) ? false : 1000),
+	});
+
+	// The project's run history, newest first. It refreshes while the run being
+	// followed is still in flight so its row moves with it.
+	const runHistory = useQuery({
+		queryKey: runsKey,
+		queryFn: async (): Promise<SkillRunSummary[]> => {
+			const { data, error: apiError } = await apiClient.GET("/api/v1/projects/{id}/skills/runs", {
+				credentials: "include",
+				params: { path: { id: projectId }, query: { limit: 20 } },
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data.runs;
+		},
+		enabled: skills.isSuccess,
+		refetchInterval: activeRunId !== "" && !isTerminalRun(activeRun.data?.run.state) ? 2000 : false,
+	});
+
+	const permissions = skills.data?.permissions ?? [];
+	const canManage = permissions.includes("project.manage");
+	const installed = skills.data?.installed ?? [];
+	const activations = skills.data?.activations ?? [];
+	const capabilityPolicy = useMemo(() => {
+		const byName = new Map<string, SkillCapability>();
+		for (const cap of catalog.data?.capabilities ?? []) byName.set(cap.name, cap);
+		return byName;
+	}, [catalog.data]);
+
+	const invalidate = () => {
+		void queryClient.invalidateQueries({ queryKey: skillsKey });
+	};
+
+	const enable = useMutation({
+		mutationFn: async ({ skill, version }: { skill: string; version: string }) => {
+			const capabilities = Object.entries(grant)
+				.filter(([, on]) => on)
+				.map(([name]) => name);
+			const { error: apiError } = await apiClient.PUT("/api/v1/projects/{id}/skills/{skillId}", {
+				credentials: "include",
+				params: { path: { id: projectId, skillId: skill } },
+				body: { version, capabilities },
+			});
+			if (apiError) throw new Error(apiErrorMessage(apiError));
+		},
+		onSuccess: () => {
+			setSelectedSkill("");
+			setGrant({});
+			setError(null);
+			invalidate();
+		},
+		onError: (err: Error) => setError(err.message),
+	});
+
+	const disable = useMutation({
+		mutationFn: async (skill: string) => {
+			const { error: apiError } = await apiClient.DELETE("/api/v1/projects/{id}/skills/{skillId}", {
+				credentials: "include",
+				params: { path: { id: projectId, skillId: skill } },
+			});
+			if (apiError) throw new Error(apiErrorMessage(apiError));
+		},
+		onSuccess: () => {
+			setDryRun(null);
+			setError(null);
+			invalidate();
+		},
+		onError: (err: Error) => setError(err.message),
+	});
+
+	const check = useMutation({
+		mutationFn: async ({ skill, modeId }: { skill: string; modeId: string }): Promise<SkillDryRun> => {
+			const { data, error: apiError } = await apiClient.POST(
+				"/api/v1/projects/{id}/skills/{skillId}/dry-run",
+				{
+					credentials: "include",
+					params: { path: { id: projectId, skillId: skill } },
+					body: { modeId, inputs: { mode: modeId } },
+				},
+			);
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		onSuccess: (data) => {
+			setDryRun(data);
+			setError(null);
+		},
+		onError: (err: Error) => {
+			setDryRun(null);
+			setError(err.message);
+		},
+	});
+
+	// Executing. Separate from `check` in every way that matters: a different
+	// endpoint, a different permission on the daemon, and its own button that
+	// only appears once a dry run has said this mode is executable. The dry run
+	// is the honest way to find out; this is the thing that acts.
+	const execute = useMutation({
+		mutationFn: async ({
+			skill,
+			modeId,
+			inputs,
+			pentestAuthorizationId,
+		}: {
+			skill: string;
+			modeId: string;
+			inputs?: Record<string, string>;
+			pentestAuthorizationId?: string;
+		}): Promise<SkillRunStart> => {
+			const { data, error: apiError } = await apiClient.POST(
+				"/api/v1/projects/{id}/skills/{skillId}/run",
+				{
+					credentials: "include",
+					params: { path: { id: projectId, skillId: skill } },
+					body: {
+						modeId,
+						inputs: { mode: modeId, ...(inputs ?? {}) },
+						...(pentestAuthorizationId ? { pentestAuthorizationId } : {}),
+					},
+				},
+			);
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		onSuccess: (data) => {
+			// The daemon accepted a durable run (or returned the one already in
+			// flight for this mode). Follow it; the result arrives when it ends.
+			setActiveRunId(data.run.id);
+			setError(null);
+			void queryClient.invalidateQueries({ queryKey: runsKey });
+			invalidate();
+		},
+		onError: (err: Error) => {
+			setError(err.message);
+		},
+	});
+
+	// Authorizing a pentest target. This is the explicit, per-target permission
+	// an active-pentest run must reference. It is a deliberate act, separate
+	// from running: it names one target, a written-authorization reference, and
+	// an expiry, and the daemon binds a run to it fail-closed.
+	const authorizePentest = useMutation({
+		mutationFn: async ({
+			skill,
+			target,
+			ref,
+		}: {
+			skill: string;
+			target: string;
+			ref: string;
+		}): Promise<PentestAuthorization> => {
+			const { data, error: apiError } = await apiClient.POST(
+				"/api/v1/projects/{id}/skills/{skillId}/pentest-authorizations",
+				{
+					credentials: "include",
+					params: { path: { id: projectId, skillId: skill } },
+					body: {
+						target,
+						authorizationRef: ref,
+						pentestType: "web-dast",
+						ttlSeconds: 3600,
+						confirm: true,
+					},
+				},
+			);
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		onSuccess: (data, vars) => {
+			setPentestAuth({ ...pentestAuth, [vars.skill]: data });
+			setError(null);
+		},
+		onError: (err: Error) => {
+			setError(err.message);
+		},
+	});
+
+	const cancelRun = useMutation({
+		mutationFn: async (runId: string): Promise<SkillRunSummary> => {
+			const { data, error: apiError } = await apiClient.POST(
+				"/api/v1/projects/{id}/skills/runs/{runId}/cancel",
+				{ credentials: "include", params: { path: { id: projectId, runId } } },
+			);
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		onSuccess: () => {
+			setError(null);
+			void queryClient.invalidateQueries({ queryKey: runsKey });
+		},
+		onError: (err: Error) => setError(err.message),
+	});
+
+	const runStateLabel = (state: string) => {
+		switch (state) {
+			case "queued":
+				return t("settings.project.skills.runState.queued");
+			case "running":
+				return t("settings.project.skills.runState.running");
+			case "succeeded":
+				return t("settings.project.skills.runState.succeeded");
+			case "partial":
+				return t("settings.project.skills.runState.partial");
+			case "refused":
+				return t("settings.project.skills.runState.refused");
+			case "cancelled":
+				return t("settings.project.skills.runState.cancelled");
+			default:
+				return t("settings.project.skills.runState.failed");
+		}
+	};
+
+	const runStateBadge = (state: string) => {
+		switch (state) {
+			case "succeeded":
+				return "success" as const;
+			case "failed":
+			case "refused":
+				return "error" as const;
+			case "cancelled":
+				return "neutral" as const;
+			default:
+				return "warning" as const;
+		}
+	};
+
+	const riskBadge = (risk: string) => {
+		switch (risk) {
+			case "critical":
+			case "high":
+				return "error" as const;
+			case "medium":
+				return "warning" as const;
+			default:
+				return "neutral" as const;
+		}
+	};
+
+	const riskLabel = (risk: string) => {
+		switch (risk) {
+			case "critical":
+				return t("settings.project.skills.risk.critical");
+			case "high":
+				return t("settings.project.skills.risk.high");
+			case "medium":
+				return t("settings.project.skills.risk.medium");
+			default:
+				return t("settings.project.skills.risk.low");
+		}
+	};
+
+	const verdictLabel = (verdict: string) => {
+		switch (verdict) {
+			case "executable":
+				return t("settings.project.skills.verdict.executable");
+			case "requires_approval":
+				return t("settings.project.skills.verdict.requiresApproval");
+			default:
+				return t("settings.project.skills.verdict.blocked");
+		}
+	};
+
+	const notActivated = installed.filter(
+		(skill) => !activations.some((row) => row.skillId === skill.id),
+	);
+	const pending: SkillInstall | undefined = notActivated.find((skill) => skill.id === selectedSkill);
+
+	const activationRow = (row: SkillActivation) => {
+		const pkg = installed.find((skill) => skill.id === row.skillId);
+		const modes = pkg?.modes ?? [];
+		const mode = dryRunMode[row.skillId] ?? modes[0]?.id ?? "";
+		return (
+			<li
+				key={row.skillId}
+				className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] bg-[var(--color-bg-settings-input)] p-3"
+				data-testid="project-skill-row"
+			>
+				<div className="flex items-center gap-3">
+					<ShieldCheck className="size-4 shrink-0 text-settings-muted" aria-hidden="true" />
+					<span className="min-w-0 flex-1 truncate text-sm text-settings-label">
+						{row.skillName || row.skillId}
+						<span className="ml-2 text-caption text-settings-muted">{row.version}</span>
+					</span>
+					<Badge variant={row.enabled ? "success" : "neutral"}>
+						{row.enabled
+							? t("settings.project.skills.state.enabled")
+							: t("settings.project.skills.state.disabled")}
+					</Badge>
+					{canManage && row.enabled ? (
+						<Button
+							variant="secondary"
+							size="sm"
+							disabled={disable.isPending}
+							onClick={() => disable.mutate(row.skillId)}
+						>
+							{t("settings.project.skills.disable")}
+						</Button>
+					) : null}
+				</div>
+
+				<p className="text-caption text-settings-muted">
+					{row.grantedCapabilities.length > 0
+						? t("settings.project.skills.granted", { list: row.grantedCapabilities.join(", ") })
+						: t("settings.project.skills.grantedNone")}
+				</p>
+				{row.approvedBy ? (
+					<p className="text-caption text-settings-muted">
+						{t("settings.project.skills.approvedBy", { actor: row.approvedBy })}
+					</p>
+				) : null}
+				{row.unavailable ? (
+					<p className="flex items-start gap-2 text-caption text-error">
+						<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+						{t("settings.project.skills.unavailable", { reason: row.unavailable })}
+					</p>
+				) : null}
+
+				{row.enabled && modes.length > 0 ? (
+					<div className="flex items-center gap-2">
+						<Select value={mode} onValueChange={(next) => setDryRunMode({ ...dryRunMode, [row.skillId]: next })}>
+							<SelectTrigger className="w-56" aria-label={t("settings.project.skills.mode")}>
+								<SelectValue placeholder={t("settings.project.skills.mode")} />
+							</SelectTrigger>
+							<SelectContent>
+								{modes.map((m) => (
+									<SelectItem key={m.id} value={m.id}>
+										{m.name || m.id}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+						<Button
+							variant="secondary"
+							size="sm"
+							disabled={check.isPending || !mode}
+							onClick={() => check.mutate({ skill: row.skillId, modeId: mode })}
+						>
+							{t("settings.project.skills.check")}
+						</Button>
+					</div>
+				) : null}
+
+				{/* Active pentest is a clearly-distinct surface: it sends real,
+				    bounded traffic to a live target, so it is not run from the
+				    ordinary Check/Run flow. A per-target authorization is created
+				    first, then a confirmed run references it. */}
+				{row.enabled && mode === "active-pentest" ? (
+					<div
+						className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[color-mix(in_oklab,var(--color-status-needs-you)_45%,transparent)] bg-[color-mix(in_oklab,var(--color-status-needs-you)_8%,transparent)] p-3"
+						data-testid="project-skill-pentest"
+					>
+						<p className="flex items-start gap-2 text-caption text-[var(--color-status-needs-you)]">
+							<ShieldAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+							{t("settings.project.skills.pentest.warning")}
+						</p>
+						<Input
+							value={pentestTarget[row.skillId] ?? ""}
+							onChange={(e) => setPentestTarget({ ...pentestTarget, [row.skillId]: e.target.value })}
+							placeholder={t("settings.project.skills.pentest.targetPlaceholder")}
+							aria-label={t("settings.project.skills.pentest.target")}
+							disabled={Boolean(pentestAuth[row.skillId])}
+						/>
+						<Input
+							value={pentestRef[row.skillId] ?? ""}
+							onChange={(e) => setPentestRef({ ...pentestRef, [row.skillId]: e.target.value })}
+							placeholder={t("settings.project.skills.pentest.refPlaceholder")}
+							aria-label={t("settings.project.skills.pentest.ref")}
+							disabled={Boolean(pentestAuth[row.skillId])}
+						/>
+						{!pentestAuth[row.skillId] ? (
+							<Button
+								variant="secondary"
+								size="sm"
+								disabled={
+									authorizePentest.isPending ||
+									!(pentestTarget[row.skillId] ?? "").trim() ||
+									!(pentestRef[row.skillId] ?? "").trim()
+								}
+								onClick={() =>
+									authorizePentest.mutate({
+										skill: row.skillId,
+										target: (pentestTarget[row.skillId] ?? "").trim(),
+										ref: (pentestRef[row.skillId] ?? "").trim(),
+									})
+								}
+								data-testid="project-skill-pentest-authorize"
+							>
+								{authorizePentest.isPending
+									? t("settings.project.skills.pentest.authorizing")
+									: t("settings.project.skills.pentest.authorize")}
+							</Button>
+						) : (
+							<div className="flex flex-col gap-2">
+								<p className="text-caption text-settings-label">
+									{t("settings.project.skills.pentest.confirm", {
+										target: pentestAuth[row.skillId].target,
+										expires: pentestAuth[row.skillId].expiresAt,
+									})}
+								</p>
+								<ul className="list-disc pl-4 text-caption text-settings-muted">
+									<li>{t("settings.project.skills.pentest.scope")}</li>
+									<li>{t("settings.project.skills.pentest.limits")}</li>
+									<li>{t("settings.project.skills.pentest.what")}</li>
+								</ul>
+								<div className="flex items-center gap-2">
+									<Button
+										variant="primary"
+										size="sm"
+										disabled={execute.isPending}
+										onClick={() =>
+											execute.mutate({
+												skill: row.skillId,
+												modeId: "active-pentest",
+												pentestAuthorizationId: pentestAuth[row.skillId].id,
+												inputs: {
+													target: hostPortOfTarget(pentestAuth[row.skillId].target),
+													authorizationRef: (pentestRef[row.skillId] ?? "").trim(),
+												},
+											})
+										}
+										data-testid="project-skill-pentest-run"
+									>
+										{execute.isPending
+											? t("settings.project.skills.running")
+											: t("settings.project.skills.pentest.run")}
+									</Button>
+									<Button
+										variant="ghost"
+										size="sm"
+										onClick={() => {
+											const next = { ...pentestAuth };
+											delete next[row.skillId];
+											setPentestAuth(next);
+										}}
+									>
+										{t("settings.project.skills.pentest.cancel")}
+									</Button>
+								</div>
+							</div>
+						)}
+					</div>
+				) : null}
+
+				{dryRun && dryRun.skillId === row.skillId ? dryRunPanel(dryRun) : null}
+
+				{/* Executing is offered only after a dry run has said this mode
+				    is executable. That is not a convenience: the dry run is the
+				    surface that explains WHY something cannot run, and putting a
+				    Run button next to a blocked mode would invite a click whose
+				    only outcome is an error. */}
+				{dryRun && dryRun.skillId === row.skillId && dryRun.verdict === "executable" ? (
+					<div className="flex items-center gap-2">
+						<Button
+							variant="primary"
+							size="sm"
+							disabled={execute.isPending}
+							onClick={() => execute.mutate({ skill: row.skillId, modeId: dryRun.modeId })}
+							data-testid="project-skill-run"
+						>
+							{execute.isPending
+								? t("settings.project.skills.running")
+								: t("settings.project.skills.run")}
+						</Button>
+						<span className="text-caption text-settings-muted">
+							{t("settings.project.skills.runNote")}
+						</span>
+					</div>
+				) : null}
+
+				{activeRun.data && activeRun.data.run.skillId === row.skillId ? runPanel(activeRun.data) : null}
+			</li>
+		);
+	};
+
+	// The report. COVERAGE FIRST, then findings.
+	//
+	// That order is the whole point of the panel. "0 findings" is not a result
+	// until you know what was read, and a scan that staged nothing and found
+	// nothing must not render like a clean bill of health — so when nothing was
+	// scanned, this says so in words rather than showing an empty list.
+	const runPanel = (detail: SkillRunDetail) => {
+		const run = detail.run;
+		if (!isTerminalRun(run.state)) {
+			return (
+				<div className="flex flex-col gap-1" data-testid="project-skill-run-progress-block">
+					<div className="flex items-center gap-2" data-testid="project-skill-run-progress">
+						<Loader2 className="size-3 animate-spin" aria-hidden="true" />
+						<span className="text-caption">
+							{t("settings.project.skills.runInProgress", { id: run.id, state: runStateLabel(run.state) })}
+						</span>
+						{canManage ? (
+							<Button
+								variant="secondary"
+								size="sm"
+								disabled={cancelRun.isPending || run.cancelRequested}
+								onClick={() => cancelRun.mutate(run.id)}
+								data-testid="project-skill-run-cancel"
+							>
+								{t("settings.project.skills.cancelRun")}
+							</Button>
+						) : null}
+					</div>
+					{(detail.children ?? []).length > 0 ? (
+						<ul className="flex flex-col gap-0.5 pl-5" data-testid="project-skill-audit-children">
+							{(detail.children ?? []).map((c) => (
+								<li className="flex items-center gap-2 text-caption" key={c.id}>
+									<Badge variant={runStateBadge(c.state)}>{runStateLabel(c.state)}</Badge>
+									<span>{c.modeId}</span>
+								</li>
+							))}
+						</ul>
+					) : null}
+				</div>
+			);
+		}
+		if (run.tool === SKILL_AUDIT_TOOL && (run.state === "succeeded" || run.state === "partial")) {
+			if (detail.integrity !== "verified" || !detail.report) {
+				return (
+					<p className="flex items-start gap-2 text-caption text-error" data-testid="project-skill-run-unverified">
+						<ShieldAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+						{t("settings.project.skills.reportUnverified", { id: run.id })}
+					</p>
+				);
+			}
+			return auditReportPanel(detail);
+		}
+		if (run.state !== "succeeded") {
+			return (
+				<p className="flex items-start gap-2 text-caption text-error" data-testid="project-skill-run-ended">
+					<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+					{t("settings.project.skills.runEnded", {
+						id: run.id,
+						state: runStateLabel(run.state),
+						code: run.errorCode ?? "",
+						message: run.errorMessage ?? "",
+					})}
+				</p>
+			);
+		}
+		if (detail.integrity !== "verified" || !detail.report) {
+			// The stored report no longer matches its digest: it is not shown.
+			return (
+				<p className="flex items-start gap-2 text-caption text-error" data-testid="project-skill-run-unverified">
+					<ShieldAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+					{t("settings.project.skills.reportUnverified", { id: run.id })}
+				</p>
+			);
+		}
+		if (run.tool === SKILL_AGENT_TOOL) {
+			return agentReportPanel(detail);
+		}
+		const report = (detail.report ?? {}) as StaticScanReport;
+		const coverage = report.coverage ?? {};
+		const findings = report.findings ?? [];
+		const scanned = coverage.filesScanned ?? 0;
+		return (
+			<div
+				className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+				data-testid="project-skill-run-report"
+			>
+				{/* Which bytes ran, and who allowed them. A report that says one
+				    without the other leaves the more important half unanswered. */}
+				<p className="text-caption text-settings-muted">
+					{t("settings.project.skills.ranImage", {
+						digest: report.imageDigest ?? "-",
+						actor: report.approvedBy ?? "-",
+					})}
+				</p>
+				{report.approvalRevokedDuringRun ? (
+					<p className="flex items-start gap-2 text-caption text-error">
+						<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+						{t("settings.project.skills.revokedDuringRun")}
+					</p>
+				) : null}
+
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.coverage", {
+						staged: coverage.filesStaged ?? 0,
+						visible: coverage.filesVisible ?? 0,
+						scanned,
+					})}
+				</p>
+				{coverage.skipped && coverage.skipped.length > 0 ? (
+					<ul className="flex flex-col gap-0.5">
+						{coverage.skipped.map((sk) => (
+							<li className="text-caption text-settings-muted" key={sk.path}>
+								{t("settings.project.skills.skipped", { path: sk.path, reason: sk.reason })}
+							</li>
+						))}
+					</ul>
+				) : null}
+				{report.truncated ? (
+					<p className="text-caption text-error">{t("settings.project.skills.truncated")}</p>
+				) : null}
+
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.findingsCount", { count: findings.length })}
+				</p>
+				{findings.length === 0 && scanned === 0 ? (
+					// The one sentence that stops an empty report reading as clean.
+					<p className="flex items-start gap-2 text-caption text-error">
+						<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+						{t("settings.project.skills.nothingScanned")}
+					</p>
+				) : null}
+				<ul className="flex flex-col gap-1">
+					{findings.map((f) => (
+						<li className="text-caption" key={`${f.ruleId}:${f.path}:${f.line}`}>
+							<span className="font-medium">
+								[{f.severity.toUpperCase()}] {f.title}
+							</span>
+							<span className="text-settings-muted">
+								{" "}
+								{f.line > 0 ? `${f.path}:${f.line}` : f.path} · {f.ruleId} · {f.confidence}
+							</span>
+						</li>
+					))}
+				</ul>
+
+				{coverage.limitations && coverage.limitations.length > 0 ? (
+					<>
+						<p className="text-caption font-medium">
+							{t("settings.project.skills.limitations")}
+						</p>
+						<ul className="flex flex-col gap-0.5">
+							{coverage.limitations.map((l) => (
+								<li className="text-caption text-settings-muted" key={l}>
+									{l}
+								</li>
+							))}
+						</ul>
+					</>
+				) : null}
+			</div>
+		);
+	};
+
+	// An agent run: who read it and how, then coverage, then findings -- the
+	// same order as the static scan, for the same reason.
+	const agentReportPanel = (detail: SkillRunDetail) => {
+		const report = (detail.report ?? {}) as AgentReport;
+		const examined = report.coverage?.examined ?? [];
+		const skipped = report.coverage?.skipped ?? [];
+		const findings = report.findings ?? [];
+		return (
+			<div
+				className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+				data-testid="project-skill-run-report"
+			>
+				<p className="text-caption text-settings-muted">
+					{t("settings.project.skills.ranAgent", { runner: detail.run.runnerId })}
+				</p>
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.agentCoverage", {
+						examined: examined.length,
+						skipped: skipped.length,
+					})}
+				</p>
+				{skipped.length > 0 ? (
+					<ul className="flex flex-col gap-0.5">
+						{skipped.map((sk) => (
+							<li className="text-caption text-settings-muted" key={sk.path}>
+								{t("settings.project.skills.skipped", { path: sk.path, reason: sk.reason })}
+							</li>
+						))}
+					</ul>
+				) : null}
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.findingsCount", { count: findings.length })}
+				</p>
+				{findings.length === 0 && examined.length === 0 ? (
+					<p className="flex items-start gap-2 text-caption text-error">
+						<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+						{t("settings.project.skills.nothingScanned")}
+					</p>
+				) : null}
+				<ul className="flex flex-col gap-1">
+					{findings.map((f) => {
+						const loc = f.evidence?.locations?.[0];
+						return (
+							<li className="text-caption" key={f.id}>
+								<span className="font-medium">
+									[{f.severity.toUpperCase()}] {f.title}
+								</span>
+								<span className="text-settings-muted">
+									{" "}
+									{loc ? `${loc.path}${loc.line ? `:${loc.line}` : ""}` : ""} · {f.id} · {f.confidence}
+								</span>
+							</li>
+						);
+					})}
+				</ul>
+			</div>
+		);
+	};
+
+	// A full audit: completeness first -- a partial audit says so before
+	// anything else -- then the factual summary, each mode with its own
+	// coverage and a way to open its own report, the consolidated findings with
+	// their sources, and what none of it can tell you.
+	const auditReportPanel = (detail: SkillRunDetail) => {
+		const report = (detail.report ?? {}) as AuditReport;
+		const summary = report.summary ?? {};
+		const partial = report.completeness !== "complete";
+		const findings = report.findings ?? [];
+		return (
+			<div
+				className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+				data-testid="project-skill-audit-report"
+			>
+				<p
+					className={`flex items-start gap-2 text-caption font-medium ${partial ? "text-error" : ""}`}
+					data-testid="project-skill-audit-completeness"
+				>
+					{partial ? <CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" /> : null}
+					{t(partial ? "settings.project.skills.auditPartial" : "settings.project.skills.auditComplete", {
+						verified: summary.modesVerified ?? 0,
+						planned: summary.modesPlanned ?? 0,
+					})}
+				</p>
+				<ul className="flex flex-col gap-0.5">
+					{(summary.statements ?? []).map((st) => (
+						<li className="text-caption text-settings-muted" key={st}>
+							{st}
+						</li>
+					))}
+				</ul>
+				<p className="text-caption font-medium">{t("settings.project.skills.auditModes")}</p>
+				<ul className="flex flex-col gap-1">
+					{(report.modes ?? []).map((m) => (
+						<li className="flex flex-wrap items-center gap-2 text-caption" key={m.mode}>
+							<Badge variant={m.verified ? "success" : "error"}>{m.status}</Badge>
+							<span className="font-medium">{m.mode}</span>
+							<span className="text-settings-muted">
+								{m.coverage?.statement ?? m.errorCode ?? ""}
+							</span>
+							{m.runId ? (
+								<Button
+									variant="secondary"
+									size="sm"
+									onClick={() => setActiveRunId(m.runId ?? "")}
+									data-testid="project-skill-audit-open-mode"
+								>
+									{t("settings.project.skills.auditOpenMode")}
+								</Button>
+							) : null}
+						</li>
+					))}
+				</ul>
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.findingsCount", { count: findings.length })}
+				</p>
+				<ul className="flex flex-col gap-1">
+					{findings.map((f) => (
+						<li className="text-caption" key={f.id}>
+							<span className="font-medium">
+								[{f.severity.toUpperCase()}] {f.title}
+							</span>
+							<span className="text-settings-muted">
+								{" "}
+								{f.line ? `${f.path}:${f.line}` : f.path} · {f.id} · {f.confidence} ·{" "}
+								{f.sources.map((src) => `${src.mode}/${src.ruleId}`).join(", ")}
+							</span>
+						</li>
+					))}
+				</ul>
+				{(report.limitations ?? []).length > 0 ? (
+					<>
+						<p className="text-caption font-medium">{t("settings.project.skills.limitations")}</p>
+						<ul className="flex flex-col gap-0.5">
+							{(report.limitations ?? []).map((l) => (
+								<li className="text-caption text-settings-muted" key={l}>
+									{l}
+								</li>
+							))}
+						</ul>
+					</>
+				) : null}
+				<p className="text-caption text-settings-muted" data-testid="project-skill-audit-export">
+					{t("settings.project.skills.auditExportHint", {
+						project: projectId,
+						id: detail.run.id,
+						sha: detail.run.reportSha256 ?? "",
+					})}
+				</p>
+			</div>
+		);
+	};
+
+	const dryRunPanel = (result: SkillDryRun) => (
+		<div
+			className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+			data-testid="project-skill-dry-run"
+		>
+			<div className="flex items-center gap-2">
+				<Badge variant={result.verdict === "executable" ? "success" : "warning"}>
+					{verdictLabel(result.verdict)}
+				</Badge>
+				<span className="text-caption text-settings-muted">
+					{result.modeName || result.modeId}
+				</span>
+				<Badge variant={riskBadge(result.modeRisk)}>{riskLabel(result.modeRisk)}</Badge>
+			</div>
+			{/* A dry run changes nothing. Saying so on the panel keeps the
+			    control from reading like a "run" button. */}
+			<p className="text-caption text-settings-muted">{t("settings.project.skills.dryRunNote")}</p>
+			<ul className="flex flex-col gap-1">
+				{result.decisions.map((decision) => (
+					<li key={decision.capability} className="flex items-start gap-2 text-caption">
+						{decision.satisfied ? (
+							<ShieldCheck className="mt-0.5 size-3 shrink-0 text-success" aria-hidden="true" />
+						) : (
+							<ShieldAlert className="mt-0.5 size-3 shrink-0 text-error" aria-hidden="true" />
+						)}
+						<span className="min-w-0 flex-1">
+							<span className="text-settings-label">{decision.capability}</span>
+							<span className="ml-2 text-settings-muted">
+								{decision.satisfied ? decision.description : decision.detail}
+							</span>
+						</span>
+					</li>
+				))}
+			</ul>
+			{result.missingPermissions.length > 0 ? (
+				<p className="text-caption text-error">
+					{t("settings.project.skills.missingPermissions", {
+						list: result.missingPermissions.join(", "),
+					})}
+				</p>
+			) : null}
+			{/* Say what the environment IS, then what this run still needs
+			    from it. "Blocked" without the gap is not actionable. */}
+			<p className="text-caption text-settings-muted">
+				{(result.runner.controls ?? []).length > 0
+					? t("settings.project.skills.runnerProvides", {
+							runner: result.runner.runnerId,
+							list: (result.runner.controls ?? []).join(", "),
+						})
+					: t("settings.project.skills.runnerNone")}
+			</p>
+			{(result.runner.missingControls ?? []).length > 0 ? (
+				<p className="text-caption text-error">
+					{t("settings.project.skills.runnerMissingControls", {
+						list: (result.runner.missingControls ?? []).join(", "),
+					})}
+				</p>
+			) : null}
+		</div>
+	);
+
+	return (
+		<SettingsSection title={t("settings.project.skills")} sectionId="project-skills">
+			<p className="px-3 text-caption text-settings-muted">
+				{t("settings.project.skills.description")}
+			</p>
+
+			{skills.isLoading ? (
+				<div className="flex items-center gap-2 px-3 py-2 text-caption text-settings-muted">
+					<Loader2 className="size-3 animate-spin" aria-hidden="true" />
+					{t("settings.project.skills.loading")}
+				</div>
+			) : skills.error ? (
+				<p className="px-3 text-caption text-error">{(skills.error as Error).message}</p>
+			) : (
+				<ul className="flex flex-col gap-1.5">
+					{activations.length === 0 ? (
+						<p className="px-3 text-caption text-settings-muted">
+							{installed.length === 0
+								? t("settings.project.skills.noneInstalled")
+								: t("settings.project.skills.noneActivated")}
+						</p>
+					) : (
+						activations.map(activationRow)
+					)}
+				</ul>
+			)}
+
+			{error ? <p className="px-3 text-caption text-error">{error}</p> : null}
+
+			{canManage && notActivated.length > 0 ? (
+				<div className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] bg-[var(--color-bg-settings-input)] p-3">
+					<p className="text-caption text-settings-muted">
+						{t("settings.project.skills.activateHint")}
+					</p>
+					<Select
+						value={selectedSkill}
+						onValueChange={(next) => {
+							setSelectedSkill(next);
+							setGrant({});
+						}}
+					>
+						<SelectTrigger aria-label={t("settings.project.skills.activate")}>
+							<SelectValue placeholder={t("settings.project.skills.activate")} />
+						</SelectTrigger>
+						<SelectContent>
+							{notActivated.map((skill) => (
+								<SelectItem key={skill.id} value={skill.id}>
+									{skill.name} · {skill.version}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+
+					{pending ? (
+						<>
+							<p className="text-caption text-settings-muted">{pending.description}</p>
+							<ul className="flex flex-col gap-1.5" data-testid="project-skill-grant">
+								{pending.capabilities.map((name) => {
+									const policy = capabilityPolicy.get(name);
+									const grantable = !policy || permissions.includes(policy.requiredPermission);
+									return (
+										<li key={name} className="flex items-start gap-3">
+											<Switch
+												checked={grant[name] === true}
+												disabled={!grantable}
+												onCheckedChange={(on) => setGrant({ ...grant, [name]: on })}
+												aria-label={name}
+											/>
+											<span className="min-w-0 flex-1">
+												<span className="flex items-center gap-2">
+													<span className="text-sm text-settings-label">{name}</span>
+													{policy ? (
+														<Badge variant={riskBadge(policy.risk)}>{riskLabel(policy.risk)}</Badge>
+													) : null}
+												</span>
+												{policy ? (
+													<span className="block text-caption text-settings-muted">
+														{policy.description}
+													</span>
+												) : null}
+												{/* Two different reasons a capability may be
+												    unavailable, and the difference matters: one is
+												    about the person, the other about the platform. */}
+												{policy && !grantable ? (
+													<span className="block text-caption text-error">
+														{t("settings.project.skills.cannotGrant", {
+															permission: policy.requiredPermission,
+														})}
+													</span>
+												) : null}
+												{/* A capability that needs guarantees the runner
+												    does not provide is named with the control, so
+												    the reason is "this has to be built" rather than
+												    a vague "not isolated". */}
+												{policy && (policy.requiresControls ?? []).length > 0 ? (
+													<span className="block text-caption text-settings-muted">
+														{t("settings.project.skills.needsControls", {
+															list: (policy.requiresControls ?? []).join(", "),
+														})}
+													</span>
+												) : null}
+											</span>
+										</li>
+									);
+								})}
+							</ul>
+							<Button
+								variant="primary"
+								size="sm"
+								disabled={enable.isPending || !Object.values(grant).some(Boolean)}
+								onClick={() => enable.mutate({ skill: pending.id, version: pending.version })}
+							>
+								{t("settings.project.skills.enable")}
+							</Button>
+							<p className="text-caption text-settings-muted">
+								{t("settings.project.skills.enableNote")}
+							</p>
+						</>
+					) : null}
+				</div>
+			) : null}
+
+			{/* The project's run history. Every accepted run is here, including
+			    the ones that were refused, failed, cancelled or interrupted by a
+			    restart -- a history that only kept successes would read as a
+			    project that was audited more cleanly than it was. */}
+			<div className="flex flex-col gap-2 px-3" data-testid="project-skill-runs">
+				<p className="text-caption font-medium">{t("settings.project.skills.history")}</p>
+				{(runHistory.data ?? []).length === 0 ? (
+					<p className="text-caption text-settings-muted">{t("settings.project.skills.historyEmpty")}</p>
+				) : (
+					<ul className="flex flex-col gap-1">
+						{(runHistory.data ?? []).map((r) => (
+							<li key={r.id}>
+								<button
+									type="button"
+									className="flex w-full items-center gap-2 text-left text-caption"
+									onClick={() => setActiveRunId(r.id)}
+									data-testid="project-skill-run-row"
+								>
+									<Badge variant={runStateBadge(r.state)}>{runStateLabel(r.state)}</Badge>
+									<span className="font-medium">
+										{r.skillId}@{r.version} · {r.modeId}
+									</span>
+									<span className="text-settings-muted">
+										{new Date(r.createdAt).toLocaleString()}
+										{r.durationMs !== undefined && r.durationMs !== null
+											? ` · ${(r.durationMs / 1000).toFixed(1)}s`
+											: ""}
+										{r.parentRunId ? ` · ${t("settings.project.skills.auditChild", { id: r.parentRunId })}` : ""}
+										{" · "}
+										{r.errorCode && r.state !== "partial" ? `${r.errorCode}: ${r.errorMessage ?? ""}` : r.summary}
+									</span>
+								</button>
+							</li>
+						))}
+					</ul>
+				)}
+			</div>
+		</SettingsSection>
+	);
+}

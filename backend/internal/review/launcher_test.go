@@ -19,6 +19,8 @@ type fakeReviewer struct {
 	gotInv           ports.ReviewInvocation
 	workingDirectory string
 	env              map[string]string
+	preLaunchInv     ports.ReviewInvocation
+	preLaunchCalls   int
 }
 
 func (f *fakeReviewer) ReviewCommand(_ context.Context, inv ports.ReviewInvocation) (ports.ReviewCommandSpec, error) {
@@ -28,6 +30,37 @@ func (f *fakeReviewer) ReviewCommand(_ context.Context, inv ports.ReviewInvocati
 func (f *fakeReviewer) ReviewMessage(_ context.Context, inv ports.ReviewInvocation) (string, error) {
 	f.gotInv = inv
 	return inv.Prompt, nil
+}
+
+// PreLaunch makes fakeReviewer satisfy preLaunchReviewer so tests can
+// assert on the ReviewInvocation (in particular Env) the launcher builds
+// before a reviewer pane starts (Checkpoint 8P-E.3.1).
+func (f *fakeReviewer) PreLaunch(_ context.Context, inv ports.ReviewInvocation) error {
+	f.preLaunchInv = inv
+	f.preLaunchCalls++
+	return nil
+}
+
+// fakeSessionOwnerLookup is a hand-rolled fake for sessionOwnerLookup.
+type fakeSessionOwnerLookup struct {
+	owners map[domain.SessionID]domain.UserID
+}
+
+func (f fakeSessionOwnerLookup) GetSessionOwner(_ context.Context, id domain.SessionID) (*domain.UserID, error) {
+	owner, ok := f.owners[id]
+	if !ok {
+		return nil, nil
+	}
+	return &owner, nil
+}
+
+// fakeRuntimeEnvResolver is a hand-rolled fake for runtimeEnvResolver.
+type fakeRuntimeEnvResolver struct {
+	env map[string]string
+}
+
+func (f fakeRuntimeEnvResolver) ResolveForOwner(_ context.Context, _ domain.UserID, _ domain.AgentHarness) (map[string]string, domain.ProviderProfileID, error) {
+	return f.env, "", nil
 }
 
 func TestLauncherSpawnEnvCannotOverrideWorkerContext(t *testing.T) {
@@ -74,6 +107,66 @@ func TestLauncherSpawnEnvCannotOverrideWorkerContext(t *testing.T) {
 	}
 }
 
+// TestLauncherSpawnAppliesOwnerIsolatedRuntimeEnv is Checkpoint 8P-E.3.1's
+// core regression: with WithOwnerRuntimeEnv wired, the worker session's own
+// owner resolves an isolated env that (a) reaches PreLaunch (so a Claude
+// reviewer's trust record lands in the isolated CLAUDE_CONFIG_DIR, not the
+// daemon host's own config) and (b) reaches the actual runtime pane's env
+// (so the reviewer subprocess that later reads that config is the same
+// isolated one) -- and that it wins over whatever the adapter/PATH-pinning
+// logic would otherwise set.
+func TestLauncherSpawnAppliesOwnerIsolatedRuntimeEnv(t *testing.T) {
+	reviewer := &fakeReviewer{}
+	rt := &fakeRuntime{}
+	owners := fakeSessionOwnerLookup{owners: map[domain.SessionID]domain.UserID{"mer-1": "user-1"}}
+	isolatedEnv := map[string]string{
+		"HOME":              "/isolated/users/user-1/runtime-home",
+		"CLAUDE_CONFIG_DIR": "/isolated/users/user-1/providers/claude-code",
+	}
+	resolver := fakeRuntimeEnvResolver{env: isolatedEnv}
+	l := NewLauncher(fakeReviewerResolver{reviewer: reviewer, ok: true}, rt, t.TempDir(),
+		WithOwnerRuntimeEnv(owners, resolver))
+
+	if _, err := l.Spawn(context.Background(), launchSpec()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	if reviewer.preLaunchCalls != 1 {
+		t.Fatalf("PreLaunch calls = %d, want 1", reviewer.preLaunchCalls)
+	}
+	if reviewer.preLaunchInv.Env["CLAUDE_CONFIG_DIR"] != isolatedEnv["CLAUDE_CONFIG_DIR"] {
+		t.Fatalf("PreLaunch Env = %#v, want isolated CLAUDE_CONFIG_DIR", reviewer.preLaunchInv.Env)
+	}
+	if rt.createCfg.Env["HOME"] != isolatedEnv["HOME"] {
+		t.Fatalf("runtime pane Env[HOME] = %q, want isolated %q", rt.createCfg.Env["HOME"], isolatedEnv["HOME"])
+	}
+	if rt.createCfg.Env["CLAUDE_CONFIG_DIR"] != isolatedEnv["CLAUDE_CONFIG_DIR"] {
+		t.Fatalf("runtime pane Env[CLAUDE_CONFIG_DIR] = %q, want isolated %q", rt.createCfg.Env["CLAUDE_CONFIG_DIR"], isolatedEnv["CLAUDE_CONFIG_DIR"])
+	}
+}
+
+// TestLauncherSpawnWithoutOwnerRuntimeEnvOptionLeavesEnvUnresolved proves
+// worker/reviewer behavior for every existing caller that does not opt into
+// WithOwnerRuntimeEnv is byte-for-byte unchanged by Checkpoint 8P-E.3.1: no
+// isolation dependency wired means resolveOwnerRuntimeEnv is a permanent
+// no-op, exactly like providerruntime.Resolver's own nil-Owners convention.
+func TestLauncherSpawnWithoutOwnerRuntimeEnvOptionLeavesEnvUnresolved(t *testing.T) {
+	reviewer := &fakeReviewer{}
+	rt := &fakeRuntime{}
+	l := NewLauncher(fakeReviewerResolver{reviewer: reviewer, ok: true}, rt, t.TempDir())
+
+	if _, err := l.Spawn(context.Background(), launchSpec()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	if reviewer.preLaunchInv.Env != nil {
+		t.Fatalf("PreLaunch Env = %#v, want nil (no isolation dependency wired)", reviewer.preLaunchInv.Env)
+	}
+	if _, ok := rt.createCfg.Env["CLAUDE_CONFIG_DIR"]; ok {
+		t.Fatalf("runtime pane Env unexpectedly carries CLAUDE_CONFIG_DIR: %#v", rt.createCfg.Env)
+	}
+}
+
 func TestLauncherSpawnPinsPATHToAOExecutable(t *testing.T) {
 	aoDir := t.TempDir()
 	aoExe := filepath.Join(aoDir, "ao")
@@ -112,10 +205,25 @@ func TestLauncherSpawnCreatesAOShimWhenExecutableIsNotNamedAO(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 
+	// Checkpoint 8I.2: not being named "ao" no longer collapses PATH — the
+	// shim dir is added on top of the still-good HookPATH result (executable
+	// dir, adapter PATH, and required system dirs), not in place of it.
 	shimDir := filepath.Join(dataDir, "reviewer-runtime", "bin")
 	parts := strings.Split(rt.createCfg.Env["PATH"], string(os.PathListSeparator))
-	if len(parts) < 2 || parts[0] != shimDir || parts[1] != "/reviewer/bin" {
-		t.Fatalf("reviewer PATH = %q, want shim dir before adapter PATH", rt.createCfg.Env["PATH"])
+	if len(parts) < 3 || parts[0] != shimDir || parts[1] != filepath.Dir(exe) || parts[2] != "/reviewer/bin" {
+		t.Fatalf("reviewer PATH = %q, want shim dir, then executable dir, then adapter PATH", rt.createCfg.Env["PATH"])
+	}
+	for _, want := range []string{"/usr/bin", "/bin"} {
+		found := false
+		for _, p := range parts {
+			if p == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("reviewer PATH = %q, want it to still include required system dir %q", rt.createCfg.Env["PATH"], want)
+		}
 	}
 	shimPath := filepath.Join(shimDir, "ao")
 	if runtime.GOOS == "windows" {
@@ -130,19 +238,19 @@ func TestLauncherSpawnCreatesAOShimWhenExecutableIsNotNamedAO(t *testing.T) {
 	}
 }
 
-func TestLauncherSpawnWarnsWhenPATHPinAndShimFail(t *testing.T) {
+// TestLauncherSpawnWarnsWhenPATHPinFails covers the now-rare case where the
+// daemon's own executable path cannot be resolved at all (HookPATH's only
+// remaining error condition post-8I.2 — a mismatched binary name is no
+// longer an error, see TestLauncherSpawnCreatesAOShimWhenExecutableIsNotNamedAO).
+// PATH must still end up usable (required system dirs), not unset.
+func TestLauncherSpawnWarnsWhenPATHPinFails(t *testing.T) {
 	reviewer := &fakeReviewer{env: map[string]string{"PATH": "/reviewer/bin"}}
 	rt := &fakeRuntime{}
-	calls := 0
 	l := NewLauncher(
 		fakeReviewerResolver{reviewer: reviewer, ok: true},
 		rt,
 		t.TempDir(),
 		WithExecutable(func() (string, error) {
-			calls++
-			if calls == 1 {
-				return filepath.Join(t.TempDir(), "ao-dev-daemon"), nil
-			}
 			return "", errors.New("executable unavailable")
 		}),
 	)
@@ -153,12 +261,49 @@ func TestLauncherSpawnWarnsWhenPATHPinAndShimFail(t *testing.T) {
 	if !rt.created {
 		t.Fatal("runtime.Create was not called")
 	}
-	if rt.createCfg.Env["PATH"] != "/reviewer/bin" {
-		t.Fatalf("PATH = %q, want original reviewer PATH", rt.createCfg.Env["PATH"])
+	want := "/reviewer/bin" + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	if rt.createCfg.Env["PATH"] != want {
+		t.Fatalf("PATH = %q, want %q (original reviewer PATH plus required system dirs)", rt.createCfg.Env["PATH"], want)
 	}
 	warning := rt.createCfg.Env[EnvAOCommandWarning]
-	if !strings.Contains(warning, "PATH pin failed") || !strings.Contains(warning, "AO shim fallback failed") || !strings.Contains(warning, "executable unavailable") {
-		t.Fatalf("%s = %q, want combined PATH/shim warning", EnvAOCommandWarning, warning)
+	if !strings.Contains(warning, "PATH pin failed") || !strings.Contains(warning, "executable unavailable") {
+		t.Fatalf("%s = %q, want PATH-pin-failed warning", EnvAOCommandWarning, warning)
+	}
+}
+
+// TestLauncherSpawnWarnsWhenShimFallbackFails covers: executable resolves
+// fine (so HookPATH succeeds and PATH stays usable) but is not named "ao",
+// and the shim-directory fallback for fixing `ao` hook resolution itself
+// fails (e.g. an unwritable data dir). PATH must still carry the good
+// HookPATH result rather than being lost.
+func TestLauncherSpawnWarnsWhenShimFallbackFails(t *testing.T) {
+	reviewer := &fakeReviewer{env: map[string]string{"PATH": "/reviewer/bin"}}
+	rt := &fakeRuntime{}
+	exe := filepath.Join(t.TempDir(), "ao-dev-daemon")
+	dataDir := t.TempDir()
+	// Pre-create "reviewer-runtime" as a regular file so ensureAOShimDir's
+	// MkdirAll(dataDir/reviewer-runtime/bin) fails, without disturbing the
+	// separate dataDir/prompts path the launcher also needs.
+	if err := os.WriteFile(filepath.Join(dataDir, "reviewer-runtime"), []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := NewLauncher(
+		fakeReviewerResolver{reviewer: reviewer, ok: true},
+		rt,
+		dataDir,
+		WithExecutable(func() (string, error) { return exe, nil }),
+	)
+
+	if _, err := l.Spawn(context.Background(), launchSpec()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	want := filepath.Dir(exe) + string(os.PathListSeparator) + "/reviewer/bin" + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	if rt.createCfg.Env["PATH"] != want {
+		t.Fatalf("PATH = %q, want %q (HookPATH result preserved despite shim failure)", rt.createCfg.Env["PATH"], want)
+	}
+	warning := rt.createCfg.Env[EnvAOCommandWarning]
+	if !strings.Contains(warning, "AO shim fallback failed") {
+		t.Fatalf("%s = %q, want AO-shim-fallback-failed warning", EnvAOCommandWarning, warning)
 	}
 }
 

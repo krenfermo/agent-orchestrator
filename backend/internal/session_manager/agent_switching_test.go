@@ -745,7 +745,7 @@ func TestBuildTargetContinuationMessageUsesTerminalFallbackWithoutTranscript(t *
 func TestBuildTargetContinuationMessageHasCompleteDeliveryByteCeiling(t *testing.T) {
 	message := buildTargetContinuationMessage(
 		domain.AgentSwitch{ID: "switch-1", SessionID: "proj-1", FromHarness: domain.HarnessCodex, TargetHarness: domain.HarnessClaudeCode},
-		deterministicSwitchContext{LatestUserPrompt: strings.Repeat("u", conversationFactBytes)},
+		deterministicSwitchContext{LatestUserPrompt: strings.Repeat("u", domain.LatestUserPromptBytes)},
 		&switchTranscriptFact{Path: "/provider/session.jsonl", Tail: strings.Repeat("oversized-transcript-data", 10_000)},
 	)
 	if len(message) > handoffContinuationMaxBytes {

@@ -81,6 +81,26 @@ type AgentMessenger interface {
 // liveness probing for reapers and terminal attachment.
 type Runtime interface {
 	Create(ctx context.Context, cfg RuntimeConfig) (RuntimeHandle, error)
+	// Destroy is addressed by NAME, and a name is not an identity.
+	//
+	// UNSAFE AND NON-AUTHORITATIVE, deliberately and permanently. A runtime
+	// session name is reusable: the session AO looked at and the session this
+	// call reaches can be different incarnations, because the first can exit
+	// and a second can take the name in between. That is the ABA, and no
+	// amount of checking before the call closes it — the check and the destroy
+	// are two moments.
+	//
+	// It therefore may NOT be used to make an ownership decision. A caller that
+	// is deciding whether a runtime is AO's to remove — a sweeper, the capacity
+	// scheduler, a recovery pass — must use SessionFactsReader.DestroyInstance,
+	// which names one immutable incarnation and leaves a replacement under the
+	// same name alive. TestOwnershipSensitivePathsNeverUseNameOnlyDestroy
+	// enforces that boundary over the packages where it matters.
+	//
+	// What remains legitimate is destruction that is not an ownership decision
+	// at all: tearing down a handle in AO's own namespace immediately before
+	// recreating it, where destroying a stranger that had somehow taken the
+	// name is the same outcome as the create that follows.
 	Destroy(ctx context.Context, handle RuntimeHandle) error
 	GetOutput(ctx context.Context, handle RuntimeHandle, lines int) (string, error)
 	IsAlive(ctx context.Context, handle RuntimeHandle) (bool, error)
@@ -110,12 +130,30 @@ type RuntimeConfig struct {
 	WorkspacePath string
 	Argv          []string
 	Env           map[string]string
+	// Owner is AO's ownership token for this runtime instance, and it is
+	// attached ATOMICALLY with creation — not written afterwards.
+	//
+	// The distinction is the whole point. A marker written after Create returns
+	// leaves a window in which a live session exists that AO cannot identify:
+	// unadoptable (it might be someone else's), unterminatable (destroying what
+	// you cannot prove you own is worse), and therefore permanent. A runtime
+	// that cannot attach this token must fail creation and destroy whatever it
+	// partially created, so that window has no states in it.
+	//
+	// Empty means unowned, which is the pre-existing behaviour for every
+	// caller that does not need a recoverable identity.
+	Owner string
 }
 
 // RuntimeHandle identifies a live runtime instance. Its ID is opaque outside
 // the concrete runtime adapter.
 type RuntimeHandle struct {
 	ID string
+	// InstanceID is the runtime's immutable identity for this exact incarnation,
+	// when the runtime has one (tmux's `$N`). ID is a reusable name and is only a
+	// discovery key; this is the authority key. Empty when the runtime does not
+	// distinguish incarnations.
+	InstanceID string
 }
 
 // SupervisedProcessRef identifies the AO-owned supervisor belonging to one
@@ -204,6 +242,66 @@ type Workspace interface {
 	// present are skipped. Owning this here keeps git/process execution inside the
 	// workspace adapter rather than leaking into callers.
 	AddExclude(ctx context.Context, info WorkspaceInfo, patterns ...string) error
+	// MaterializeIntegrationCommit captures the worktree's current tracked
+	// and untracked state (respecting .gitignore, plus excludePatterns for
+	// known ephemeral artifacts) into a commit object under ref, parented on
+	// parentSHA (empty for the first commit on that ref), stamped with AO's
+	// own git identity — never the ambient user's — and WITHOUT mutating the
+	// working tree or the real index, matching StashUncommitted's
+	// plumbing-only approach (Checkpoint 8M.1). write-tree runs first: if the
+	// resulting tree is identical to parentSHA's tree, no new commit object
+	// is created and reused=true is returned with the existing head. Never
+	// pushes or touches any remote; ref is local-only under refs/ao/*.
+	MaterializeIntegrationCommit(ctx context.Context, info WorkspaceInfo, ref, parentSHA, message string, excludePatterns []string) (commitSHA, treeSHA string, reused bool, err error)
+}
+
+// WorkspaceCommitAuthorName and WorkspaceCommitAuthorEmail are AO's own git
+// identity. Every commit AO authors — the worktree adapter's internal
+// integration commits and the direct-branch adapter's autonomous local commits
+// alike — is stamped with these, never with the ambient user's configured
+// identity, so a repository's history always says plainly which commits a human
+// wrote and which an autonomous run produced.
+const (
+	WorkspaceCommitAuthorName  = "Agent Orchestrator"
+	WorkspaceCommitAuthorEmail = "ao@local"
+)
+
+// WorkspaceCommitter is an optional capability for workspace adapters that can
+// commit the working tree's current state on the branch it is already on
+// (Checkpoint 8P-E.11). It backs the autonomous local commit that concludes a
+// direct-branch workflow when the project's GitPolicy.LocalCommit is automatic.
+// The policy decision is always the caller's; an adapter implementing this
+// interface only performs the commit it is asked for.
+type WorkspaceCommitter interface {
+	// CommitAll stages every tracked and non-ignored untracked change and
+	// commits it with AO's own identity. committed=false with a nil error
+	// means the tree was clean — a normal outcome, never a failure. It never
+	// pushes, never creates a branch, and never touches a remote.
+	CommitAll(ctx context.Context, info WorkspaceInfo, message string) (commitSHA string, committed bool, err error)
+}
+
+// WorkspacePreflighter is an optional read-only capability that answers
+// "is it safe to start an autonomous run against this repository/branch?"
+// without mutating anything. Direct-branch execution consults it before it
+// acquires a branch lock or spawns anything, so a repository holding a human's
+// uncommitted work is surfaced as needs_attention rather than discovered
+// halfway into a run.
+type WorkspacePreflighter interface {
+	PreflightRepository(ctx context.Context, repoPath, branch string) (WorkspacePreflight, error)
+}
+
+// WorkspacePreflight is the result of a read-only direct-branch safety probe.
+type WorkspacePreflight struct {
+	RepoPath string `json:"repoPath"`
+	// ConfiguredBranch is the branch the project/repository configures — the
+	// authoritative one, never a detected fallback.
+	ConfiguredBranch string `json:"configuredBranch"`
+	// CurrentBranch is what is checked out right now; empty for a detached HEAD.
+	CurrentBranch string `json:"currentBranch,omitempty"`
+	HeadSHA       string `json:"headSha,omitempty"`
+	// Dirty reports pre-existing uncommitted changes or untracked files.
+	Dirty   bool              `json:"dirty"`
+	Changes []WorkspaceChange `json:"changes,omitempty"`
 }
 
 // WorkspaceObserver is an optional read-only capability implemented by
@@ -265,16 +363,57 @@ var (
 	ErrWorkspaceBranchNotFetched = errors.New("workspace: branch is not fetched")
 	// ErrWorkspaceBranchInvalid reports the requested branch name is not a valid
 	// git ref (rejected by `git check-ref-format`).
+	//
+	// It means git LOOKED at the name and said no. It is never returned for a
+	// probe that did not run to completion; see ErrWorkspaceProbeInconclusive.
 	ErrWorkspaceBranchInvalid = errors.New("workspace: invalid branch name")
+	// ErrWorkspaceProbeInconclusive reports that a read-only git probe did not
+	// return a verdict: it was killed (a cancelled context, a deadline, an
+	// operator, the OOM killer) or could not be started at all.
+	//
+	// It exists because the alternative is worse than an unclear error. AO ran
+	// `git check-ref-format --branch ao/sige-12/root`, got `signal: killed`,
+	// and reported INVALID_BRANCH for a name git accepts — a permanent verdict
+	// invented from a process that never rendered one. A probe that could not
+	// run is still a failure; it is a failure about AO's environment rather
+	// than about the caller's input, and it is retryable where an invalid name
+	// is not.
+	ErrWorkspaceProbeInconclusive = errors.New("workspace: git probe did not return a verdict")
 	// ErrWorkspaceDirty reports Destroy refused to remove a workspace because
 	// it holds uncommitted changes or untracked files. Teardown is never
 	// forced; callers treat the workspace as intentionally preserved.
 	ErrWorkspaceDirty = errors.New("workspace: uncommitted changes present")
+	// ErrWorkspaceRepositoryDirty reports that a direct-branch run refused to
+	// start because the registered repository already holds uncommitted
+	// changes AO did not create (Checkpoint 8P-E.11). Deliberately distinct
+	// from ErrWorkspaceDirty, which means "teardown refused to delete an
+	// AO-owned worktree": this one means "startup refused to write into a
+	// human's working tree", and callers surface it as a dirty_worktree
+	// needs_attention state rather than as a cleanup skip.
+	ErrWorkspaceRepositoryDirty = errors.New("workspace: repository has pre-existing uncommitted changes")
+	// ErrWorkspaceOperationUnsupported reports that the workspace adapter
+	// selected for a project cannot perform the requested operation at all
+	// (e.g. internal integration commits in direct-branch mode). It is a
+	// permanent configuration mismatch, never a transient failure to retry.
+	ErrWorkspaceOperationUnsupported = errors.New("workspace: operation not supported in this execution mode")
 	// ErrWorkspaceStale reports an AO-managed workspace path no longer points
 	// at a registered git worktree. Replacement paths may skip preservation for
 	// this state after path-safety checks, while real preserve failures remain
 	// fatal.
 	ErrWorkspaceStale = errors.New("workspace: stale managed worktree")
+	// ErrWorkspaceNotManaged reports that a workspace adapter refused a path
+	// because the path is not one of the worktrees THAT adapter manages — not
+	// because anything is wrong with the path itself.
+	//
+	// It is the difference between "this path is dangerous" and "this is not my
+	// department", and the two used to be the same error. The managed-root guard
+	// exists to stop the worktree adapter from deleting, stashing or checking
+	// out somewhere it does not own; a direct-branch run's repository is exactly
+	// such a path, and it is also a perfectly ordinary repository to READ. A
+	// router that cannot tell the two apart turns "ask the other adapter" into
+	// "there is no observation", which is how a direct-branch worker's own
+	// change became invisible to the work step watching for it.
+	ErrWorkspaceNotManaged = errors.New("workspace: path is not managed by this workspace adapter")
 	// ErrWorkspaceLocked reports a registered git worktree whose directory is
 	// missing but whose registration is locked (`git worktree lock`). `git
 	// worktree prune` deliberately leaves a locked registration in place even
@@ -307,7 +446,104 @@ var (
 	// every session on the board). Adapters wrap this sentinel via fmt.Errorf
 	// so callers can match it with errors.Is.
 	ErrRuntimeUnavailable = errors.New("runtime: infrastructure unavailable")
+	// ErrRuntimeServerAbsent (P9) is the one unavailable answer that is itself
+	// a FACT: the runtime server's rendezvous (tmux's socket file) does not
+	// exist at all, so no session of this installation can exist. It always
+	// wraps together with ErrRuntimeUnavailable. Any other failure to reach the
+	// server -- a refused connection, a permission error, a timeout -- is only
+	// an inability to tell, and must never be read as a dead runtime.
+	ErrRuntimeServerAbsent = errors.New("runtime: no server exists for this installation")
+	// ErrRuntimeOrphanedSession reports the one outcome a failed Create must
+	// never hide: the session was created, could not be made ownable, AND could
+	// not be proven torn down.
+	//
+	// An ordinary create failure means nothing is running. This means something
+	// may well be — a live session AO cannot identify, and therefore can neither
+	// adopt nor terminate. Collapsing the two would report a clean failure over
+	// a permanent orphan, which is precisely the class of silence this boundary
+	// exists to remove, so callers match this sentinel to escalate rather than
+	// simply retry.
+	ErrRuntimeOrphanedSession = errors.New("runtime: a created session could not be made ownable or proven torn down")
+	// ErrRuntimeSessionReplaced reports that the session occupying a name
+	// CHANGED between two observations AO was combining.
+	//
+	// Session names are reusable the instant their holder exits, so facts read
+	// under the same name can belong to different incarnations: ownership proven
+	// of one session, liveness measured on another. Merging them would let AO
+	// adopt — or destroy — a session it never verified. Callers must treat this
+	// as uncertainty and re-observe, never as a verdict about either instance.
+	ErrRuntimeSessionReplaced = errors.New("runtime: the session behind this name was replaced between observations")
 )
+
+// SessionFacts is ONE COHERENT observation of a runtime session: every field
+// belongs to the same session incarnation, or the read fails.
+//
+// It exists because the interesting questions about a session (is it AO's? is
+// its workload running?) cannot be answered by a single command, and answering
+// them with separate look-ups keyed by a reusable name is how facts from two
+// different sessions get combined into one false conclusion.
+type SessionFacts struct {
+	// InstanceID is the runtime's immutable per-incarnation identity (tmux's
+	// `$N`), never a name. It is what destructive actions must target.
+	InstanceID string
+	// Owner is the ownership token attached at creation; OwnerKnown is false
+	// when the session carries none.
+	Owner      string
+	OwnerKnown bool
+	// WorkloadAlive reports whether the process AO launched is still running.
+	// WorkloadKnown is false when that could not be determined, which callers
+	// must treat as uncertainty rather than exit.
+	WorkloadAlive bool
+	WorkloadKnown bool
+	// Installation is the AO installation stamp read back from the same
+	// incarnation (P9); InstallationKnown is false for a runtime created
+	// without one (before P9, or by a runtime that cannot stamp). An unstamped
+	// runtime is not a mismatch — the owner token still proves ownership — but
+	// a stamp naming another installation is.
+	Installation      string
+	InstallationKnown bool
+}
+
+// SessionFactsReader is the optional runtime capability that answers about a
+// session as a single coherent instance. Implementations MUST fail with
+// ErrRuntimeSessionReplaced rather than return facts spanning incarnations.
+type SessionFactsReader interface {
+	SessionFacts(ctx context.Context, handle RuntimeHandle) (SessionFacts, bool, error)
+	// DestroyInstance destroys one exact incarnation, identified by InstanceID.
+	// A session that has since been replaced under the same name MUST survive.
+	DestroyInstance(ctx context.Context, instanceID string) error
+}
+
+// RuntimeSessionSummary is one session as the runtime's own inventory sees it.
+//
+// It carries the incarnation and the ownership token together, for the same
+// reason SessionFacts does: a name plus a separately-read owner describes two
+// moments, and a session can be surrendered and reclaimed between them.
+type RuntimeSessionSummary struct {
+	// ID is the reusable session name. It is a discovery key and never an
+	// authority key.
+	ID string
+	// InstanceID is the immutable incarnation (tmux's `$N`). Destructive
+	// actions must target this.
+	InstanceID string
+	// Owner is the ownership token attached at creation; OwnerKnown is false
+	// when the session carries none, which is NOT proof it is a stranger's --
+	// only proof that AO cannot tell from the session alone.
+	Owner      string
+	OwnerKnown bool
+}
+
+// RuntimeInventory is the optional runtime capability that enumerates the
+// sessions on AO's own runtime server.
+//
+// It exists for Runtime GC, and it is deliberately read-only: enumerating is
+// how orphans are FOUND, and proving one is safe to destroy is a separate
+// question answered per-session by SessionFacts. A runtime without this
+// capability simply has no orphan sweep, which is a missing feature rather
+// than an unsafe one.
+type RuntimeInventory interface {
+	ListSessions(ctx context.Context) ([]RuntimeSessionSummary, error)
+}
 
 // WorkspaceConfig is the spec for creating or restoring a session's workspace.
 type WorkspaceConfig struct {
@@ -325,6 +561,20 @@ type WorkspaceConfig struct {
 	RepoPath string
 	// Path optionally supplies an existing managed worktree path for restore.
 	Path string
+	// Placement is the run's FROZEN execution placement, when this workspace
+	// belongs to one (P3-A §7). It OVERRIDES the project's current execution
+	// mode in the workspace router.
+	//
+	// It exists because those two answers can differ, and the difference is the
+	// bug it closes: a caller who explicitly chose `direct_branch` for one run
+	// of a project configured for isolated worktrees used to get a worktree
+	// anyway, because the router asked the project instead of the run. The
+	// frozen placement is the record of what AO decided for THIS obligation,
+	// and after the freeze it is the authority.
+	//
+	// Empty means "no frozen placement" -- an ordinary non-workflow session --
+	// and the router falls back to project configuration exactly as before.
+	Placement domain.ExecutionPlacementType
 }
 
 // WorkspaceInfo describes a created workspace — where it lives and its branch.

@@ -897,6 +897,60 @@ BEGIN
 		addDDL: `ALTER TABLE conversation_turns ADD COLUMN promotion_started_at TIMESTAMP`},
 	{version: 89, table: "conversation_turns", column: "promoted_to_turn_id",
 		addDDL: `ALTER TABLE conversation_turns ADD COLUMN promoted_to_turn_id TEXT REFERENCES conversation_turns(id) ON DELETE SET NULL`},
+	// 0121_session_turn_completed.sql. Every generated session query selects
+	// this column, so a burned 121 would 500 the whole session list. The
+	// trigger replay is part of the repair: without it a completion that lands
+	// on an already-idle row changes no other column and no subscriber is
+	// invalidated. The historical backfill is deliberately NOT replayed — it
+	// reads branch_locks history that a repaired database may no longer have
+	// in the same shape, and missing it only leaves an old task reading Idle
+	// until its next turn ends.
+	{version: 121, table: "sessions", column: "turn_completed_at",
+		addDDL: `ALTER TABLE sessions ADD COLUMN turn_completed_at TIMESTAMP`,
+		postAdd: []string{
+			`DROP TRIGGER IF EXISTS sessions_cdc_update`,
+			`CREATE TRIGGER sessions_cdc_update
+AFTER UPDATE ON sessions
+WHEN OLD.activity_state <> NEW.activity_state
+    OR OLD.is_terminated <> NEW.is_terminated
+    OR (OLD.first_signal_at IS NULL AND NEW.first_signal_at IS NOT NULL)
+    OR (OLD.turn_completed_at IS NULL AND NEW.turn_completed_at IS NOT NULL)
+    OR (OLD.turn_completed_at IS NOT NULL AND NEW.turn_completed_at IS NULL)
+    OR OLD.preview_url <> NEW.preview_url
+    OR OLD.preview_revision <> NEW.preview_revision
+    OR OLD.display_name <> NEW.display_name
+    OR OLD.terminate_on_pr_merge <> NEW.terminate_on_pr_merge
+    OR OLD.is_pinned <> NEW.is_pinned
+    OR OLD.pinned_at <> NEW.pinned_at
+    OR (OLD.pinned_at IS NULL AND NEW.pinned_at IS NOT NULL)
+    OR (OLD.pinned_at IS NOT NULL AND NEW.pinned_at IS NULL)
+    OR OLD.session_mode <> NEW.session_mode
+    OR OLD.auto_inject_review <> NEW.auto_inject_review
+    OR OLD.auto_review_enabled <> NEW.auto_review_enabled
+    OR OLD.harness <> NEW.harness
+    OR OLD.runtime_launch_id <> NEW.runtime_launch_id
+    OR OLD.agent_session_id <> NEW.agent_session_id
+    OR OLD.native_transcript_path <> NEW.native_transcript_path
+    OR OLD.auto_inject_ci <> NEW.auto_inject_ci
+BEGIN
+    INSERT INTO change_log (project_id, session_id, event_type, payload, created_at)
+    VALUES (NEW.project_id, NEW.id, 'session_updated',
+        json_object(
+            'id', NEW.id,
+            'activity', NEW.activity_state,
+            'isTerminated', json(CASE WHEN NEW.is_terminated THEN 'true' ELSE 'false' END),
+            'terminateOnPrMerge', json(CASE WHEN NEW.terminate_on_pr_merge THEN 'true' ELSE 'false' END),
+            'previewUrl', NEW.preview_url,
+            'previewRevision', NEW.preview_revision,
+            'isPinned', json(CASE WHEN NEW.is_pinned THEN 'true' ELSE 'false' END),
+            'mode', NEW.session_mode,
+            'autoInjectReview', json(CASE WHEN NEW.auto_inject_review THEN 'true' ELSE 'false' END),
+            'autoInjectCI', json(CASE WHEN NEW.auto_inject_ci THEN 'true' ELSE 'false' END),
+            'autoReviewEnabled', json(CASE WHEN NEW.auto_review_enabled THEN 'true' ELSE 'false' END)
+        ),
+        NEW.updated_at);
+END`,
+		}},
 }
 
 // reconcileSchema verifies that the columns in schemaRepairs physically exist

@@ -143,6 +143,20 @@ func TestCORS(t *testing.T) {
 			if tt.headers["Origin"] != "" && resp.Header.Get("Vary") == "" {
 				t.Error("Vary header missing for request with Origin")
 			}
+			// Auth relies on an HttpOnly session cookie, so every browser
+			// request is sent with credentials: "include". Chromium's CORS
+			// credentialed-request check silently discards the response
+			// client-side unless this header is present on every response
+			// that also carries an ACAO — an allowed origin without it
+			// reproduces "Could not reach the daemon" despite the daemon
+			// answering normally.
+			wantACAC := ""
+			if tt.wantACAO != "" {
+				wantACAC = "true"
+			}
+			if got := resp.Header.Get("Access-Control-Allow-Credentials"); got != wantACAC {
+				t.Errorf("Access-Control-Allow-Credentials = %q, want %q", got, wantACAC)
+			}
 		})
 	}
 }
@@ -179,6 +193,7 @@ func TestCORSPreflightHeaders(t *testing.T) {
 		"Access-Control-Allow-Headers":         "content-type",
 		"Access-Control-Max-Age":               "600",
 		"Access-Control-Allow-Private-Network": "true",
+		"Access-Control-Allow-Credentials":     "true",
 	} {
 		if got := resp.Header.Get(header); got != want {
 			t.Errorf("%s = %q, want %q", header, got, want)

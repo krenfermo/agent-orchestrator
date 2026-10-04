@@ -82,8 +82,65 @@ surface (`npm run sqlc`, `npm run api`).
 - Terminal mux over WebSocket (`/mux`): per-client `tmux attach` PTY on
   Darwin/Linux; conpty loopback pty-host on Windows.
 - Lifecycle reducer plus reaper (`internal/observe/reaper`).
+- Truthful terminal state for an ordinary task. A task IS a session, and a task
+  that succeeds stays alive and idle, so "finished" and "never did anything"
+  used to be the same row and both rendered "Idle"/"Inactivo". Lifecycle now
+  records a durable completion receipt (`sessions.turn_completed_at`) when the
+  agent itself reports its turn ended — a Stop-class hook or a Chat driver's
+  turn-completed event — and clears it the moment work is in flight again.
+  `DeriveStatus` turns that receipt into `completed`, ranked below every
+  failure, teardown, attention and pull-request state, so a failed, cancelled or
+  question-asking task can never read as finished. Nothing is inferred from
+  idleness, a stopped runtime or elapsed time, and because the fact is durable
+  the status survives inactivity and daemon restarts. Historical sessions are
+  promoted only where AO already recorded the proof (a session-owned execution
+  lock released because the task's turn ended).
 - Agent adapter platform under `internal/adapters/agent/` (25 adapters) with a
   registry and `ao hooks` activity dispatch.
+- **Durable project memory (P2-A)**: a bounded, provenance-carrying summary of
+  a project — modules, conventions, instructions, dependencies, build/test
+  commands, architecture documents, and per-task outcomes/decisions/risks —
+  kept in SQLite under generation-conditioned CAS, with a restart-safe bounded
+  indexer, a git-diff-driven incremental update path, drift detection with
+  four explicit states, and bounded deterministic per-role context packs for
+  Planner, Worker, Reviewer and Repair. It is a **cache, never a source of
+  truth**: where memory and the working tree disagree the working tree wins and
+  the fact is withheld rather than served. Inspectable via `ao memory
+  status|inspect|rebuild|invalidate` and `/api/v1/projects/{id}/memory`.
+  Delivery to agents rides the existing `AO_CONTEXT_ROUTER` flag and is off by
+  default; nothing schedules an indexing pass automatically yet. See
+  [`project-memory.md`](project-memory.md).
+- **Project memory in the execution cycle (P2-B)**: indexing and incremental
+  sync now happen automatically at the Planner, Worker, Reviewer and Repair
+  boundaries, coalesced so four roles cost at most one sync and a warm project
+  costs none. Memory is attached as a bounded, per-role budgeted pack and
+  deduplicated against the context AO was already sending, with three rollout
+  modes (`AO_MEMORY_MODE=off|assisted|preferred`, default **off**). A verified,
+  committed task records its bounded outcome and — only where the placement
+  proves integration — promotes it; a cancelled one discards it. Measured on
+  this repository: planner AO-assembled context 87,209 → 40,378 bytes (−53.7%)
+  in `preferred` mode, with a warm second task reading zero files. Those figures
+  cover AO-assembled context only; harness reads remain unobservable. Inspect
+  with `ao memory report`. See
+  [`project-memory-optimization.md`](project-memory-optimization.md).
+- **Shared task knowledge (P2-C)**: what one task learns is reusable by the
+  next one, and only by the ones it is relevant and safe for. Task outcomes,
+  decisions and risks carry a bounded lifecycle on the existing memory item —
+  active, superseded, resolved, obsolete, conflicting — so a re-decided topic
+  retires its predecessor and names it rather than overwriting it, and a
+  resolved risk stops being served while keeping the task that closed it. Three
+  sharing scopes (task / workflow / canonical) encode sibling safety directly:
+  an unintegrated worktree's knowledge reaches only the tasks that declared a
+  dependency on it inside its own run, and becomes canonical only when the
+  integration authority can prove the work landed. A relevance gate keyed on
+  EVIDENCE keeps prior task history away from unrelated work. Measured on a
+  store of twelve prior tasks in one module: a task in the same module receives
+  32 shared facts (6,203 pack bytes, ~1,551 tokens); a task in a different
+  module receives **zero** from the same 32 candidates (1,450 bytes). Every
+  execution's context is frozen into a durable manifest of fact identities, so
+  what a Worker knew is checkable rather than suspected. Inspect with `ao memory
+  knowledge|decisions|risks|task|context`. See
+  [`shared-task-knowledge.md`](shared-task-knowledge.md).
 - OpenAPI spec generated from Go DTOs; frontend TS types generated from it and
   drift-checked in CI.
 
@@ -170,6 +227,34 @@ surface (`npm run sqlc`, `npm run api`).
 
 ## In flight / not yet a runtime feature
 
+- **Task queue for direct-branch contention**: an ordinary task that cannot take
+  its project's repository+branch execution lock currently **fails fast** with a
+  409 naming the current owner (Checkpoint 8P-E.14). A workflow in the same
+  situation parks in a durable `waiting_for_branch` state and resumes by itself
+  when the lock frees, because a run has an outbox, checkpoints and a wake
+  scheduler to park in; a task has none of those, so the equivalent behavior
+  needs a queued-task subsystem rather than a flag. Still to build: a durable
+  queued-task state, restart recovery for queued tasks, wake-on-lock-release,
+  automatic spawn/resume, and a truthful "Waiting for branch" state on the
+  Board. Failing fast is deliberately the safe interim: the one thing a blocked
+  task must never do is create a derived branch to work around the contention.
+- **A follow-up turn that loses its branch**: a task session owns its
+  repository+branch for the duration of a turn and gives it back when the turn
+  ends (Checkpoint 8P-E.14A), so a second task may legitimately take that branch
+  while the first sits finished and idle. If the user then sends the first task
+  more work, its turn start finds the branch owned by someone else. AO logs that
+  truthfully and the turn proceeds without the lock, because the signal that a
+  turn started is a hook that fires *after* the prompt was submitted — there is
+  nothing left to refuse, and AO will not silently reroute the work to another
+  branch. Still to build: a refusal at the mediated send/resume paths (before
+  the prompt reaches the agent) and a Board state saying the session's branch
+  was taken over. The task queue above is the same missing subsystem seen from
+  the other end.
+- **A non-PR "ready to merge" for isolated-worktree tasks**: a finished task now
+  reads `completed` from its own durable completion receipt (see Shipped), but
+  in isolated-worktree mode "finished" and "ready for you to take the branch"
+  are still the same word. Distinguishing them needs a durable review/merge
+  readiness fact, not another status derived from the same receipt.
 - **Browser automation acceptance**: the runtime implementation is complete.
   AO packages one
   checksum-pinned Vercel `agent-browser` Rust binary and routes a deliberately

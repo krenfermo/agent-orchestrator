@@ -78,7 +78,7 @@ describe("buildCommands grouping", () => {
 			{ workspaces: workspaces(), currentProjectId: "proj-1" },
 			appI18n.getFixedT("zh-CN"),
 		);
-		expect(byId(items).get("current-new-task")?.title).toBe("新建任务");
+		expect(byId(items).get("current-new-task")?.title).toBe("新建会话");
 	});
 
 	it("puts current-scoped actions in the Current group when the project is valid", () => {

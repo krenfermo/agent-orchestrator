@@ -24,6 +24,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	previewutil "github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
@@ -33,7 +34,25 @@ import (
 )
 
 const (
-	maxPromptLen      = 4096
+	// maxPromptLen bounds a task specification: the spawn prompt and the
+	// delegate brief are the same thing a workflow objective is -- what the
+	// task IS -- so they share its ceiling rather than keeping a second,
+	// smaller one of their own.
+	//
+	// It used to be 4096 bytes, which is about six hundred words. That is not
+	// a specification; it is a sentence. A real brief carries scope,
+	// constraints, acceptance criteria, a test matrix and an explicit
+	// NOT-doing list, and the form refused all of it with TASK_TOO_LONG. The
+	// workflow create path already resolved this at
+	// domain.MaxWorkflowObjectiveBytes (128 KiB), so pointing here at that
+	// same constant is what stops the two halves of AO disagreeing about how
+	// long a task may be. The text is never truncated: over the limit is a
+	// refusal that names both sizes.
+	maxPromptLen = domain.MaxWorkflowObjectiveBytes
+	// maxMessageLen bounds a follow-up message to a live session, which is a
+	// different thing from the task's specification and keeps its own,
+	// smaller cap. A long specification belongs in the task or in an
+	// attachment, not pasted turn by turn into a running agent.
 	maxMessageLen     = 4096
 	maxModelLen       = 256
 	maxDisplayNameLen = 20
@@ -147,6 +166,41 @@ type SessionsController struct {
 	Usage         UsageHookRecorder
 	PreviewServer ManagedPreviewServer
 	Capabilities  SessionCapabilityValidator
+	// Ownership and TrustedLocal back Checkpoint 8P-B.1/8P-B.2's session
+	// ownership scoping. nil Ownership or TrustedLocal true disables
+	// scoping entirely, which is what every pre-8P-B.1 configuration (no
+	// Ownership wired) keeps behaving like. Every handler that reads or
+	// mutates one specific session's content/control calls
+	// sessionAccessAllowed, which delegates to the shared
+	// controllers.AuthorizeSessionAccess boundary -- see session_authz.go.
+	Ownership    SessionOwnershipStore
+	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it replaces the 8P-A/8P-B
+	// owner-equality checks with the canonical permission evaluator; a zero
+	// Guard preserves the pre-P4-B behavior exactly.
+	Guard Guard
+	// AgentAuthority is P5-A phase 2C's central fence; see
+	// AgentAuthorityChecker. Nil leaves behaviour unchanged.
+	AgentAuthority AgentAuthorityChecker
+}
+
+// scoping adapts this controller's two ownership fields into the shared
+// SessionScoping value AuthorizeSessionAccess expects.
+func (c *SessionsController) scoping() SessionScoping {
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard, AgentAuthority: c.AgentAuthority}
+}
+
+// sessionAccessAllowed is this controller's call site for the canonical
+// session authorization boundary (Checkpoint 8P-B.2) -- see
+// controllers.AuthorizeSessionAccess's doc comment for the full contract.
+func (c *SessionsController) sessionAccessAllowed(w http.ResponseWriter, r *http.Request) bool {
+	return AuthorizeSessionAccess(w, r, c.scoping(), sessionID(r))
+}
+
+// sessionAccessAllowedFor is sessionAccessAllowed for a route whose id
+// path param isn't named "sessionId" (e.g. /orchestrators/{id}).
+func (c *SessionsController) sessionAccessAllowedFor(w http.ResponseWriter, r *http.Request, id domain.SessionID) bool {
+	return AuthorizeSessionAccess(w, r, c.scoping(), id)
 }
 
 // Register mounts the session routes on the supplied router.
@@ -220,6 +274,25 @@ func (c *SessionsController) list(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteError(w, r, err)
 		return
 	}
+	// P4-B: a session list spans every project in the installation, so it
+	// filters per row rather than rejecting the request -- a person must never
+	// see the existence of work in a project they cannot reach. The subject is
+	// resolved once and every row is decided from the ProjectID already on it,
+	// so this costs no extra query per session.
+	if c.Guard.Enabled() {
+		sub, ok := c.Guard.Subject(r)
+		if !ok {
+			envelope.WriteError(w, r, identity.Unauthorized())
+			return
+		}
+		visible := make([]domain.Session, 0, len(sessions))
+		for _, sess := range sessions {
+			if sub.Allows(domain.PermSessionRead, domain.ProjectResource(sess.ProjectID)) {
+				visible = append(visible, sess)
+			}
+		}
+		sessions = visible
+	}
 	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(sessions)})
 }
 
@@ -242,14 +315,24 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROJECT_ID_REQUIRED", "projectId is required", nil)
 		return
 	}
+	// Spawning names its own project, so it is gated here rather than through
+	// AuthorizeSessionAccess -- there is no session yet to resolve one from.
+	if !c.Guard.AllowProject(w, r, domain.PermSessionWrite, in.ProjectID, "PROJECT_NOT_FOUND", "project not found") {
+		return
+	}
 	mode, err := domain.ParseSessionMode(string(in.Mode))
 	if err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "SESSION_MODE_INVALID", err.Error(), nil)
 		return
 	}
 	in.Mode = mode
-	if len(in.Prompt) > maxPromptLen {
-		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROMPT_TOO_LONG", "prompt is too long", nil)
+	// Measured in BYTES, and on the trimmed text so the size the refusal
+	// reports is the size the limit was applied to. The prompt itself travels
+	// on untrimmed and untruncated: an over-long brief is refused outright,
+	// never silently shortened into one the author never wrote.
+	if len(strings.TrimSpace(in.Prompt)) > maxPromptLen {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROMPT_TOO_LONG",
+			domain.ObjectiveTooLongMessage(in.Prompt), nil)
 		return
 	}
 	// displayName is optional at the API (the desktop new-task dialog omits it
@@ -295,6 +378,12 @@ func extensionForMimeType(mimeType string) string {
 		"image/jpeg": ".jpg",
 		"image/jpg":  ".jpg",
 		"text/plain": ".txt",
+		// A long task specification is attached as Markdown, and the system
+		// mime table does not reliably map text/markdown -- without this the
+		// fallback below names the file ".markdown", which is the same bytes
+		// under a name no editor or agent expects.
+		"text/markdown":   ".md",
+		"text/x-markdown": ".md",
 	}
 
 	// Check if we have a preferred extension for this MIME type
@@ -386,6 +475,9 @@ func (c *SessionsController) get(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	sess, err := c.Svc.Get(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -397,6 +489,9 @@ func (c *SessionsController) get(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) preview(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/preview")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	sess, err := c.Svc.Get(r.Context(), sessionID(r))
@@ -420,6 +515,9 @@ func (c *SessionsController) preview(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) previewFile(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/preview/files/*")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	sess, err := c.Svc.Get(r.Context(), sessionID(r))
@@ -451,6 +549,12 @@ func (c *SessionsController) PreviewOrigin(w http.ResponseWriter, r *http.Reques
 	}
 	if c.Svc == nil {
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "PREVIEW_NOT_FOUND", "Preview not found", nil)
+		return true
+	}
+	// Checkpoint 8P-B.2: PreviewOrigin runs after identity.Middleware (see
+	// router.go's ordering doc comment) so this now sees a resolved
+	// identity; deny before ever reading the session or serving a byte.
+	if !c.sessionAccessAllowedFor(w, r, id) {
 		return true
 	}
 	sess, err := c.Svc.Get(r.Context(), id)
@@ -529,6 +633,9 @@ func (c *SessionsController) listWorkspaceFiles(w http.ResponseWriter, r *http.R
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/workspace/files")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	files, err := c.Svc.ListWorkspaceFiles(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -540,6 +647,9 @@ func (c *SessionsController) listWorkspaceFiles(w http.ResponseWriter, r *http.R
 func (c *SessionsController) getWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/workspace/file")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	relPath := strings.TrimSpace(r.URL.Query().Get("path"))
@@ -558,6 +668,9 @@ func (c *SessionsController) getWorkspaceFile(w http.ResponseWriter, r *http.Req
 func (c *SessionsController) streamWorkspaceChanges(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/workspace/events")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -629,6 +742,9 @@ func (c *SessionsController) setPreview(w http.ResponseWriter, r *http.Request) 
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/preview")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	var in SetSessionPreviewRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -691,6 +807,9 @@ func (c *SessionsController) clearPreview(w http.ResponseWriter, r *http.Request
 		apispec.NotImplemented(w, r, "DELETE", "/api/v1/sessions/{sessionId}/preview")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	updated, err := c.Svc.SetPreview(r.Context(), sessionID(r), "")
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -704,6 +823,9 @@ func (c *SessionsController) previewServerStatus(w http.ResponseWriter, r *http.
 		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/sessions/{sessionId}/preview/server")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	if !c.authorizePreviewServer(w, r) {
 		return
 	}
@@ -713,6 +835,9 @@ func (c *SessionsController) previewServerStatus(w http.ResponseWriter, r *http.
 func (c *SessionsController) startPreviewServer(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil || c.PreviewServer == nil || c.Capabilities == nil {
 		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/sessions/{sessionId}/preview/server")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in StartPreviewServerRequest
@@ -762,6 +887,9 @@ func (c *SessionsController) startPreviewServer(w http.ResponseWriter, r *http.R
 func (c *SessionsController) stopPreviewServer(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil || c.PreviewServer == nil || c.Capabilities == nil {
 		apispec.NotImplemented(w, r, http.MethodDelete, "/api/v1/sessions/{sessionId}/preview/server")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	if !c.authorizePreviewServer(w, r) {
@@ -868,6 +996,9 @@ func (c *SessionsController) listPRs(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/pr")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	prs, err := c.Svc.ListPRSummaries(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -879,6 +1010,9 @@ func (c *SessionsController) listPRs(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) claimPR(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/pr/claim")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in ClaimPRRequest
@@ -907,6 +1041,9 @@ func (c *SessionsController) rename(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	var in RenameSessionRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -924,9 +1061,21 @@ func (c *SessionsController) rename(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, http.StatusOK, RenameSessionResponse{OK: true, SessionID: sessionID(r), DisplayName: displayName})
 }
 
+// setMergePolicy and setAutoInjectReviewPolicy below are structurally
+// identical, and deliberately stay that way. They are two independently
+// versioned PATCH endpoints with their own request and response DTOs, which
+// the generated OpenAPI schema is derived from; the resemblance is the shape
+// of a one-boolean policy endpoint, not shared logic. Collapsing them behind a
+// generic helper would couple two API surfaces that must be free to diverge,
+// and would cost more indirection than the eight lines it saves.
+//
+//nolint:dupl // distinct endpoints with their own DTOs; see the comment above.
 func (c *SessionsController) setMergePolicy(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}/merge-policy")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in SetSessionMergePolicyRequest
@@ -947,9 +1096,13 @@ func (c *SessionsController) setMergePolicy(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+//nolint:dupl // see setMergePolicy: distinct endpoint, distinct DTOs.
 func (c *SessionsController) setAutoInjectReviewPolicy(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}/auto-inject-review")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in SetSessionAutoInjectReviewRequest
@@ -973,6 +1126,9 @@ func (c *SessionsController) setAutoInjectReviewPolicy(w http.ResponseWriter, r 
 func (c *SessionsController) setAutoInjectCIPolicy(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}/auto-inject-ci")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	// Decode through a pointer so an omitted required field remains distinct
@@ -1009,6 +1165,9 @@ func (c *SessionsController) setReviewer(w http.ResponseWriter, r *http.Request)
 		apispec.NotImplemented(w, r, "PUT", "/api/v1/sessions/{sessionId}/reviewer")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	var in SetSessionReviewerRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -1025,6 +1184,9 @@ func (c *SessionsController) setReviewer(w http.ResponseWriter, r *http.Request)
 func (c *SessionsController) setAutoReview(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PUT", "/api/v1/sessions/{sessionId}/auto-review")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in SetSessionAutoReviewRequest
@@ -1049,6 +1211,9 @@ func (c *SessionsController) restore(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/restore")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	out, err := c.Svc.Restore(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -1060,6 +1225,9 @@ func (c *SessionsController) restore(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) pin(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/pin")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	sess, err := c.Svc.Pin(r.Context(), sessionID(r))
@@ -1075,6 +1243,9 @@ func (c *SessionsController) unpin(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "DELETE", "/api/v1/sessions/{sessionId}/pin")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	sess, err := c.Svc.Unpin(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -1086,6 +1257,9 @@ func (c *SessionsController) unpin(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) resumeAgent(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/resume-agent")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	out, err := c.Svc.ResumeAgent(r.Context(), sessionID(r))
@@ -1104,6 +1278,9 @@ func (c *SessionsController) resumeAgent(w http.ResponseWriter, r *http.Request)
 func (c *SessionsController) switchAgent(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/switch-agent")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in SwitchAgentRequest
@@ -1143,6 +1320,9 @@ func (c *SessionsController) listAgentSwitches(w http.ResponseWriter, r *http.Re
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/agent-switches")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	switches, err := c.Svc.ListAgentSwitches(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -1154,6 +1334,9 @@ func (c *SessionsController) listAgentSwitches(w http.ResponseWriter, r *http.Re
 func (c *SessionsController) submitAgentHandoff(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/agent-switches/{switchId}/handoff")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAgentHandoffBodyBytes)
@@ -1190,6 +1373,9 @@ func (c *SessionsController) kill(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/kill")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	freed, err := c.Svc.Kill(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -1207,6 +1393,9 @@ func (c *SessionsController) kill(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) rollback(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/rollback")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	out, err := c.Svc.RollbackSpawn(r.Context(), sessionID(r))
@@ -1237,6 +1426,9 @@ func (c *SessionsController) cleanup(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/send")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxSendBodyBytes)
@@ -1285,8 +1477,12 @@ func (c *SessionsController) delegateTask(w http.ResponseWriter, r *http.Request
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROJECT_ID_REQUIRED", "projectId is required", nil)
 		return
 	}
-	if len(in.Brief) > maxPromptLen {
-		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "TASK_TOO_LONG", "Task is too long", nil)
+	// Same ceiling and same reasoning as spawn above: the brief IS the task's
+	// specification, so it is bounded where a workflow objective is bounded
+	// and is never truncated.
+	if len(strings.TrimSpace(in.Brief)) > maxPromptLen {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "TASK_TOO_LONG",
+			domain.ObjectiveTooLongMessage(in.Brief), nil)
 		return
 	}
 	if utf8.RuneCountInString(strings.TrimSpace(in.Model)) > maxModelLen {
@@ -1484,6 +1680,9 @@ func (c *SessionsController) listOrchestrators(w http.ResponseWriter, r *http.Re
 func (c *SessionsController) getOrchestrator(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/orchestrators/{id}")
+		return
+	}
+	if !c.sessionAccessAllowedFor(w, r, orchestratorID(r)) {
 		return
 	}
 	sess, err := c.Svc.Get(r.Context(), orchestratorID(r))
